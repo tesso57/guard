@@ -602,7 +602,7 @@ const onlyFlagsFrom = (a: string[], allowed: string[]) => a.slice(2).every((t) =
 
 const READ_ONLY = new Set([
   "ls", "pwd", "echo", "printf", "cat", "head", "tail", "wc", "which", "whoami", "uname", "stat", "cd", "pushd", "popd",
-  "du", "df", "grep", "egrep", "fgrep", "cut", "tr", "basename", "dirname", "realpath", "readlink", "ps", "less", "more",
+  "du", "df", "grep", "egrep", "fgrep", "cut", "tr", "basename", "dirname", "realpath", "readlink", "ps",
   "true", "false", "test", "[", "nl", "column", "diff", "cmp", "comm", "id", "groups", "jq", "type", "file", "md5sum", "sha256sum", "shasum",
 ]);
 const GIT_READ_ONLY = new Set(["status", "diff", "log", "show", "blame", "ls-files", "rev-parse", "describe", "shortlog", "grep", "ls-tree", "cat-file"]);
@@ -629,8 +629,8 @@ export function isReadOnlyArgv(raw: string[]): boolean {
       return !a.slice(1).some((t) => /^-[A-Za-z]*v/.test(t) && !t.startsWith("--"));
     case "less":
     case "more":
-      // +cmd runs less/more commands, including shell escapes
-      return !a.slice(1).some((t) => t.startsWith("+") || isLongOption(t, "--lesskey-file"));
+      // Pagers can run commands (+cmd, lesskey files, LESSOPEN); agents have no terminal to page on anyway
+      return false;
     case "sort":
       // --files0-from reads a list of file names from a file, which can point anywhere
       return !hasShort(a, "o") && !hasLong(a, "--output", "--compress-program", "--files0-from");

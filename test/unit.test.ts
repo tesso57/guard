@@ -245,7 +245,7 @@ const O = { trusted: true, touched: new Set<string>() };
   writeFileSync(join(PROJ, "id_rsa"), "k");
   ok("r3: bare id_rsa is sensitive", !!sens("cat id_rsa"));
   ok("r3: ~/.vault-token is sensitive", !!sens("cat ~/.vault-token"));
-  for (const c of ["sed -n 1,80p README.md", "cd src && ls", "git branch", "git remote -v", "git stash list", "npm ls", "ps aux | grep node", "node --version", "less README.md"])
+  for (const c of ["sed -n 1,80p README.md", "cd src && ls", "git branch", "git remote -v", "git stash list", "npm ls", "ps aux | grep node", "node --version"])
     ok(`r3: common read-only is safe: ${c}`, safe(c));
   ok("r3: sed with a w command is not safe", !safe("sed -n 'w /tmp/x' f"));
   ok("r3: node_modules/.bin is risky", !safeAllow("write", { path: "node_modules/.bin/jest", content: "" }, PROJ, O));
@@ -761,6 +761,15 @@ const O = { trusted: true, touched: new Set<string>() };
   for (const c of ["tree -R -H base . -L 1", "tree -a -R -H base . -L 1 -I .git", "tree -R -l -H base . -L 1", "tree --html=x .", "jq -n -f rd.jq", "jq -nf rd.jq", "jq --from-file rd.jq"])
     ok(`r17: not safe: ${c}`, !safe(c));
   ok("r17: plain tree and jq stay safe", safe("tree -L 2") && safe("jq .name package.json"));
+}
+
+
+// ---------- review 18 ----------
+{
+  const safe = (c: string) => safeAllow("bash", { command: c }, PROJ, O, P(c));
+  for (const c of ["less --lesskey-src=ksrc README.md", "less --lesskey-s=ksrc README.md", "less -k k README.md", "less README.md", "more README.md"])
+    ok(`r18: pagers are never safe: ${c}`, !safe(c));
+  ok("r18: basename/dirname of outside paths stay safe", safe("basename /a/b") && safe("dirname /usr/lib/x"));
 }
 
 // ---------- evaluate ----------

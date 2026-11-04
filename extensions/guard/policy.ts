@@ -135,8 +135,9 @@ function computeInputPaths(tool: string, input: any, cwd: string, parsed?: Parse
     const reads: string[] = [];
     const writes: string[] = [];
     for (const { s, a, bases, dirs } of subsWithBases(parsed, cwd)) {
-      // cd/pushd/popd only move; what runs in the new directory is accounted for by the following subcommands
-      const moves = ["cd", "pushd", "popd"].includes(a[0]);
+      // cd/pushd/popd only move; what runs in the new directory is accounted for by the following subcommands.
+      // basename/dirname only transform strings.
+      const moves = ["cd", "pushd", "popd", "basename", "dirname"].includes(a[0]);
       for (const base of bases) {
         // Both the normalized and the raw argv: normalization drops location values (git -C x, npm --prefix x)
         if (!moves) reads.push(...pathLikeTokens(base, a.slice(1)), ...pathLikeTokens(base, s.argv.slice(1)));
