@@ -8,6 +8,8 @@ export type DialogSpec = {
   body: string;
   tool: string;
   patterns?: Match[];
+  /** Patterns a remembered deny would use (command words plus flags). */
+  denyPatterns?: Match[];
   /** Offer "allow and remember" (false for high risk, ask rules, or calls without a safe pattern). */
   rememberAllow: boolean;
   /** Offer a global allow (low-risk categories in trusted projects only). */
@@ -24,13 +26,14 @@ const BACK = "← Back";
 export async function confirmDialog(ctx: ExtensionContext, s: DialogSpec): Promise<Choice> {
   const opts = { timeout: s.timeoutMs };
   const label = s.patterns?.map((p) => describeMatch(s.tool, p)).join(" / ");
+  const denyLabel = s.denyPatterns?.map((p) => describeMatch(s.tool, p)).join(" / ");
   const sessionOpt = label ? `Allow (this session: ${label})` : undefined;
   const rememberOpt = "Allow and remember… ▸";
   const denyRememberOpt = "Deny and remember… ▸";
   const options = [ONCE];
   if (sessionOpt && s.rememberAllow) options.push(sessionOpt, rememberOpt);
   options.push(DENY);
-  if (label) options.push(denyRememberOpt);
+  if (denyLabel) options.push(denyRememberOpt);
   const askReason = async () => (await ctx.ui.input("Reason (optional, passed to the agent)", "", opts))?.trim() || undefined;
 
   for (;;) {
@@ -39,13 +42,14 @@ export async function confirmDialog(ctx: ExtensionContext, s: DialogSpec): Promi
     if (pick === sessionOpt) return { decision: "allow", scope: "session" };
     if (pick === rememberOpt || pick === denyRememberOpt) {
       const decision = pick === rememberOpt ? "allow" : "deny";
-      const ex = s.patterns?.map((p) => examples(p)).find(Boolean);
+      const pats = decision === "allow" ? s.patterns : s.denyPatterns;
+      const ex = pats?.map((p) => examples(p)).find(Boolean);
       const scopes = [`This project (${s.projectName})`];
       // A deny is always on the safe side, so every scope is offered for it
       if (decision === "deny" || s.globalAllow) scopes.push("Global");
       if (decision === "deny") scopes.push("This session");
       scopes.push(BACK);
-      const head = `Remember as ${decision}: ${label}` + (ex ? `\nmatches: ${ex.yes}\ndoes not match: ${ex.no}` : "");
+      const head = `Remember as ${decision}: ${decision === "allow" ? label : denyLabel}` + (ex ? `\nmatches: ${ex.yes}\ndoes not match: ${ex.no}` : "");
       const sc = await ctx.ui.select(head, scopes, opts);
       if (!sc) return { decision: "deny", scope: "once" };
       if (sc === BACK) continue;

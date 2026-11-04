@@ -4,9 +4,12 @@
  *   sensitive : access to paths that likely hold secrets, or to guard's own state → confirm
  *   safeAllow : obviously safe → allow without calling the model
  */
+import { homedir } from "node:os";
 import { basename } from "node:path";
-import { isReadOnlyArgv, normalizeArgv, type Parsed } from "./shell.ts";
-import { isHomeOrAncestor, isInside, isRiskyProjectFile, pathLikeTokens, protectedReason, realPath, resolvePath, sensitiveReason } from "./paths.ts";
+import { isReadOnlyArgv, nonFlags, normalizeArgv, type Parsed } from "./shell.ts";
+import { gitConfigIsSafe, isHomeOrAncestor, isInside, isRiskyProjectFile, pathLikeTokens, protectedReason, realPath, resolvePath, sensitiveReason } from "./paths.ts";
+
+const BUILTIN_TOOLS = new Set(["bash", "edit", "write", "read", "grep", "find", "ls"]);
 
 const HARD_DENY_BASH: [RegExp, string][] = [
   [/\bmkfs(?:\.\w+)?\b/, "creates a file system"],
@@ -16,14 +19,24 @@ const HARD_DENY_BASH: [RegExp, string][] = [
   [/:\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:/, "fork bomb"],
   [/\bchmod\s+(?:-[A-Za-z]+\s+)*-R\s+(?:0?777|a\+rwx)\s+(?:\/|~|\$HOME)(?=\s|$)/, "opens permissions on / or ~"],
   [/\b(?:history\s+-c|unset\s+HISTFILE)\b/, "erases shell history"],
-  // Fallback for forms the argv check below cannot see (e.g. inside quotes or substitutions)
+  // Fallback for forms the argv check cannot see (e.g. inside substitutions)
   [/\brm\s+(?:-[A-Za-z]*\s+)*-[A-Za-z]*[rR][A-Za-z]*\s+(?:-[A-Za-z-]+\s+)*(?:"|')?(?:\/|~|\$HOME|\$\{HOME\})\/?\*?(?:"|')?(?=\s|$|;|&|\|)/, "recursive deletion of / or ~"],
 ];
+
+/** Spellings of guard's and pi's state that can appear in commands without resolving to a known path. */
+const PROTECTED_MARKERS = ["~/.pi", "$home/.pi", "${home}/.pi", ".pi/agent"];
 
 /** Top-level system directories; deleting them recursively is never intended. */
 const SYSTEM_DIRS = ["/bin", "/boot", "/dev", "/etc", "/lib", "/lib64", "/opt", "/proc", "/sbin", "/sys", "/usr", "/var", "/System", "/Library", "/Applications", "/Users", "/home"];
 
-const nonFlags = (a: string[]) => a.slice(1).filter((t) => !t.startsWith("-"));
+/**
+ * Removes the text inside quotes so hard-deny patterns do not fire on commit messages or search strings.
+ * Double-quoted text that contains a command substitution still runs, so it is kept.
+ */
+function stripQuoted(cmd: string): string {
+  return cmd.replace(/'[^']*'/g, "''").replace(/"((?:[^"\\]|\\.)*)"/g, (m, inner: string) => (/\$\(|`/.test(inner) ? m : '""'));
+}
+
 const optionValue = (a: string[], names: string[]) => {
   const out: string[] = [];
   a.forEach((t, i) => {
@@ -35,9 +48,9 @@ const optionValue = (a: string[], names: string[]) => {
   return out;
 };
 
-/** Paths a bash subcommand writes to, beyond `>` redirects. */
+/** Paths a bash subcommand writes to, beyond redirects. */
 function bashWriteTargets(raw: string[]): string[] {
-  const { argv: a } = normalizeArgv(raw);
+  const { argv: a } = normalizeArgv(raw, "deny");
   const head = a[0];
   const args = nonFlags(a);
   const out = optionValue(a, ["--output"]);
@@ -67,16 +80,46 @@ function bashWriteTargets(raw: string[]): string[] {
     case "uniq":
       if (args.length > 1) out.push(args[1]);
       break;
+    case "tar":
+      out.push(...optionValue(a, ["-C", "--directory", "-f", "--file"]));
+      break;
   }
   return out;
 }
 
-/** The paths a tool call reads and writes, as absolute paths. */
+/** Every string in a nested value, for tools whose argument names we do not know. */
+function allStrings(v: unknown, out: string[] = []): string[] {
+  if (typeof v === "string") out.push(v);
+  else if (Array.isArray(v)) v.forEach((x) => allStrings(x, out));
+  else if (v && typeof v === "object") Object.values(v).forEach((x) => allStrings(x, out));
+  return out;
+}
+
+/**
+ * The paths a tool call reads and writes, as absolute paths.
+ * For bash, `cd` is followed so `cd ~/.pi && printf x >> agent/guard/rules.jsonl` resolves correctly.
+ * For tools other than the built-ins, every path-like string counts as both read and written.
+ */
 export function inputPaths(tool: string, input: any, cwd: string, parsed?: Parsed): { reads: string[]; writes: string[] } {
   if (tool === "bash" && parsed) {
-    const tokens = parsed.subcommands.flatMap((a) => a.slice(1));
-    const writes = [...parsed.writes, ...parsed.subcommands.flatMap(bashWriteTargets)].map((w) => resolvePath(cwd, w));
-    return { reads: pathLikeTokens(cwd, tokens, parsed.globs), writes };
+    const reads: string[] = [];
+    const writes: string[] = [];
+    let dir = cwd;
+    for (const s of parsed.subs) {
+      const { argv: a } = normalizeArgv(s.argv, "deny");
+      reads.push(...pathLikeTokens(dir, a.slice(1)), ...s.reads.map((r) => resolvePath(dir, r)));
+      writes.push(...s.writes.map((w) => resolvePath(dir, w)), ...bashWriteTargets(s.argv).map((w) => resolvePath(dir, w)));
+      if (a[0] === "cd" || a[0] === "pushd") {
+        const target = nonFlags(a)[0];
+        dir = target && target !== "-" ? resolvePath(dir, target) : homedir();
+      }
+    }
+    reads.push(...pathLikeTokens(cwd, [], parsed.globs));
+    return { reads, writes };
+  }
+  if (!BUILTIN_TOOLS.has(tool)) {
+    const ps = pathLikeTokens(cwd, allStrings(input).filter((s) => s.length < 4096 && !/\s/.test(s.trim())));
+    return { reads: ps, writes: ps };
   }
   const p: string[] = [];
   for (const k of ["path", "file_path", "filePath", "file", "dir", "directory"]) if (typeof input?.[k] === "string") p.push(resolvePath(cwd, input[k]));
@@ -94,6 +137,10 @@ function isDangerousDeleteTarget(cwd: string, t: string): boolean {
   return [p, r].some((x) => isHomeOrAncestor(x) || SYSTEM_DIRS.some((d) => x.toLowerCase() === d.toLowerCase()));
 }
 
+function strictlyReadOnly(parsed: Parsed | undefined, writes: string[]): boolean {
+  return !!parsed && parsed.ok && !parsed.dynamic.length && !writes.length && parsed.subcommands.every(isReadOnlyArgv);
+}
+
 export function hardDeny(tool: string, input: any, cwd: string, roots: string[], parsed?: Parsed): string | undefined {
   const { reads, writes } = inputPaths(tool, input, cwd, parsed);
   for (const w of writes) {
@@ -103,22 +150,28 @@ export function hardDeny(tool: string, input: any, cwd: string, roots: string[],
   }
   if (tool !== "bash") return undefined;
   const cmd = String(input?.command ?? "");
-  for (const [re, why] of HARD_DENY_BASH) if (re.test(cmd)) return why;
+  const scan = parsed && parsed.ok && !parsed.dynamic.length ? stripQuoted(cmd) : cmd;
+  for (const [re, why] of HARD_DENY_BASH) if (re.test(scan)) return why;
   if (parsed) {
-    for (const raw of parsed.subcommands) {
-      const { argv: a } = normalizeArgv(raw);
-      if (isRecursiveRm(a) && nonFlags(a).some((t) => isDangerousDeleteTarget(cwd, t))) return "recursive deletion of /, ~ or a system directory";
+    let dir = cwd;
+    for (const s of parsed.subs) {
+      const { argv: a } = normalizeArgv(s.argv, "deny");
+      if (isRecursiveRm(a) && nonFlags(a).some((t) => isDangerousDeleteTarget(dir, t))) return "recursive deletion of /, ~ or a system directory";
+      if (a[0] === "cd" || a[0] === "pushd") dir = nonFlags(a)[0] ? resolvePath(dir, nonFlags(a)[0]) : homedir();
     }
   }
   // Reading guard's or pi's state with a strictly read-only command only needs confirmation (see sensitive);
-  // anything else that touches it is blocked.
-  const touchesProtected = reads.some((p) => protectedReason(p, roots)) || roots.some((r) => cmd.toLowerCase().includes(r.toLowerCase()));
-  const strictlyReadOnly = !!parsed && parsed.ok && !parsed.dynamic.length && !writes.length && parsed.subcommands.every(isReadOnlyArgv);
-  if (touchesProtected && !strictlyReadOnly) return "may modify a protected path (guard rules, pi sessions, extensions or settings)";
+  // anything else that touches it, by path or by name (interpreters, cd + relative paths), is blocked.
+  const lower = cmd.toLowerCase();
+  const touchesProtected =
+    reads.some((p) => protectedReason(p, roots)) || roots.some((r) => lower.includes(r.toLowerCase())) || PROTECTED_MARKERS.some((m) => lower.includes(m));
+  if (touchesProtected && !strictlyReadOnly(parsed, writes)) return "may modify a protected path (guard rules, pi state, extensions or settings)";
   return undefined;
 }
 
 const CONTENT_SEARCH = new Set(["rg", "ag", "ack", "grep", "egrep", "fgrep"]);
+const isGrepFamily = (h: string) => h === "grep" || h === "egrep" || h === "fgrep";
+const recursiveGrep = (args: string[]) => args.some((t) => /^-[A-Za-z]*[rR]/.test(t) || t === "--recursive" || t === "--directories=recurse" || t === "recurse");
 
 export function sensitive(tool: string, input: any, cwd: string, roots: string[], parsed?: Parsed): string | undefined {
   const { reads, writes } = inputPaths(tool, input, cwd, parsed);
@@ -127,18 +180,22 @@ export function sensitive(tool: string, input: any, cwd: string, roots: string[]
     if (r) return r;
     if (protectedReason(p, roots)) return "reads guard or pi internal state";
   }
+  // pi's grep tool searches hidden files recursively
+  if (tool === "grep" && reads.concat(reads.length ? [] : [cwd]).some(isHomeOrAncestor)) return "searches file contents across the home directory";
   if (tool === "bash" && parsed) {
     const cmd = String(input?.command ?? "");
     if (/(?:^|[\s"'/])\.env(?:\.[\w.-]+)?(?=$|[\s"';|&])/.test(cmd) && !/\.env\.(?:example|sample|template)/.test(cmd)) return ".env file";
+    const lower = cmd.toLowerCase();
+    if (PROTECTED_MARKERS.some((m) => lower.includes(m))) return "reads guard or pi internal state";
     for (const raw of parsed.subcommands) {
-      const { argv: a } = normalizeArgv(raw);
+      const { argv: a } = normalizeArgv(raw, "deny");
       const head = a[0];
       const args = a.slice(1);
       if ((head === "env" || head === "printenv") && args.every((t) => t.startsWith("-"))) return "prints all environment variables";
       if ((head === "export" && (args.length === 0 || args.includes("-p"))) || (head === "set" && args.length === 0) || (head === "declare" && args.some((t) => /^-[a-z]*[xp]/.test(t)))) return "prints the environment";
       if (head === "jq" && args.some((t) => t.includes("$ENV") || /\benv\b/.test(t))) return "reads environment variables";
       // Searching file contents across ~ or / reaches every secret in the home directory
-      if (CONTENT_SEARCH.has(head) && (head !== "grep" && head !== "egrep" && head !== "fgrep" || args.some((t) => /^-[A-Za-z]*[rR]/.test(t) || t === "--recursive"))) {
+      if (CONTENT_SEARCH.has(head) && (!isGrepFamily(head) || recursiveGrep(args))) {
         const targets = nonFlags(a).slice(1).map((t) => resolvePath(cwd, t));
         if ((targets.length ? targets : [cwd]).some(isHomeOrAncestor)) return "searches file contents across the home directory";
       }
@@ -147,11 +204,16 @@ export function sensitive(tool: string, input: any, cwd: string, roots: string[]
   return undefined;
 }
 
-export function safeAllow(tool: string, input: any, cwd: string, parsed?: Parsed): boolean {
+export function safeAllow(tool: string, input: any, cwd: string, opts: { trusted: boolean; touched: Set<string> }, parsed?: Parsed): boolean {
   if (tool === "bash") {
     if (!parsed || !parsed.ok || parsed.dynamic.length || parsed.writes.length || !parsed.subcommands.length) return false;
     if (parsed.subcommands.some((a) => bashWriteTargets(a).length)) return false;
-    return parsed.subcommands.every(isReadOnlyArgv);
+    if (!parsed.subcommands.every(isReadOnlyArgv)) return false;
+    // Read-only git still runs commands configured in .git/config, so it needs a trusted repo with a clean config
+    if (parsed.subcommands.some((a) => normalizeArgv(a).argv[0] === "git")) {
+      if (!opts.trusted || !gitConfigIsSafe(cwd) || [...opts.touched].some((p) => /(^|\/)\.git(\/|$)/i.test(p))) return false;
+    }
+    return true;
   }
   if (tool === "edit" || tool === "write") {
     const { writes } = inputPaths(tool, input, cwd);
@@ -165,4 +227,14 @@ export function safeAllow(tool: string, input: any, cwd: string, parsed?: Parsed
     });
   }
   return false;
+}
+
+/** True if every write target stays inside the project and avoids files that tools run later. */
+export function writesStayPlain(tool: string, input: any, cwd: string, parsed?: Parsed): boolean {
+  const { writes } = inputPaths(tool, input, cwd, parsed);
+  const realCwd = realPath(cwd);
+  return writes.every((w) => {
+    const r = realPath(w);
+    return isInside(r, realCwd) && r.toLowerCase() !== realCwd.toLowerCase() && !isRiskyProjectFile(r.slice(realCwd.length + 1));
+  });
 }

@@ -51,10 +51,16 @@ const EXACT_ONLY: string[][] = [
   ["bun", "add"], ["bun", "install"], ["pip", "install"], ["pip3", "install"], ["uv", "add"], ["uv", "pip"], ["cargo", "install"],
   ["go", "install"], ["gem", "install"], ["brew", "install"],
 ];
+/**
+ * Tools whose second word is a subcommand. Only these get prefix rules (`npm test …`); for every other command
+ * the arguments are paths or data (`cp a b`), so the rule must match the whole argv.
+ */
+const SUBCOMMAND_TOOLS = new Set(["git", "npm", "pnpm", "yarn", "bun", "cargo", "go", "make", "gmake", "just", "uv", "poetry", "deno", "mvn", "gradle", "dotnet", "mix", "bundle", "rake", "tox", "nox", "turbo", "nx", "pre-commit"]);
 /** Subcommands whose next word picks an arbitrary script, so the rule needs three words. */
 const SCRIPT_SUBCOMMANDS = new Set(["run", "run-script", "exec", "x", "dlx"]);
 
 const isExactOnly = (a: string[]) => EXACT_ONLY.some((p) => p.every((t, i) => a[i] === t));
+const isWord = (t?: string) => !!t && /^[a-z][\w:@-]*$/i.test(t);
 
 export function newId(): string {
   return randomBytes(3).toString("hex");
@@ -69,43 +75,69 @@ export function describeMatch(tool: string, m: Match): string {
   }
 }
 
-/**
- * Derives rule patterns from a call the user wants to remember. Returns undefined when it cannot be generalized safely.
- * npm test -- foo → ["npm","test"] / npm run lint → ["npm","run","lint"] / rm a.txt → exact / git -C x status → ["git","status"] / python x.py → none
- */
-export function derivePatterns(tool: string, input: any, cwd: string, parsed?: Parsed): Match[] | undefined {
-  if (tool === "bash") {
-    if (!parsed || !parsed.ok || parsed.dynamic.length || !parsed.subcommands.length) return undefined;
-    const out: Match[] = [];
-    for (const raw of parsed.subcommands) {
-      const { argv: a, unknownOption } = normalizeArgv(raw);
-      const sub = a[1];
-      const word = (t?: string) => !!t && /^[a-z][\w:.@/-]*$/i.test(t) && !t.startsWith("-");
-      let m: Match;
-      if (unknownOption || isExactOnly(a) || parsed.writes.length || !word(sub)) m = { kind: "argv-exact", argv: a };
-      else if (SCRIPT_SUBCOMMANDS.has(sub)) m = word(a[2]) ? { kind: "argv", prefix: a.slice(0, 3) } : { kind: "argv-exact", argv: a };
-      else m = { kind: "argv", prefix: a.slice(0, 2) };
-      if (!out.some((x) => JSON.stringify(x) === JSON.stringify(m))) out.push(m);
-    }
-    return out;
-  }
+function dedupe(ms: Match[]): Match[] {
+  return ms.filter((m, i) => ms.findIndex((x) => JSON.stringify(x) === JSON.stringify(m)) === i);
+}
+
+function nonBashPattern(tool: string, input: any, cwd: string): Match[] | undefined {
   const { reads, writes } = inputPaths(tool, input, cwd);
-  const paths = [...reads, ...writes];
-  if (paths.length === 1) return [{ kind: "path", path: paths[0] }];
+  const paths = [...new Set([...reads, ...writes])];
+  if (paths.length === 1 && ["edit", "write", "read", "grep", "find", "ls"].includes(tool)) return [{ kind: "path", path: paths[0] }];
   if (paths.length === 0 && !["bash", "edit", "write", "read"].includes(tool)) return [{ kind: "tool" }];
   return undefined;
 }
 
+/**
+ * Patterns for remembering an allow. Undefined when the call cannot be generalized safely.
+ * npm test -- foo → ["npm","test"] / npm run lint → ["npm","run","lint"] / cp a b → exact / python x.py → none
+ */
+export function derivePatterns(tool: string, input: any, cwd: string, parsed?: Parsed): Match[] | undefined {
+  if (tool !== "bash") return nonBashPattern(tool, input, cwd);
+  if (!parsed || !parsed.ok || parsed.dynamic.length || !parsed.subcommands.length) return undefined;
+  return dedupe(
+    parsed.subs.map((s): Match => {
+      const { argv: a, unknownOption } = normalizeArgv(s.argv);
+      const sub = a[1];
+      if (unknownOption || s.writes.length || isExactOnly(a) || !SUBCOMMAND_TOOLS.has(a[0]) || !isWord(sub)) return { kind: "argv-exact", argv: a };
+      if (SCRIPT_SUBCOMMANDS.has(sub)) return isWord(a[2]) ? { kind: "argv", prefix: a.slice(0, 3) } : { kind: "argv-exact", argv: a };
+      return { kind: "argv", prefix: a.slice(0, 2) };
+    }),
+  );
+}
+
+/**
+ * Patterns for remembering a deny: the command words plus its flags, without values.
+ * `git push --force origin main` → ["git","push","--force"], which also blocks `git push -f origin dev`.
+ */
+export function deriveDenyPatterns(tool: string, input: any, cwd: string, parsed?: Parsed): Match[] | undefined {
+  if (tool !== "bash") return nonBashPattern(tool, input, cwd);
+  if (!parsed || !parsed.subcommands.length) return undefined;
+  return dedupe(
+    parsed.subcommands
+      .map((raw) => normalizeArgv(raw, "deny").argv)
+      .filter((a) => a.length)
+      .map((a): Match => {
+        const words = a.filter((t) => !t.startsWith("-"));
+        const n = SUBCOMMAND_TOOLS.has(a[0]) ? (SCRIPT_SUBCOMMANDS.has(words[1]) ? 3 : 2) : 1;
+        return { kind: "argv", prefix: [...words.slice(0, n), ...a.filter((t) => /^-/.test(t) && !t.includes("="))] };
+      }),
+  );
+}
+
 /** An example the rule matches and one it does not, for the dialog. */
 export function examples(m: Match): { yes: string; no: string } | undefined {
-  if (m.kind === "argv") return { yes: `${m.prefix.join(" ")} --foo`, no: m.prefix.length > 1 ? `${m.prefix.slice(0, -1).join(" ")} publish` : `${m.prefix[0]}x` };
+  if (m.kind === "argv") {
+    const words = m.prefix.filter((t) => !t.startsWith("-"));
+    return { yes: `${m.prefix.join(" ")} --foo`, no: words.length > 1 ? `${words.slice(0, -1).join(" ")} other` : `${words[0]}x` };
+  }
   if (m.kind === "argv-exact") return { yes: m.argv.join(" "), no: `${m.argv.join(" ")} --other` };
   return undefined;
 }
 
-/** Strict matching for allow rules. Prefix rules never cover EXACT_ONLY commands. */
+/** Strict matching for allow rules. Location options never match, and prefix rules never cover EXACT_ONLY commands. */
 function allowMatchesArgv(m: Match, raw: string[]): boolean {
-  const a = normalizeArgv(raw).argv;
+  const { argv: a, unknownOption } = normalizeArgv(raw);
+  if (unknownOption) return false;
   if (m.kind === "argv-exact") return m.argv.length === a.length && m.argv.every((t, i) => a[i] === t);
   if (m.kind === "argv") return !isExactOnly(a) && m.prefix.every((t, i) => a[i] === t);
   return false;
@@ -126,18 +158,22 @@ const FLAG_ALIASES: Record<string, string[]> = {
 
 /**
  * Loose matching for deny and ask rules: the rule's words must prefix the command's words (flags ignored),
- * and each flag in the rule must be present in any spelling (`--force` also matches `-f`, `-fu`, `--force-with-lease`).
+ * and each flag in the rule must be present in any spelling (`--force` also matches `-f`, `-fu`, `--force-with-lease`,
+ * and a `+refspec` for git push).
  */
 function strictMatchesArgv(m: Match, raw: string[]): boolean {
   const ruleTokens = m.kind === "argv" ? m.prefix : m.kind === "argv-exact" ? m.argv : undefined;
   if (!ruleTokens) return false;
-  const a = normalizeArgv(raw).argv;
+  const a = normalizeArgv(raw, "deny").argv;
   const words = a.filter((t, i) => i === 0 || !t.startsWith("-"));
   const ruleWords = ruleTokens.filter((t, i) => i === 0 || !t.startsWith("-"));
   if (!ruleWords.every((t, i) => words[i] === t)) return false;
   const present = (f: string) =>
     a.some((t) => t === f || t.startsWith(`${f}=`) || (f.length === 2 && /^-[A-Za-z]+$/.test(t) && t.includes(f[1])));
-  return ruleTokens.filter((t, i) => i > 0 && t.startsWith("-")).every((f) => present(f) || (FLAG_ALIASES[f] ?? []).some(present));
+  const forcePush = a[0] === "git" && words[1] === "push" && words.slice(2).some((w) => w.startsWith("+"));
+  return ruleTokens
+    .filter((t, i) => i > 0 && t.startsWith("-"))
+    .every((f) => present(f) || (FLAG_ALIASES[f] ?? []).some(present) || ((f === "--force" || f === "-f") && forcePush));
 }
 
 function matchesNonBash(r: Rule, tool: string, input: any, cwd: string, mode: "any" | "all"): boolean {
@@ -149,13 +185,30 @@ function matchesNonBash(r: Rule, tool: string, input: any, cwd: string, mode: "a
   return mode === "any" ? ps.includes(m.path) : ps.length > 0 && ps.every((p) => p === m.path);
 }
 
-function readJsonl(file: string): Rule[] {
+/** Parses a rule file line by line. Broken lines are kept verbatim so a later write never drops them. */
+function readJsonl(file: string): { rules: Rule[]; broken: string[] } {
+  let text = "";
   try {
-    return readFileSync(file, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    text = readFileSync(file, "utf8");
   } catch {
-    return [];
+    return { rules: [], broken: [] };
   }
+  const rules: Rule[] = [];
+  const broken: string[] = [];
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const r = JSON.parse(line);
+      if (r && typeof r.id === "string" && r.match && r.decision) rules.push(r);
+      else broken.push(line);
+    } catch {
+      broken.push(line);
+    }
+  }
+  return { rules, broken };
 }
+
+const sleep = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
 /**
  * Runs fn on the freshly read file contents under a lock, then writes atomically.
@@ -171,16 +224,24 @@ function updateFile(file: string, fn: (rules: Rule[]) => Rule[]): Rule[] {
       break;
     } catch {
       try {
-        if (Date.now() - statSync(lock).mtimeMs > 10_000) rmSync(lock, { recursive: true, force: true });
-      } catch { /* the lock disappeared in the meantime */ }
+        // Steal a stale lock by renaming it first: only one process can win the rename
+        if (Date.now() - statSync(lock).mtimeMs > 10_000) {
+          const grave = `${lock}.stale.${process.pid}.${randomBytes(3).toString("hex")}`;
+          renameSync(lock, grave);
+          rmSync(grave, { recursive: true, force: true });
+          continue;
+        }
+      } catch { /* someone else got there first */ }
       if (Date.now() > deadline) throw new Error(`guard: could not lock ${file}`);
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+      sleep(20);
     }
   }
   try {
-    const next = fn(readJsonl(file));
+    const { rules, broken } = readJsonl(file);
+    const next = fn(rules);
     const tmp = `${file}.${process.pid}.tmp`;
-    writeFileSync(tmp, next.map((r) => JSON.stringify(r)).join("\n") + (next.length ? "\n" : ""), { mode: 0o600 });
+    const lines = [...next.map((r) => JSON.stringify(r)), ...broken];
+    writeFileSync(tmp, lines.join("\n") + (lines.length ? "\n" : ""), { mode: 0o600 });
     renameSync(tmp, file);
     return next;
   } finally {
@@ -199,6 +260,8 @@ export class RuleStore {
   global: Rule[] = [];
   project: Rule[] = [];
   repo: Rule[] = [];
+  /** Problems found while reading rule files, for the user. */
+  warnings: string[] = [];
   /** Bumped on every change, so pre-judged results made before a change can be discarded. */
   version = 0;
   private sessionFromBranch: Rule[] = [];
@@ -216,6 +279,7 @@ export class RuleStore {
     this.cwd = cwd;
     this.trusted = trusted;
     this.mtimes.clear();
+    this.warnings = [];
     this.refresh(true);
     this.repo = [];
     if (trusted) {
@@ -239,7 +303,9 @@ export class RuleStore {
       let m = -1;
       try { m = statSync(f[scope]).mtimeMs; } catch { /* missing file */ }
       if (force || this.mtimes.get(scope) !== m) {
-        this[scope] = readJsonl(f[scope]);
+        const { rules, broken } = readJsonl(f[scope]);
+        this[scope] = rules;
+        if (broken.length) this.warnings.push(`${broken.length} unreadable line(s) in ${f[scope]} were ignored (kept in the file)`);
         this.mtimes.set(scope, m);
         if (!force) this.version++;
       }
@@ -323,8 +389,9 @@ export class RuleStore {
       this.sessionPending.push(rule);
       appendEntry(SESSION_ENTRY, { op: "add", rule });
     } else if (rule.scope === "project" || rule.scope === "global") {
-      this[rule.scope] = updateFile(this.files()[rule.scope], (rs) => [...rs, rule]);
-      this.mtimes.set(rule.scope, statSync(this.files()[rule.scope]).mtimeMs);
+      const file = this.files()[rule.scope];
+      this[rule.scope] = updateFile(file, (rs) => [...rs, rule]);
+      this.mtimes.set(rule.scope, statSync(file).mtimeMs);
     }
     this.version++;
   }

@@ -18,15 +18,21 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { audit, tail } from "./audit.ts";
 import { type Config, loadConfig } from "./config.ts";
 import { buildRequest, callDecisions, evaluate, type ModelVerdict } from "./judge.ts";
-import { isInside, isRiskyProjectFile, protectedRoots, resolvePath } from "./paths.ts";
-import { hardDeny, inputPaths, safeAllow, sensitive } from "./policy.ts";
-import { type Decision, derivePatterns, describeMatch, type Match, newId, type Rule, RuleStore, type Scope } from "./rules.ts";
+import { isInside, protectedRoots, resolvePath } from "./paths.ts";
+import { hardDeny, inputPaths, safeAllow, sensitive, writesStayPlain } from "./policy.ts";
+import { type Decision, deriveDenyPatterns, derivePatterns, describeMatch, type Match, newId, type Rule, RuleStore, type Scope } from "./rules.ts";
 import { normalizeArgv, type Parsed, parseShell } from "./shell.ts";
 import { confirmDialog, preview } from "./ui.ts";
 
 const STATE_ENTRY = "guard-state";
 /** Commands that run project scripts, tests or build files, which an earlier edit may have changed. */
-const SCRIPT_RUNNERS = new Set(["npm", "pnpm", "yarn", "bun", "npx", "make", "gmake", "just", "pytest", "tox", "nox", "cargo", "go", "gradle", "gradlew", "mvn", "rake", "bundle", "deno", "uv", "poetry", "turbo", "nx", "jest", "vitest", "pre-commit", "docker", "docker-compose"]);
+const SCRIPT_RUNNERS = new Set([
+  "npm", "pnpm", "yarn", "bun", "npx", "make", "gmake", "just", "pytest", "tox", "nox", "cargo", "go", "gradle", "gradlew", "mvn", "rake", "bundle",
+  "deno", "uv", "poetry", "turbo", "nx", "jest", "vitest", "pre-commit", "docker", "docker-compose",
+  // Interpreters load project code too (python -m pytest, node --test, sh script.sh)
+  "python", "python3", "node", "ruby", "perl", "php", "sh", "bash", "zsh",
+]);
+const MAX_CACHE = 500;
 
 type ToolCallLike = { id: string; name: string; arguments: any };
 
@@ -36,6 +42,7 @@ type Assessment = {
   reasons: string[];
   verdict?: ModelVerdict;
   patterns?: Match[];
+  denyPatterns?: Match[];
   rememberAllow: boolean;
   globalAllow: boolean;
   rules?: Rule[];
@@ -74,7 +81,7 @@ export default function (pi: ExtensionAPI) {
   const store = new RuleStore();
   let enabled = true;
   let trusted = false;
-  const pending = new Map<string, { hash: string; version: number; p: Promise<Assessment> }>();
+  const pending = new Map<string, { hash: string; version: number; siblings: ToolCallLike[]; p: Promise<Assessment> }>();
   const judged = new Map<string, string>();
   const verdictCache = new Map<string, { at: number; a: Assessment }>();
   /** Files written or edited in this session. */
@@ -84,6 +91,19 @@ export default function (pi: ExtensionAPI) {
   let totalBlocks = 0;
 
   const append = (type: string, data: unknown) => pi.appendEntry(type, data);
+
+  /** Earlier tool calls of the assistant message that contains callId, from the session branch. */
+  function siblingsFromBranch(ctx: ExtensionContext, callId: string): ToolCallLike[] {
+    const branch = ctx.sessionManager.getBranch() as any[];
+    for (let i = branch.length - 1; i >= 0; i--) {
+      const m = branch[i]?.message;
+      if (branch[i]?.type !== "message" || m?.role !== "assistant" || !Array.isArray(m.content)) continue;
+      const calls = m.content.filter((c: any) => c?.type === "toolCall");
+      const idx = calls.findIndex((c: any) => c.id === callId);
+      if (idx >= 0) return calls.slice(0, idx).map((c: any) => ({ id: c.id, name: c.name, arguments: c.arguments }));
+    }
+    return [];
+  }
 
   /** Builds the judge's context from the session branch plus earlier calls of the same assistant message. */
   function context(ctx: ExtensionContext, callId: string, tool: string, parsed: Parsed | undefined, siblings: ToolCallLike[]) {
@@ -126,17 +146,17 @@ export default function (pi: ExtensionAPI) {
     let runsScripts = false;
     if (tool === "bash" && parsed) {
       for (const tok of parsed.subcommands.flat()) attach(resolvePath(ctx.cwd, tok));
-      runsScripts = parsed.subcommands.some((a) => SCRIPT_RUNNERS.has(normalizeArgv(a).argv[0]));
-      // A test runner or build tool loads build files and hooks, so changed ones are relevant even if not named
-      if (runsScripts)
-        for (const p of [...touched, ...virtual.keys()]) if (isInside(p, ctx.cwd) && isRiskyProjectFile(relative(ctx.cwd, p))) attach(p);
+      runsScripts = parsed.subcommands.some((a) => SCRIPT_RUNNERS.has(normalizeArgv(a, "deny").argv[0]));
+      // Test runners, build tools and interpreters load project files that are not named in the command
+      // (tests, conftest.py, package.json scripts, node_modules/.bin), so every file changed this session is relevant
+      if (runsScripts) for (const p of [...touched, ...virtual.keys()]) if (isInside(p, ctx.cwd)) attach(p);
     }
     return {
       userMessages: users.slice(-cfg.contextUserMessages),
       history: calls.slice(-cfg.contextToolCalls),
       attachedFiles: attached,
       fromSiblings,
-      changedBuildFiles: runsScripts && Object.keys(attached).some((p) => isRiskyProjectFile(relative(ctx.cwd, p))),
+      changedFilesRun: runsScripts && Object.keys(attached).length > 0,
     };
   }
 
@@ -154,31 +174,34 @@ export default function (pi: ExtensionAPI) {
     if (hard) return { ...base, action: "block", source: "hard-deny", reasons: [hard] };
 
     store.syncSession(ctx.sessionManager.getBranch() as any[]);
-    const rule = store.find(tool, input, ctx.cwd, parsed);
+    const found = store.find(tool, input, ctx.cwd, parsed);
+    // An allow rule only covers writes that stay inside the project and away from files tools run later
+    const rule = found?.decision === "allow" && !writesStayPlain(tool, input, ctx.cwd, parsed) ? undefined : found;
     const patterns = derivePatterns(tool, input, ctx.cwd, parsed);
+    const denyPatterns = deriveDenyPatterns(tool, input, ctx.cwd, parsed);
     if (rule?.decision === "deny") return { ...base, action: "block", source: "rule-deny", reasons: rule.rules.map((r) => `${r.scope} deny rule: ${describeMatch(r.tool, r.match)}`), rules: rule.rules };
-    if (rule?.decision === "ask") return { ...base, action: "confirm", source: "rule-ask", reasons: rule.rules.map((r) => `${r.scope} ask rule: ${describeMatch(r.tool, r.match)}`), rules: rule.rules, patterns };
+    if (rule?.decision === "ask") return { ...base, action: "confirm", source: "rule-ask", reasons: rule.rules.map((r) => `${r.scope} ask rule: ${describeMatch(r.tool, r.match)}`), rules: rule.rules, denyPatterns };
 
     const cx = context(ctx, callId, tool, parsed, opts.siblings ?? []);
     const sens = sensitive(tool, input, ctx.cwd, roots, parsed);
     // Running a file that an earlier call in the same message is about to change: the human should see it
     const siblingRun = cx.fromSiblings.length ? `runs ${cx.fromSiblings.map((p) => relative(ctx.cwd, p)).join(", ")}, changed earlier in this same message` : undefined;
 
-    if (rule?.decision === "allow" && !sens && !siblingRun && !cx.changedBuildFiles) {
+    if (rule?.decision === "allow" && !sens && !siblingRun && !cx.changedFilesRun) {
       const reasons = rule.rules.map((r) => `${r.scope} allow rule: ${describeMatch(r.tool, r.match)}`);
       if (!process.env.OPENAI_API_KEY) return { ...base, action: "allow", source: "rule-allow", reasons: [...reasons, "rules-only mode (no API key)"], rules: rule.rules };
       try {
         const v = await judgeWithModel(tool, input, ctx, callId, cx, [], true, opts.signal);
         if (v.action === "allow") return { ...base, action: "allow", source: "rule-allow", reasons, rules: rule.rules, verdict: v };
-        return { ...base, action: "confirm", source: "model", reasons: [...v.reasons, "(matches an allow rule, but failed the light check)"], verdict: v, patterns };
+        return { ...base, action: "confirm", source: "model", reasons: [...v.reasons, "(matches an allow rule, but failed the light check)"], verdict: v, denyPatterns };
       } catch (e: any) {
         if (opts.signal?.aborted) throw e;
-        return { ...base, action: "confirm", source: "error", reasons: [...reasons, `light check failed: ${e.message}`], patterns };
+        return { ...base, action: "confirm", source: "error", reasons: [...reasons, `light check failed: ${e.message}`], denyPatterns };
       }
     }
 
-    if (sens) return { ...base, action: "confirm", source: "sensitive", reasons: [`may expose secrets: ${sens}`], patterns, rememberAllow: !!patterns };
-    if (!siblingRun && !cx.changedBuildFiles && safeAllow(tool, input, ctx.cwd, parsed)) return { ...base, action: "allow", source: "safe", reasons: [] };
+    if (sens) return { ...base, action: "confirm", source: "sensitive", reasons: [`may expose secrets: ${sens}`], patterns, denyPatterns, rememberAllow: !!patterns };
+    if (!siblingRun && !cx.changedFilesRun && safeAllow(tool, input, ctx.cwd, { trusted, touched }, parsed)) return { ...base, action: "allow", source: "safe", reasons: [] };
     if (!siblingRun && cfg.skipModelTools.includes(tool)) return { ...base, action: "allow", source: "skip", reasons: [] };
 
     const cacheKey = stableHash([tool, input, ctx.cwd, cx.attachedFiles, cx.userMessages.at(-1), store.version]);
@@ -194,16 +217,22 @@ export default function (pi: ExtensionAPI) {
         (v.addressesEvaluator ?? 1) < t.confirmAddressesEvaluator && !v.truncated;
       // Global allow rules apply in every trusted project, so only read-only calls may become one
       const globalAllow = rememberAllow && trusted && v.category === "read_only" && (v.risk ?? 9) < t.confirmScore;
-      const a: Assessment = { action: v.action, source: "model", reasons: v.reasons, verdict: v, patterns, rememberAllow, globalAllow };
+      const a: Assessment = { action: v.action, source: "model", reasons: v.reasons, verdict: v, patterns, denyPatterns, rememberAllow, globalAllow };
       if (siblingRun && a.action === "allow") {
         a.action = "confirm";
         a.reasons = [...a.reasons, siblingRun];
       }
-      if (a.action === "allow" && !siblingRun) verdictCache.set(cacheKey, { at: Date.now(), a });
+      if (a.action === "allow" && !siblingRun) {
+        if (verdictCache.size >= MAX_CACHE) {
+          for (const [k, e] of verdictCache) if (Date.now() - e.at >= cfg.verdictCacheMs) verdictCache.delete(k);
+          if (verdictCache.size >= MAX_CACHE) verdictCache.delete(verdictCache.keys().next().value!);
+        }
+        verdictCache.set(cacheKey, { at: Date.now(), a });
+      }
       return a;
     } catch (e: any) {
       if (opts.signal?.aborted) throw e;
-      return { ...base, action: "confirm", source: "error", reasons: [`could not judge: ${e.message}`, ...(siblingRun ? [siblingRun] : [])], patterns };
+      return { ...base, action: "confirm", source: "error", reasons: [`could not judge: ${e.message}`, ...(siblingRun ? [siblingRun] : [])], patterns, denyPatterns };
     }
   }
 
@@ -241,7 +270,7 @@ export default function (pi: ExtensionAPI) {
     store.resetSession();
     pending.clear(); judged.clear(); touched.clear(); promoted.clear(); verdictCache.clear();
     consecutiveBlocks = totalBlocks = 0;
-    for (const w of loaded.warnings) ctx.ui.notify(`guard: ${w}`, "warning");
+    for (const w of [...loaded.warnings, ...store.warnings]) ctx.ui.notify(`guard: ${w}`, "warning");
     restoreState(ctx);
     if (!cfg.disabled && !process.env.OPENAI_API_KEY)
       ctx.ui.notify("guard: OPENAI_API_KEY is not set. Running in rules-only mode: calls that need a model judgement will ask you first.", "warning");
@@ -262,9 +291,10 @@ export default function (pi: ExtensionAPI) {
     const calls: ToolCallLike[] = m.content.filter((c: any) => c?.type === "toolCall").map((c: any) => ({ id: c.id, name: c.name, arguments: c.arguments }));
     calls.forEach((c, i) => {
       if (pending.has(c.id)) return;
-      const p = assess(c.id, c.name, c.arguments, ctx, { signal: ctx.signal, siblings: calls.slice(0, i) });
+      const siblings = calls.slice(0, i);
+      const p = assess(c.id, c.name, c.arguments, ctx, { signal: ctx.signal, siblings });
       p.catch(() => {});
-      pending.set(c.id, { hash: stableHash([c.name, c.arguments]), version: store.version, p });
+      pending.set(c.id, { hash: stableHash([c.name, c.arguments]), version: store.version, siblings, p });
     });
   });
 
@@ -284,7 +314,9 @@ export default function (pi: ExtensionAPI) {
     let a: Assessment;
     try {
       // Re-judge when another extension changed the input, or a rule changed, after pre-judging
-      a = pre && pre.hash === hash && pre.version === store.version ? await pre.p : await assess(event.toolCallId, tool, input, ctx, { signal: ctx.signal });
+      a = pre && pre.hash === hash && pre.version === store.version
+        ? await pre.p
+        : await assess(event.toolCallId, tool, input, ctx, { signal: ctx.signal, siblings: pre?.siblings ?? siblingsFromBranch(ctx, event.toolCallId) });
     } catch (e: any) {
       a = { action: "confirm", source: "error", reasons: [`could not judge: ${e.message}`], rememberAllow: false, globalAllow: false };
     }
@@ -345,14 +377,16 @@ export default function (pi: ExtensionAPI) {
       body: `${what}\n\nWhy: ${a.reasons.join("; ") || "-"}`,
       tool,
       patterns: a.patterns,
+      denyPatterns: a.denyPatterns,
       rememberAllow: a.rememberAllow,
       globalAllow: a.globalAllow,
       projectName: basename(ctx.cwd),
       timeoutMs: cfg.dialogTimeoutMs,
     });
     const saved: Rule[] = [];
-    if (choice.scope !== "once" && a.patterns)
-      for (const m of a.patterns) saved.push(addRule(choice.decision, choice.scope, tool, m, ctx.cwd, v?.risk, choice.reason));
+    const toSave = choice.decision === "deny" ? a.denyPatterns : a.patterns;
+    if (choice.scope !== "once" && toSave)
+      for (const m of toSave) saved.push(addRule(choice.decision, choice.scope, tool, m, ctx.cwd, v?.risk, choice.reason));
     if (saved.length)
       ctx.ui.notify(`guard: saved ${choice.scope} ${choice.decision} rule: ${saved.map((r) => `${describeMatch(r.tool, r.match)} [${r.id}]`).join(", ")} (undo: /guard rules rm <id>)`, "info");
     audit({ ...rec, final: choice.decision === "allow" ? "run" : "blocked", choice: `${choice.decision}:${choice.scope}`, ruleIds: [...(rec.ruleIds ?? []), ...saved.map((r) => r.id)] });
@@ -403,7 +437,7 @@ export default function (pi: ExtensionAPI) {
         cfg = loaded;
         store.load(ctx.cwd, ctx.isProjectTrusted());
         verdictCache.clear();
-        for (const w of loaded.warnings) say(`guard: ${w}`, "warning");
+        for (const w of [...loaded.warnings, ...store.warnings]) say(`guard: ${w}`, "warning");
         return say("guard: reloaded settings and rules");
       }
       if (sub === "log") {
@@ -437,7 +471,8 @@ export default function (pi: ExtensionAPI) {
           const [id, to] = [rest[1], rest[2]];
           const r = store.all().find((x) => x.id === id);
           if (!r || (to !== "project" && to !== "global")) return say("usage: /guard rules promote <id> project|global", "warning");
-          if (ctx.hasUI && !(await ctx.ui.confirm("Promote rule", `Save ${describeMatch(r.tool, r.match)} as a ${to} rule?`))) return;
+          const warn = to === "global" && r.decision === "allow" ? " Global allow rules apply in every trusted project; only promote commands that are safe everywhere." : "";
+          if (ctx.hasUI && !(await ctx.ui.confirm("Promote rule", `Save ${describeMatch(r.tool, r.match)} as a ${to} rule?${warn}`))) return;
           const nr = addRule(r.decision, to, r.tool, r.match, ctx.cwd, r.risk, r.note);
           if (r.scope === "session") store.remove(r.id, append);
           return say(`guard: saved as ${to} rule [${nr.id}]`);

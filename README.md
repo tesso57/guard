@@ -27,7 +27,7 @@ Without a key, guard runs in **rules-only mode**: the deterministic checks and y
 | 2 | Deny and ask rules, in any scope | Block / confirm |
 | 3 | Allow rules. For bash, every subcommand must match and the command must have no dynamic parts such as `$()` or variable expansion | Allow, after a light check for exfiltration, actions outside your request, and text aimed at the judge |
 | 4 | Sensitive paths (`~/.ssh`, `.env`, key files, `/proc/*/environ`, …, after resolving symlinks and globs), printing the environment, and content searches across `~` | Confirm |
-| 5 | Safe list: read-only bash commands (judged by command **and options**, so `git log --output=…` or `sort -o` are not read-only), and edits to ordinary files inside the project | Allow, without calling the API |
+| 5 | Safe list: read-only bash commands (judged by command **and options**, so `git log --output=…` or `sort -o` are not read-only; read-only `git` only in trusted repositories whose `.git/config` runs no commands), and edits to ordinary files inside the project | Allow, without calling the API |
 | 6 | Decisions API | Allow / confirm / block |
 
 If the API call fails, the model refuses to answer, or the input had to be truncated, guard takes the safe side: it asks you to confirm, or blocks the call when there is no UI.
@@ -39,7 +39,7 @@ guard sends the Decisions API:
 - your past decisions
 - the call being judged
 
-It never sends the assistant's own text or tool outputs. This limits prompt injection. When bash runs a script that was written or edited earlier, guard attaches what the script will contain, including changes made by earlier calls in the same assistant message that have not run yet; running such a file always asks you first. When a test runner or build tool (`npm`, `pytest`, `make`, …) runs after build files such as `package.json` or `conftest.py` were changed, guard does a full judgement with those files attached, even if an allow rule matches. Strings that look like secrets are redacted before anything is sent.
+It never sends the assistant's own text or tool outputs. This limits prompt injection. File contents guard attaches are passed as an untrusted tool output, never as your words. When bash runs a script that was written or edited earlier, guard attaches what the script will contain, including changes made by earlier calls in the same assistant message that have not run yet; running such a file always asks you first. When a test runner, build tool or interpreter (`npm`, `pytest`, `make`, `python`, …) runs after files in the project were changed in this session, guard does a full judgement with those files attached, even if an allow rule matches. Strings that look like secrets are redacted before anything is sent.
 
 Risk is scored on five levels, from 0 to 4. guard looks at the probability of the high-risk levels as well as the weighted average, so a split such as "45% catastrophic, 55% harmless" is still caught.
 
@@ -54,7 +54,9 @@ Deny and remember… ▸      → this project / global / this session
 ```
 
 - When you remember a decision, guard shows an example that matches the rule and one that does not. For example, `npm test …` matches `npm test -- foo` but not `npm publish`.
-- Commands are normalized first, so `git -C . status` and `/usr/bin/git status` are both `git status`. Script runners keep the script name (`npm run lint` does not cover `npm run deploy`).
+- Only tools with subcommands (`git`, `npm`, `cargo`, `make`, …) get prefix rules. Other commands take paths or data as arguments, so `cp a b` is remembered exactly. Script runners keep the script name (`npm run lint` does not cover `npm run deploy`).
+- Allow rules never match calls that point somewhere else (`npm --prefix /tmp/x test`, `git -C ../other status`) or that write outside the project or to files tools run later.
+- A remembered deny keeps the command words and flags (`git push --force …`), so it also blocks other targets and spellings.
 - Commands that are risky to allow by prefix, such as `rm`, `git push`, `curl` and package installs (`npm install foo`), are remembered only as exact matches, including their arguments.
 - "Allow and remember" is not offered for:
   - high-risk calls
@@ -73,9 +75,9 @@ Deny and remember… ▸      → this project / global / this session
 | Global | `~/.pi/agent/guard/rules.jsonl` | Same as project |
 | Repository | `.pi/guard.json`, read only for trusted projects | Deny and ask rules only, so a repository cannot grant itself permissions |
 
-Precedence follows **strictness**, not scope: deny > ask > allow. A deny rule in any scope therefore wins over an allow rule in any other scope. Deny and ask rules also match other spellings of the same command: `git push --force` matches `git -C . push -f`.
+Precedence follows **strictness**, not scope: deny > ask > allow. A deny rule in any scope therefore wins over an allow rule in any other scope. Deny and ask rules also match other spellings of the same command: `git push --force` matches `git -C . push -f`, `timeout 60 git push -f`, `if …; then git push --force; fi` and `git push origin +main`.
 
-Rule files are updated under a lock, so several pi processes can change rules at the same time without losing updates.
+Rule files are updated under a lock, so several pi processes can change rules at the same time without losing updates. A broken line in a rule file is reported and kept; it never disables the other rules.
 
 ```json
 // .pi/guard.json
