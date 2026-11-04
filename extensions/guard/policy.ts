@@ -136,14 +136,16 @@ function computeInputPaths(tool: string, input: any, cwd: string, parsed?: Parse
     const writes: string[] = [];
     for (const { s, a, bases, dirs } of subsWithBases(parsed, cwd)) {
       // cd/pushd/popd only move; what runs in the new directory is accounted for by the following subcommands.
-      // basename/dirname only transform strings.
-      const moves = ["cd", "pushd", "popd", "basename", "dirname"].includes(a[0]);
+      // basename/dirname/echo/printf only handle strings (wildcards they expand are counted below).
+      const moves = ["cd", "pushd", "popd", "basename", "dirname", "echo", "printf"].includes(a[0]);
       for (const base of bases) {
-        // Both the normalized and the raw argv: normalization drops location values (git -C x, npm --prefix x)
-        if (!moves) reads.push(...pathLikeTokens(base, a.slice(1)), ...pathLikeTokens(base, s.argv.slice(1)));
+        // Both the normalized and the raw argv: normalization drops location values (git -C x, npm --prefix x).
+        // Operands after `--` are paths even when they start with `-` (`cat -- --d/../../.ssh/key`).
+        const afterDashes = (xs: string[]) => (xs.includes("--") ? xs.slice(xs.indexOf("--") + 1).map((t) => (t.startsWith("-") ? `./${t}` : t)) : []);
+        if (!moves) reads.push(...pathLikeTokens(base, a.slice(1)), ...pathLikeTokens(base, s.argv.slice(1)), ...pathLikeTokens(base, afterDashes(s.argv.slice(1))));
         reads.push(...s.reads.flatMap((r) => pathVariants(base, r)));
         // Wildcards in write targets are expanded: `>> ~/.p?/a????/guard/rules.jsonl` writes to the real file
-        writes.push(...[...s.writes, ...bashWriteTargets(s.argv)].flatMap((w) => [...pathVariants(base, w), ...(hasGlob(w) ? globTargets(base, w) : [])]));
+        writes.push(...[...s.writes, ...bashWriteTargets(s.argv)].flatMap((w) => [...pathVariants(base, w.startsWith("-") ? `./${w}` : w), ...(hasGlob(w) ? globTargets(base, w) : [])]));
       }
       if (!moves) for (const d of dirs) if (d !== cwd) reads.push(d);
     }
@@ -626,7 +628,9 @@ export function sensitive(tool: string, input: any, cwd: string, roots: string[]
   if (exposure.hit) return `the search would include ${exposure.hit}`;
   if (tool === "bash" && parsed) {
     const cmd = String(input?.command ?? "");
-    if (/(?:^|[\s"'/:])\.env(?:\.[\w.-]+)?(?=$|[\s"';|&])/.test(cmd) && !/\.env\.(?:example|sample|template)/.test(cmd)) return ".env file";
+    // Static commands are matched without quoted text (echo '.env' >> .gitignore names no file)
+    const envScan = parsed.ok && !parsed.dynamic.length ? stripQuoted(cmd) : cmd;
+    if (/(?:^|[\s"'/:])\.env(?:\.[\w.-]+)?(?=$|[\s"';|&])/.test(envScan) && !/\.env\.(?:example|sample|template)/.test(envScan)) return ".env file";
     // cd to a computed path ($(…), $VAR) and then changing files: guard cannot tell where that happens
     const subs = subsWithBases(parsed, cwd);
     const computedCd = subs.findIndex((x) => ["cd", "pushd"].includes(x.a[0]) && /[$`]/.test(x.s.argv.slice(1).join(" ")));
@@ -674,8 +678,10 @@ const PLAIN_CREATORS = new Set(["mkdir", "touch"]);
 export function safeAllow(tool: string, input: any, cwd: string, opts: { trusted: boolean; touched: Set<string> }, parsed?: Parsed): boolean {
   if (tool === "bash") {
     if (!parsed || !parsed.ok || parsed.dynamic.length || parsed.writes.length || !parsed.subcommands.length) return false;
-    // Glued option values (-f/etc/x, -bf~/x) are easy to misread; such commands always get a judgement
+    // Glued option values (-f/etc/x, -bf~/x) are easy to misread; such commands always get a judgement.
+    // So are words that start with `-` and contain a path (`-- --d/../../x`, `--x/y`).
     if (parsed.subcommands.some(hasGluedPathValue)) return false;
+    if (parsed.subcommands.some((x) => x.slice(1).some((t) => t.startsWith("-") && t.includes("/")))) return false;
     // A wildcard that expands to a word like `--pre=sh` hands the command an option. Wildcards after cd/pushd
     // expand somewhere guard would have to re-derive, so that combination is never a shortcut
     if (parsed.globs.length && parsed.subcommands.some((x) => ["cd", "pushd", "popd"].includes(normalizeArgv(x).argv[0]))) return false;

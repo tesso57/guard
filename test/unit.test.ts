@@ -25,7 +25,7 @@ const ok = (name: string, cond: boolean, extra = "") => {
 };
 
 const { parseShell, normalizeArgv } = await import("../extensions/guard/shell.ts");
-const { hardDeny, sensitive, safeAllow } = await import("../extensions/guard/policy.ts");
+const { hardDeny, sensitive, safeAllow, writesStayPlain } = await import("../extensions/guard/policy.ts");
 const { protectedRoots } = await import("../extensions/guard/paths.ts");
 const { derivePatterns, deriveDenyPatterns, RuleStore } = await import("../extensions/guard/rules.ts");
 const { evaluate } = await import("../extensions/guard/judge.ts");
@@ -821,6 +821,31 @@ const O = { trusted: true, touched: new Set<string>() };
   writeFileSync(join(P20b, "a.md"), "x");
   ok("r20: plain wildcards still work", (clearPathCache(), safeAllow("bash", { command: "cat *.md" }, P20b, O, P("cat *.md"))));
   ok("r20: writing a .git file is not a plain edit", !safeAllow("write", { path: ".git", content: "gitdir: .g" }, P20b, O) && !safeAllow("write", { path: "pkg/.git", content: "gitdir: .g" }, P20b, O));
+}
+
+// ---------- review 21 ----------
+{
+  const { clearPathCache } = await import("../extensions/guard/paths.ts");
+  const PH = join(HOME, "proj");
+  const PS = join(PH, "sub21");
+  mkdirSync(PS, { recursive: true });
+  const rootsH = protectedRoots(PH, join(AGENT, "sessions"));
+  const safe = (c: string, cwd = PH) => (clearPathCache(), safeAllow("bash", { command: c }, cwd, O, P(c)));
+  const sens = (c: string) => (clearPathCache(), sensitive("bash", { command: c }, PH, rootsH, P(c)));
+  const hd = (c: string, cwd = PH) => (clearPathCache(), hardDeny("bash", { command: c }, cwd, protectedRoots(cwd, join(AGENT, "sessions")), P(c)));
+  // P0-1: operands after -- that start with "-"
+  const c1 = "mkdir -p -- --d && cat -- --d/../../../.ssh/id_ed25519";
+  ok("r21: cat -- --d/../.. is not safe", !safe(c1));
+  const c2 = "mkdir -p -- --d/../../../.pi/./agent/extensions/pwn && touch -- --d/../../../.pi/./agent/extensions/pwn/x.ts";
+  ok("r21: creating an extension through -- --d/.. is blocked", !!hd(c2) || !safe(c2));
+  ok("r21: cp -- into the agent dir through --d/.. is hard-denied", !!hd("cp -- evil.ts --d/../../.pi/./agent/extensions/e.ts"));
+  ok("r21: touch -- --pre=sh is not a plain change", !writesStayPlain("bash", { command: "touch -- --pre=sh" }, PH, P("touch -- --pre=sh")) && !safe("touch -- --pre=sh"));
+  // P0-2: bracket classes in wildcards
+  ok("r21: [[=p=]] reaching guard's rules is hard-denied", !!hd("echo x >> ../../.[[=p=]]i/agent/guard/rules.jsonl", PS));
+  for (const c of ["rg foo [[:print:]]*", "cat server.k[[=e=]]y", "cat [[.-.]]x"]) ok(`r21: not safe: ${c}`, !safe(c));
+  // P2
+  ok("r21: adding .env to .gitignore is not sensitive", !sens("echo '.env' >> .gitignore"));
+  ok("r21: a quoted '' before 2> is an argument", P("grep ''2>/dev/null x").subs[0].argv.includes("2"));
 }
 
 // ---------- evaluate ----------

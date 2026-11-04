@@ -58,8 +58,9 @@ export function clearPathCache() {
  * not descend into them), with dotfiles matched only by patterns that start with a dot. Its time is charged to the
  * per-judgement budget; `truncated` when there were more than 500 matches or too many entries to look at.
  */
-function timedGlob(p: string, cwd: string): { list: string[]; truncated: boolean } {
+function timedGlob(pattern: string, cwd: string): { list: string[]; truncated: boolean } {
   const t = Date.now();
+  const p = simplifyBrackets(pattern);
   try {
     const abs = isAbsolute(p);
     let current = [abs ? "/" : cwd];
@@ -154,7 +155,7 @@ export function ignoreFilesReinclude(root: string): boolean {
  * `around`: some match may be a root or one of its parents (deleting or moving it affects the root).
  */
 export function globMayReach(cwd: string, pattern: string, roots: string[]): { into: boolean; around: boolean } {
-  const q = normalizeInput(pattern).replace(/\*\*+/g, "*");
+  const q = simplifyBrackets(normalizeInput(pattern).replace(/\*\*+/g, "*"));
   const abs = normalize(isAbsolute(q) ? q : `${cwd}/${q}`);
   const pSegs = abs.split("/").filter(Boolean);
   let into = false;
@@ -172,6 +173,36 @@ export function globMayReach(cwd: string, pattern: string, roots: string[]): { i
     if (pSegs.length <= rSegs.length && test(`/${rSegs.slice(0, pSegs.length).join("/")}`, pSegs)) around = true;
   }
   return { into, around };
+}
+
+/**
+ * Replaces bracket expressions that node's matcher does not understand ([[=c=]], [[.c.]], [[:print:]]) with `?`,
+ * which matches at least as much: wider matches are the safe side for every check that uses them.
+ */
+function simplifyBrackets(p: string): string {
+  let out = "";
+  for (let i = 0; i < p.length; i++) {
+    if (p[i] !== "[") {
+      out += p[i];
+      continue;
+    }
+    let j = i + 1;
+    if (p[j] === "!" || p[j] === "^") j++;
+    if (p[j] === "]") j++;
+    let special = false;
+    while (j < p.length && p[j] !== "]") {
+      if (p[j] === "[" && /[=.:]/.test(p[j + 1] ?? "")) {
+        special = true;
+        const close = p.indexOf(`${p[j + 1]}]`, j + 2);
+        j = close === -1 ? p.length : close + 2;
+      } else j++;
+    }
+    if (special && j < p.length) {
+      out += "?";
+      i = j;
+    } else out += p[i];
+  }
+  return out;
 }
 
 /** Patterns node's glob may take super-linear time on, or that the per-judgement time budget no longer allows. */

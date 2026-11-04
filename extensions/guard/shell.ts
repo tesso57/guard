@@ -100,6 +100,8 @@ export function parseShell(cmd: string, depth = 0): Parsed {
     else if (tok !== "" || tokQuoted) cur.argv.push(tok);
     if (globbed && tok !== "[" && tok !== "]") {
       globs.push(tok);
+      // [=c=], [.c.] and [:class:] inside brackets are not understood by node's matcher
+      if (/\[[=.:]/.test(tok)) dyn("character class or equivalence class in a wildcard");
       // Quoting inside a wildcard word makes its characters literal; guard's copy has lost that information
       if (tokEscaped) dyn("quoted characters in a wildcard");
     }
@@ -254,7 +256,7 @@ export function parseShell(cmd: string, depth = 0): Parsed {
         i++;
         continue;
       }
-      if (inTok && /^\d+$/.test(tok)) { tok = ""; inTok = false; }
+      if (inTok && /^\d+$/.test(tok) && !tokQuoted) { tok = ""; inTok = false; }
       endTok();
       if (n === "<" && cmd[i + 2] === "<") {
         // <<< word: a here-string, the word is data
@@ -334,7 +336,7 @@ export function parseShell(cmd: string, depth = 0): Parsed {
       continue;
     }
     if (c === ">") {
-      if (inTok && /^\d+$/.test(tok)) { tok = ""; inTok = false; }
+      if (inTok && /^\d+$/.test(tok) && !tokQuoted) { tok = ""; inTok = false; }
       endTok();
       if (n === ">" || n === "|") i++;
       if (cmd[i + 1] === "&") {
@@ -551,7 +553,12 @@ function canonicalScripts(a: string[]): string[] {
   return a;
 }
 
-export const nonFlags = (a: string[]) => a.slice(1).filter((t) => !t.startsWith("-"));
+/** Operands: words that are not options. Everything after `--` is an operand, even if it starts with `-`. */
+export const nonFlags = (a: string[]) => {
+  const rest = a.slice(1);
+  const dd = rest.indexOf("--");
+  return dd < 0 ? rest.filter((t) => !t.startsWith("-")) : [...rest.slice(0, dd).filter((t) => !t.startsWith("-")), ...rest.slice(dd + 1)];
+};
 
 const SHELL_NAMES = new Set(["sh", "bash", "zsh", "dash", "ksh", "ash", "busybox"]);
 
