@@ -1,9 +1,12 @@
-import { existsSync, globSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, globSync, lstatSync, readFileSync, readlinkSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { AGENT_DIR } from "./config.ts";
 
 const HOME = normalize(homedir());
+/** Same set pi normalizes to a plain space before resolving tool paths. */
+const UNICODE_SPACES = /[   -​  　﻿]/g;
 
 function expandHome(p: string): string {
   if (p === "~") return HOME;
@@ -11,51 +14,86 @@ function expandHome(p: string): string {
   return p.replace(/^\$HOME(?=\/|$)/, HOME).replace(/^\$\{HOME\}(?=\/|$)/, HOME);
 }
 
-/** Strips a leading @, expands ~ and $HOME, and resolves against cwd. Trailing slashes are removed. */
+/**
+ * Mirrors pi's own path handling for tool arguments (utils/paths normalizePath): unicode spaces, a leading @, ~,
+ * and file:// URLs (with percent-decoding). An unparseable file URL keeps a `file:` marker that is treated as sensitive.
+ */
+function normalizeInput(p: string): string {
+  let q = p.replace(UNICODE_SPACES, " ");
+  if (q.startsWith("@")) q = q.slice(1);
+  q = expandHome(q);
+  if (/^file:\/\//i.test(q)) {
+    try {
+      q = fileURLToPath(q);
+    } catch {
+      return `/__guard_unparseable_file_url__/${q}`;
+    }
+  }
+  return q;
+}
+
+/** Resolves a path against cwd the way pi does, then normalizes it lexically. Trailing slashes are removed. */
 export function resolvePath(cwd: string, p: string): string {
-  const q = expandHome(p.replace(/^@/, ""));
+  const q = normalizeInput(p);
   return normalize(isAbsolute(q) ? q : resolve(cwd, q)).replace(/(.)\/+$/, "$1");
 }
 
-/**
- * Resolves `..` physically: each `..` is applied after the symlinks before it are resolved, as the kernel does.
- * `/proc/self/cwd/../.aws` or `link/../x` therefore end up where the system would really open them.
- */
-function physicalPath(cwd: string, p: string): string {
-  const q = expandHome(p.replace(/^@/, ""));
-  let cur = isAbsolute(q) ? "/" : cwd;
-  for (const seg of q.split("/")) {
-    if (!seg || seg === ".") continue;
-    cur = seg === ".." ? dirname(realPath(cur)) : join(cur, seg);
-  }
-  return realPath(cur);
+const realCache = new Map<string, string>();
+
+/** Clears the symlink cache; called once per judgement so results reflect the current file system. */
+export function clearPathCache() {
+  realCache.clear();
 }
 
-/** Every way a path token may be interpreted: lexically, and physically when symlinks or .. can change the result. */
+/**
+ * Resolves a path the way the kernel would open it: component by component, following symlinks (also dangling
+ * ones, whose target does not exist yet) and applying `..` after the symlinks before it. Parts that do not exist
+ * are kept as written.
+ */
+export function realPath(p: string): string {
+  const cached = realCache.get(p);
+  if (cached !== undefined) return cached;
+  let parts = p.split("/").filter(Boolean);
+  let cur = "/";
+  let hops = 0;
+  let missing = false;
+  while (parts.length) {
+    const seg = parts.shift()!;
+    if (seg === ".") continue;
+    if (seg === "..") {
+      cur = dirname(cur);
+      continue;
+    }
+    const next = join(cur, seg);
+    if (!missing) {
+      try {
+        const st = lstatSync(next);
+        if (st.isSymbolicLink() && hops++ < 40) {
+          const target = readlinkSync(next);
+          parts = [...target.split("/").filter(Boolean), ...parts];
+          if (isAbsolute(target)) cur = "/";
+          continue;
+        }
+      } catch {
+        missing = true;
+      }
+    }
+    cur = next;
+  }
+  if (realCache.size > 10_000) realCache.clear();
+  realCache.set(p, cur);
+  return cur;
+}
+
+/** Every way a path token may be interpreted: lexically, and physically (symlinks and `..` resolved in order). */
 export function pathVariants(cwd: string, p: string): string[] {
+  const q = normalizeInput(p);
   const lexical = resolvePath(cwd, p);
-  if (!/(^|\/)\.\.(\/|$)/.test(p) && !p.includes("/proc/")) return [lexical];
-  const physical = physicalPath(cwd, p);
+  const physical = realPath(isAbsolute(q) ? q : `${cwd}/${q}`);
   const out = physical === lexical ? [lexical] : [lexical, physical];
   // Keep /proc/<pid>/{root,cwd,fd} visible: normalizing `..` away would hide that the path goes through them
-  if (/^\/proc\/[^/]+\/(root|cwd|fd)(\/|$)/.test(p)) out.push(p);
+  if (/^\/proc\/[^/]+\/(root|cwd|fd)(\/|$)/.test(q)) out.push(q);
   return out;
-}
-
-/** Resolves symlinks. For paths that do not exist yet, resolves the deepest existing parent. */
-export function realPath(p: string): string {
-  let cur = p;
-  const tail: string[] = [];
-  for (;;) {
-    try {
-      return join(realpathSync(cur), ...tail.reverse());
-    } catch {
-      const parent = dirname(cur);
-      if (parent === cur) return p;
-      tail.push(basename(cur));
-      cur = parent;
-    }
-  }
 }
 
 /** Case-insensitive containment, so `.PI/extensions` is caught on case-insensitive file systems. */
@@ -69,15 +107,30 @@ export function isHomeOrAncestor(p: string): boolean {
   return isInside(HOME, p);
 }
 
+/** System locations whose contents are public on a normal machine. */
+const PUBLIC_DIRS = ["/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/opt/homebrew", "/System", "/Library/Developer", "/dev/null"];
+
+/**
+ * Where guard may let a read happen without asking: inside the project (unless the project is the home directory
+ * itself or one of its ancestors) or in public system directories. Checked on both the literal and the real path.
+ */
+export function isFreelyReadable(p: string, cwd: string): boolean {
+  const ok = (x: string) =>
+    (!isHomeOrAncestor(cwd) && isInside(x, cwd) && isInside(x, realPath(cwd))) || PUBLIC_DIRS.some((d) => isInside(x, d));
+  return ok(p) && ok(realPath(p));
+}
+
 function sensitiveOne(abs: string): string | undefined {
+  if (abs.startsWith("/__guard_unparseable_file_url__/")) return "unparseable file:// URL";
   const rel = isInside(abs, HOME) ? relative(HOME, abs) : undefined;
   const first = rel?.split(sep)[0];
   if (rel !== undefined && first) {
     if ([".ssh", ".aws", ".gnupg", ".gpg", ".kube", ".docker", ".azure", ".password-store", ".terraform.d", ".m2", ".gradle"].includes(first)) return `~/${first}`;
     const two = rel.split(sep).slice(0, 2).join("/");
-    if ([".config/gh", ".config/gcloud", ".config/op", ".config/hub", ".config/rclone", ".config/sops", ".cargo/credentials", ".cargo/credentials.toml", ".claude/.credentials.json", ".codex/auth.json"].includes(two))
+    if ([".config/gh", ".config/gcloud", ".config/op", ".config/hub", ".config/rclone", ".config/sops", ".config/github-copilot", ".cargo/credentials", ".cargo/credentials.toml", ".claude/.credentials.json", ".codex/auth.json", ".gem/credentials"].includes(two))
       return `~/${two}`;
-    if ([".netrc", ".npmrc", ".pypirc", ".git-credentials", ".bash_history", ".zsh_history", ".vault-token", ".pgpass", ".my.cnf", ".terraformrc", ".yarnrc.yml", ".claude.json", ".s3cfg"].includes(rel)) return `~/${rel}`;
+    if ([".netrc", ".npmrc", ".pypirc", ".git-credentials", ".bash_history", ".zsh_history", ".python_history", ".psql_history", ".vault-token", ".pgpass", ".my.cnf", ".terraformrc", ".yarnrc.yml", ".claude.json", ".s3cfg"].includes(rel)) return `~/${rel}`;
+    if (rel.startsWith(join(".cache", "huggingface")) || rel.startsWith(join(".local", "share", "fish"))) return `~/${two}`;
   }
   if (/^\/proc\/.*\/environ$/.test(abs)) return "process environment";
   if (/^\/proc\/[^/]+\/(root|cwd)(\/|$)/.test(abs)) return "another view of the file system through /proc";
@@ -112,6 +165,12 @@ export function protectedReason(abs: string, roots: string[]): string | undefine
   const real = realPath(abs);
   const hit = roots.find((r) => isInside(abs, r) || isInside(real, r) || isInside(real, realPath(r)));
   return hit ? `protected path (${hit})` : undefined;
+}
+
+/** True if moving, deleting or overwriting p would also affect a protected root (p is the root or one of its parents). */
+export function containsProtectedRoot(p: string, roots: string[]): boolean {
+  const real = realPath(p);
+  return roots.some((r) => isInside(r, p) || isInside(realPath(r), real));
 }
 
 /**
@@ -152,32 +211,41 @@ export function isRiskyProjectFile(rel: string): boolean {
 export function pathLikeTokens(cwd: string, tokens: string[], globs: string[] = []): string[] {
   const out: string[] = [];
   for (const t of tokens) {
-    if (!t || (t.startsWith("-") && !t.includes("="))) continue;
+    if (!t || t.length > 4096 || (t.startsWith("-") && !t.includes("="))) continue;
     const v = t.includes("=") ? t.slice(t.indexOf("=") + 1) : t;
     if (!v) continue;
     // Bare names count when they look secret (id_rsa, cert.p12) or name an existing file in cwd
-    if (v.startsWith("~") || v.startsWith("/") || v.startsWith(".") || v.includes("/") || v.startsWith("$HOME") || /\.(env|pem|key|p12|pfx)$/i.test(v) || /^id_[a-z0-9]+/.test(v) || (v.length < 256 && existsSync(resolve(cwd, v))))
+    if (/^(~|\/|\.|\$HOME|file:)/i.test(v) || v.includes("/") || /\.(env|pem|key|p12|pfx)$/i.test(v) || /^id_[a-z0-9]+/.test(v) || existsSync(resolve(cwd, v)))
       out.push(...pathVariants(cwd, v));
   }
   for (const g of globs) out.push(...expandGlob(cwd, g));
   return out;
 }
 
-/** Expands a glob against the file system. Returns [] when it matches nothing or cannot be expanded. */
+/**
+ * The static directory a glob starts from, plus its matches when expansion is cheap.
+ * `**` is not recursive in bash without globstar, so it is treated as `*`; deep patterns are not expanded at all.
+ */
 function expandGlob(cwd: string, pattern: string): string[] {
+  const p = normalizeInput(pattern).replace(/\*\*+/g, "*");
+  const segs = p.split("/");
+  const firstGlob = segs.findIndex((s) => /[*?[]/.test(s));
+  const base = resolvePath(cwd, segs.slice(0, Math.max(firstGlob, 0)).join("/") || (isAbsolute(p) ? "/" : "."));
+  const out = [base];
+  if (segs.filter((s) => /[*?[]/.test(s)).length > 3) return out;
   try {
-    const p = expandHome(pattern);
-    return globSync(p, { cwd }).slice(0, 500).map((m) => resolvePath(cwd, String(m)));
+    out.push(...globSync(p, { cwd }).slice(0, 500).map((m) => resolvePath(cwd, String(m))));
   } catch {
-    return [];
+    /* nothing to add */
   }
+  return out;
 }
 
 /**
  * Git runs commands named in a repository's config even for read-only subcommands (core.fsmonitor on `git status`,
  * diff drivers and textconv on `git diff`/`git log -p`, filters, gpg, hooks). Read-only git is only safe when the
  * repository's config (including config.worktree) sets none of them. Keys are parsed, so branch names or URLs that
- * merely contain such words do not count.
+ * merely contain such words do not count; anything the parser cannot read counts as unsafe.
  */
 const DANGEROUS_GIT_KEY = [
   /^core\.(fsmonitor|hookspath|sshcommand|askpass|gitproxy|alternaterefscommand)$/,
@@ -190,20 +258,28 @@ const DANGEROUS_GIT_KEY = [
   /^extensions\.worktreeconfig$/,
 ];
 
-function gitConfigKeys(text: string): string[] {
+/** Parsed keys, or undefined when a line cannot be understood. */
+function gitConfigKeys(text: string): string[] | undefined {
+  // A trailing backslash continues the value on the next line
+  const lines = text.replace(/\\\r?\n/g, " ").split(/\r?\n/);
   const keys: string[] = [];
   let section = "";
-  for (const raw of text.split("\n")) {
-    const line = raw.replace(/^\s+/, "");
-    if (!line || line.startsWith("#") || line.startsWith(";")) continue;
-    const sec = /^\[\s*([^\]\s"]+)(?:\s+"((?:[^"\\]|\\.)*)")?\s*\]/.exec(line);
-    if (sec) {
-      // [section "sub"] and the legacy [section.sub] both become section.sub
-      section = (sec[2] !== undefined ? `${sec[1]}.${sec[2]}` : sec[1]).toLowerCase();
-      continue;
+  for (const raw of lines) {
+    let line = raw.trim();
+    while (line) {
+      if (line.startsWith("#") || line.startsWith(";")) break;
+      const sec = /^\[\s*([^\]\s"]+)(?:\s+"((?:[^"\\]|\\.)*)")?\s*\]/.exec(line);
+      if (sec) {
+        // [section "sub"] and the legacy [section.sub] both become section.sub; a key may follow on the same line
+        section = (sec[2] !== undefined ? `${sec[1]}.${sec[2]}` : sec[1]).toLowerCase();
+        line = line.slice(sec[0].length).trim();
+        continue;
+      }
+      const key = /^([A-Za-z][\w-]*)\s*(=|$)/.exec(line);
+      if (!key || !section) return undefined;
+      keys.push(`${section}.${key[1].toLowerCase()}`);
+      break;
     }
-    const key = /^([A-Za-z][\w-]*)/.exec(line);
-    if (key && section) keys.push(`${section}.${key[1].toLowerCase()}`);
   }
   return keys;
 }
@@ -215,7 +291,8 @@ function configIsClean(file: string): boolean {
   } catch (e: any) {
     return e?.code === "ENOENT";
   }
-  return !gitConfigKeys(text).some((k) => DANGEROUS_GIT_KEY.some((re) => re.test(k)));
+  const keys = gitConfigKeys(text);
+  return !!keys && !keys.some((k) => DANGEROUS_GIT_KEY.some((re) => re.test(k)));
 }
 
 /** A directory git would use as a repository by itself (HEAD, objects/ and refs/). */
@@ -223,9 +300,9 @@ function looksLikeGitDir(d: string): boolean {
   return existsSync(join(d, "HEAD")) && existsSync(join(d, "objects")) && existsSync(join(d, "refs"));
 }
 
+/** Follows git's discovery order: `<dir>/.git` first, then `<dir>` itself as a git directory, then the parent. */
 export function gitConfigIsSafe(cwd: string): boolean {
   for (let d = cwd; ; d = dirname(d)) {
-    if (looksLikeGitDir(d)) return configIsClean(join(d, "config")) && configIsClean(join(d, "config.worktree"));
     const dotgit = join(d, ".git");
     if (existsSync(dotgit)) {
       try {
@@ -242,6 +319,7 @@ export function gitConfigIsSafe(cwd: string): boolean {
         return false;
       }
     }
+    if (looksLikeGitDir(d)) return configIsClean(join(d, "config")) && configIsClean(join(d, "config.worktree"));
     if (dirname(d) === d) return true; // not a git repository
   }
 }

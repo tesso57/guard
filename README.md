@@ -27,8 +27,10 @@ Without a key, guard runs in **rules-only mode**: the deterministic checks and y
 | 2 | Deny and ask rules, in any scope | Block / confirm |
 | 3 | Allow rules. For bash, every subcommand must match and the command must have no dynamic parts such as `$()` or variable expansion | Allow, after a light check for exfiltration, actions outside your request, and text aimed at the judge |
 | 4 | Sensitive paths (`~/.ssh`, `.env`, key files, `/proc/*/environ`, …, after resolving symlinks and globs), printing the environment, and content searches across `~` | Confirm |
-| 5 | Safe list: read-only bash commands (judged by command **and options**, so `git log --output=…` or `sort -o` are not read-only; read-only `git` only in trusted repositories whose `.git/config` runs no commands, and never after `cd`), `mkdir`/`touch` of ordinary project paths, and edits to ordinary files inside the project | Allow, without calling the API |
+| 5 | Safe list, which only covers reads **inside the project** (or public system directories such as `/usr`): read-only bash commands (judged by command **and options**, so `git log --output=…` or `sort -o` are not read-only; read-only `git` only in trusted repositories whose `.git/config` runs no commands, and never after `cd`), `mkdir`/`touch` of ordinary project paths, and edits to ordinary files inside the project | Allow, without calling the API |
 | 6 | Decisions API | Allow / confirm / block |
+
+The built-in read tools (`read`, `grep`, `find`, `ls`) skip the model only for paths inside the project; anywhere else they are judged like any other call. Paths are resolved exactly as pi resolves them (`file://` URLs, `~`, unicode spaces), symlinks are followed even when their target does not exist yet, and `..` is applied after symlinks as the kernel does. When pi runs in your home directory (or above), nothing counts as a plain project read or edit.
 
 If the API call fails, the model refuses to answer, or the input had to be truncated, guard takes the safe side: it asks you to confirm, or blocks the call when there is no UI.
 

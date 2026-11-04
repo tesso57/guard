@@ -18,7 +18,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { audit, tail } from "./audit.ts";
 import { type Config, loadConfig } from "./config.ts";
 import { buildRequest, callDecisions, evaluate, type ModelVerdict } from "./judge.ts";
-import { isInside, protectedRoots, resolvePath } from "./paths.ts";
+import { clearPathCache, isFreelyReadable, isInside, protectedRoots, resolvePath } from "./paths.ts";
 import { hardDeny, inputPaths, safeAllow, sensitive, writesStayPlain } from "./policy.ts";
 import { type Decision, deriveDenyPatterns, derivePatterns, describeMatch, type Match, newId, type Rule, RuleStore, type Scope } from "./rules.ts";
 import { normalizeArgv, type Parsed, parseShell } from "./shell.ts";
@@ -161,7 +161,8 @@ export default function (pi: ExtensionAPI) {
     let runsScripts = false;
     if (tool === "bash" && parsed) {
       for (const tok of parsed.subcommands.flat()) attach(resolvePath(ctx.cwd, tok));
-      runsScripts = parsed.subcommands.some((a) => SCRIPT_RUNNERS.has(normalizeArgv(a, "deny").argv[0]));
+      // Interpreters, runners, and scripts run by path (./run.sh) execute file contents
+      runsScripts = parsed.subcommands.some((a) => SCRIPT_RUNNERS.has(normalizeArgv(a, "deny").argv[0]) || normalizeArgv(a, "deny").argv.length > 0 && (a[0] ?? "").includes("/"));
       if (runsScripts) {
         // The script an interpreter or runner is given is what will run, whoever wrote it
         for (const tok of parsed.subcommands.flat()) {
@@ -206,6 +207,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   async function assess(callId: string, tool: string, input: any, ctx: ExtensionContext, opts: { signal?: AbortSignal; siblings?: ToolCallLike[] } = {}): Promise<Assessment> {
+    clearPathCache();
     const parsed = tool === "bash" ? parseShell(String(input?.command ?? "")) : undefined;
     const roots = protectedRoots(ctx.cwd, ctx.sessionManager.getSessionDir());
     const base = { rememberAllow: false, globalAllow: false };
@@ -242,7 +244,11 @@ export default function (pi: ExtensionAPI) {
 
     if (sens) return { ...base, action: "confirm", source: "sensitive", reasons: [`may expose secrets: ${sens}`], patterns, denyPatterns, rememberAllow: !!patterns };
     if (!siblingRun && !cx.changedFilesRun && safeAllow(tool, input, ctx.cwd, { trusted, touched }, parsed)) return { ...base, action: "allow", source: "safe", reasons: [] };
-    if (!siblingRun && cfg.skipModelTools.includes(tool)) return { ...base, action: "allow", source: "skip", reasons: [] };
+    if (!siblingRun && cfg.skipModelTools.includes(tool)) {
+      // read/grep/find/ls skip the model only inside the project (or public system directories)
+      const reads = inputPaths(tool, input, ctx.cwd).reads;
+      if ((reads.length ? reads : [ctx.cwd]).every((p) => isFreelyReadable(p, ctx.cwd))) return { ...base, action: "allow", source: "skip", reasons: [] };
+    }
 
     const cacheKey = stableHash([tool, input, ctx.cwd, cx.attachedFiles, cx.userMessages.at(-1), store.version]);
     const cached = verdictCache.get(cacheKey);
@@ -371,8 +377,12 @@ export default function (pi: ExtensionAPI) {
     const onAllowed = () => {
       consecutiveBlocks = 0;
       // Files this call changes; running them later attaches their new contents
-      const parsedNow = tool === "bash" ? parseShell(String(input?.command ?? "")) : undefined;
-      if (tool === "edit" || tool === "write" || tool === "bash") for (const p of inputPaths(tool, input, ctx.cwd, parsedNow).writes) touched.add(p);
+      try {
+        const parsedNow = tool === "bash" ? parseShell(String(input?.command ?? "")) : undefined;
+        if (tool === "edit" || tool === "write" || tool === "bash") for (const p of inputPaths(tool, input, ctx.cwd, parsedNow).writes) touched.add(p);
+      } catch {
+        /* bookkeeping must never turn an approved call into a block */
+      }
       if (a.rules && a.source === "rule-allow") {
         store.hit(a.rules);
         for (const r of a.rules) {

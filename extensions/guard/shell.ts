@@ -43,7 +43,13 @@ const HARMLESS_DEVICES = /^\/dev\/(null|stdout|stderr|tty|fd\/[0-2])$/;
 
 const UNUSUAL_CHAR = new RegExp("[\\u0000-\\u0008\\u000b-\\u001f\\u007f\\u00a0\\u1680\\u2000-\\u200f\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff]");
 
+/** Longer commands are not analyzed (they go to the model), which also bounds the parser's work. */
+const MAX_COMMAND = 16 * 1024;
+const FD_DUP = /(\d+|-)(?=$|[\s;&|<>()])/y;
+const FD_DIGITS = /(\d+|-)/y;
+
 export function parseShell(cmd: string): Parsed {
+  if (cmd.length > MAX_COMMAND) return { ok: false, subs: [], subcommands: [], writes: [], globs: [], dynamic: ["command too long to analyze"] };
   const dynamic: string[] = [];
   const globs: string[] = [];
   const subs: Sub[] = [];
@@ -51,6 +57,7 @@ export function parseShell(cmd: string): Parsed {
   let tok = "";
   let inTok = false;
   let globbed = false;
+  let tildeStart = false;
   let quote: "'" | '"' | null = null;
   let pendingRedirect: "write" | "read" | null = null;
 
@@ -60,10 +67,13 @@ export function parseShell(cmd: string): Parsed {
     else if (pendingRedirect === "read") cur.reads.push(tok);
     else cur.argv.push(tok);
     if (globbed && tok !== "[" && tok !== "]") globs.push(tok);
+    // ~user, ~+ and ~- are expanded by the shell to other directories
+    if (tildeStart && !/^~(\/|$)/.test(tok)) dyn("tilde expansion");
     pendingRedirect = null;
     tok = "";
     inTok = false;
     globbed = false;
+    tildeStart = false;
   };
   const endCmd = () => {
     endTok();
@@ -156,7 +166,8 @@ export function parseShell(cmd: string): Parsed {
       if (n === "&") {
         // <&3 duplicates an input descriptor
         i++;
-        const m = /^(\d+|-)/.exec(cmd.slice(i + 1));
+        FD_DIGITS.lastIndex = i + 1;
+        const m = FD_DIGITS.exec(cmd);
         if (m) i += m[0].length;
         continue;
       }
@@ -176,7 +187,8 @@ export function parseShell(cmd: string): Parsed {
       if (cmd[i + 1] === "&") {
         i++;
         // >&2, >&- and 2>&1 duplicate descriptors; any other word (>&file) is a file that receives stdout and stderr
-        const m = /^(\d+|-)(?=$|[\s;&|<>()])/.exec(cmd.slice(i + 1));
+        FD_DUP.lastIndex = i + 1;
+        const m = FD_DUP.exec(cmd);
         if (m) {
           i += m[0].length;
           continue;
@@ -196,8 +208,9 @@ export function parseShell(cmd: string): Parsed {
     }
     if (c === "{") {
       const close = cmd.indexOf("}", i);
-      if (close > i && /,|\.\./.test(cmd.slice(i, close))) dyn("brace expansion");
+      if (close > i && /,|\.\./.test(cmd.slice(i, Math.min(close, i + 512)))) dyn("brace expansion");
     }
+    if (c === "~" && !inTok) tildeStart = true;
     if (c === "*" || c === "?" || c === "[") globbed = true;
     // Non-ASCII whitespace and control characters can hide tokens from a human reviewer
     if (UNUSUAL_CHAR.test(c)) dyn("unusual whitespace or control character");
@@ -281,7 +294,8 @@ export function normalizeArgv(a: string[], mode: "allow" | "deny" = "allow"): { 
   let rest = [...a];
   if (mode === "deny") {
     for (;;) {
-      const w = WRAPPERS[basename(rest[0] ?? "")];
+      const name = basename(rest[0] ?? "");
+      const w = Object.hasOwn(WRAPPERS, name) ? WRAPPERS[name] : undefined;
       if (!w) break;
       const head = basename(rest.shift()!);
       while (rest.length && (rest[0].startsWith("-") || (head === "env" && /^[A-Za-z_]\w*=/.test(rest[0])))) {
@@ -295,7 +309,7 @@ export function normalizeArgv(a: string[], mode: "allow" | "deny" = "allow"): { 
   if (!rest.length) return { argv: [], unknownOption: false };
   const head = basename(rest[0]);
   rest = rest.slice(1);
-  const g = GLOBAL_OPTIONS[head];
+  const g = Object.hasOwn(GLOBAL_OPTIONS, head) ? GLOBAL_OPTIONS[head] : undefined;
   let unknownOption = false;
   if (g) {
     while (rest.length) {
@@ -313,8 +327,27 @@ export function normalizeArgv(a: string[], mode: "allow" | "deny" = "allow"): { 
       break;
     }
   }
+  // A location option anywhere (`npm test --prefix /tmp/x`, `make test -C ../x`) makes the call act on another project
+  if (mode === "allow" && Object.hasOwn(LOCATION_ANYWHERE, head) && rest.some((t) => LOCATION_ANYWHERE[head].some((o) => t === o || t.startsWith(`${o}=`) || (o.startsWith("--") && isLongOption(t, o)) || (o.length === 2 && t.startsWith(o)))))
+    unknownOption = true;
   return { argv: canonicalScripts([head, ...rest]), unknownOption };
 }
+
+/** Options that point a tool at another project, wherever they appear in argv. */
+const LOCATION_ANYWHERE: Record<string, string[]> = {
+  npm: ["--prefix", "--userconfig", "--globalconfig"],
+  pnpm: ["-C", "--dir"],
+  yarn: ["--cwd"],
+  bun: ["--cwd", "--config"],
+  cargo: ["--manifest-path", "--config", "-Z"],
+  make: ["-C", "--directory", "-f", "--file", "--makefile", "--eval", "-I", "--include-dir"],
+  gmake: ["-C", "--directory", "-f", "--file", "--makefile", "--eval", "-I", "--include-dir"],
+  go: ["-C", "-modfile", "-exec", "-toolexec"],
+  just: ["-f", "--justfile", "-d", "--working-directory"],
+  deno: ["--config", "-c"],
+  uv: ["--directory", "--project", "--config-file"],
+  poetry: ["-C", "--directory", "-P", "--project"],
+};
 
 /** Builtin commands of package managers that also run package.json scripts by name (`yarn deploy`). */
 const PM_BUILTINS: Record<string, Set<string>> = {
@@ -328,7 +361,7 @@ function canonicalScripts(a: string[]): string[] {
   const [head, sub] = a;
   if (!sub) return a;
   if (head === "npm" && ["run-script", "rum", "urn"].includes(sub)) return [head, "run", ...a.slice(2)];
-  if (PM_BUILTINS[head] && !sub.startsWith("-") && !PM_BUILTINS[head].has(sub) && !sub.includes("/") && !sub.includes(".")) return [head, "run", ...a.slice(1)];
+  if (Object.hasOwn(PM_BUILTINS, head) && !sub.startsWith("-") && !PM_BUILTINS[head].has(sub) && !sub.includes("/") && !sub.includes(".")) return [head, "run", ...a.slice(1)];
   return a;
 }
 

@@ -7,15 +7,15 @@
 import { homedir } from "node:os";
 import { basename } from "node:path";
 import { isLongOption, isReadOnlyArgv, nonFlags, normalizeArgv, type Parsed } from "./shell.ts";
-import { gitConfigIsSafe, isHomeOrAncestor, isInside, isRiskyProjectFile, pathLikeTokens, pathVariants, protectedReason, realPath, resolvePath, sensitiveReason } from "./paths.ts";
+import { containsProtectedRoot, gitConfigIsSafe, isFreelyReadable, isHomeOrAncestor, isInside, isRiskyProjectFile, pathLikeTokens, pathVariants, protectedReason, realPath, resolvePath, sensitiveReason } from "./paths.ts";
 
 const BUILTIN_TOOLS = new Set(["bash", "edit", "write", "read", "grep", "find", "ls"]);
 
 const HARD_DENY_BASH: [RegExp, string][] = [
   [/\bmkfs(?:\.\w+)?\b/, "creates a file system"],
   [/\bdd\b[^;&|]*\bof=\/dev\/(?:sd|nvme|disk|hd|xvd|vd|mmcblk)/, "writes directly to a block device"],
-  [/\b(?:curl|wget|fetch)\b[^;&]*\|\s*(?:sudo\s+)?(?:env\s+)?(?:ba|z|da|k|fi)?sh\b/, "pipes a download straight into a shell"],
-  [/\b(?:curl|wget)\b[^;&]*\|\s*(?:sudo\s+)?(?:python[23]?|node|perl|ruby)\b/, "pipes a download straight into an interpreter"],
+  [/\b(?:curl|wget|fetch)\b[^;&]*\|&?\s*(?:sudo\s+)?(?:env\s+)?(?:\S*\/)?(?:ba|z|da|k|fi)?sh\b/, "pipes a download straight into a shell"],
+  [/\b(?:curl|wget)\b[^;&]*\|&?\s*(?:sudo\s+)?(?:\S*\/)?(?:python[23]?|node|perl|ruby)\b/, "pipes a download straight into an interpreter"],
   [/:\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:/, "fork bomb"],
   [/\bchmod\s+(?:-[A-Za-z]+\s+)*-R\s+(?:0?777|a\+rwx)\s+(?:\/|~|\$HOME)(?=\s|$)/, "opens permissions on / or ~"],
   [/\b(?:history\s+-c|unset\s+HISTFILE)\b/, "erases shell history"],
@@ -25,6 +25,9 @@ const HARD_DENY_BASH: [RegExp, string][] = [
 
 /** Spellings of guard's and pi's state that can appear in commands without resolving to a known path. */
 const PROTECTED_MARKERS = ["~/.pi", "$home/.pi", "${home}/.pi", ".pi/agent"];
+
+/** Commands that move, delete, copy over or extract into whole directory trees. */
+const TREE_CHANGERS = new Set(["rm", "rmdir", "mv", "cp", "rsync", "tar", "unzip", "ln", "install", "chmod", "chown", "chattr", "shred"]);
 
 /** Top-level system directories; deleting them recursively is never intended. */
 const SYSTEM_DIRS = ["/bin", "/boot", "/dev", "/etc", "/lib", "/lib64", "/opt", "/proc", "/sbin", "/sys", "/usr", "/var", "/System", "/Library", "/Applications", "/Users", "/home"];
@@ -112,12 +115,17 @@ export function inputPaths(tool: string, input: any, cwd: string, parsed?: Parse
     let dir = cwd;
     for (const s of parsed.subs) {
       const { argv: a } = normalizeArgv(s.argv, "deny");
-      reads.push(...pathLikeTokens(dir, a.slice(1)), ...s.reads.flatMap((r) => pathVariants(dir, r)));
-      writes.push(...[...s.writes, ...bashWriteTargets(s.argv)].flatMap((w) => pathVariants(dir, w)));
+      // The shell may not be where we think (a failed cd, cd inside a pipeline, popd), so paths are resolved
+      // against both the tracked directory and the original cwd, and the tracked directory itself counts as read.
+      for (const base of dir === cwd ? [cwd] : [dir, cwd]) {
+        reads.push(...pathLikeTokens(base, a.slice(1)), ...s.reads.flatMap((r) => pathVariants(base, r)));
+        writes.push(...[...s.writes, ...bashWriteTargets(s.argv)].flatMap((w) => pathVariants(base, w)));
+      }
       if (a[0] === "cd" || a[0] === "pushd") {
         const target = nonFlags(a)[0];
         dir = target && target !== "-" ? resolvePath(dir, target) : homedir();
-      }
+      } else if (a[0] === "popd") dir = cwd;
+      if (dir !== cwd) reads.push(dir);
     }
     reads.push(...pathLikeTokens(cwd, [], parsed.globs));
     return { reads, writes };
@@ -156,13 +164,22 @@ export function hardDeny(tool: string, input: any, cwd: string, roots: string[],
   if (tool !== "bash") return undefined;
   const cmd = String(input?.command ?? "");
   const scan = parsed && parsed.ok && !parsed.dynamic.length ? stripQuoted(cmd) : cmd;
-  for (const [re, why] of HARD_DENY_BASH) if (re.test(scan)) return why;
+  // Very long commands are not scanned (bounded work); they cannot be parsed either and go to the model
+  if (scan.length <= 16 * 1024) for (const [re, why] of HARD_DENY_BASH) if (re.test(scan)) return why;
   if (parsed) {
     let dir = cwd;
     for (const s of parsed.subs) {
       const { argv: a } = normalizeArgv(s.argv, "deny");
-      if (isRecursiveRm(a) && nonFlags(a).some((t) => isDangerousDeleteTarget(dir, t))) return "recursive deletion of /, ~ or a system directory";
+      const bases = dir === cwd ? [cwd] : [dir, cwd];
+      if (isRecursiveRm(a) && nonFlags(a).some((t) => bases.some((b) => isDangerousDeleteTarget(b, t)))) return "recursive deletion of /, ~ or a system directory";
+      // Moving, deleting or overwriting a parent of guard's state (`mv ~/.pi x`, `cp -r payload/.pi ~/`) affects it too
+      if (TREE_CHANGERS.has(a[0])) {
+        const targets = [...nonFlags(a), ...optionValue(a, ["-C", "--directory", "-d", "-t", "--target-directory"])];
+        if (targets.some((t) => bases.some((b) => pathVariants(b, t).some((p) => containsProtectedRoot(p, roots)))))
+          return "moves, deletes or overwrites a directory that contains guard's or pi's state";
+      }
       if (a[0] === "cd" || a[0] === "pushd") dir = nonFlags(a)[0] ? resolvePath(dir, nonFlags(a)[0]) : homedir();
+      else if (a[0] === "popd") dir = cwd;
     }
   }
   // Reading guard's or pi's state with a strictly read-only command only needs confirmation (see sensitive);
@@ -186,23 +203,25 @@ export function sensitive(tool: string, input: any, cwd: string, roots: string[]
     if (protectedReason(p, roots)) return "reads guard or pi internal state";
   }
   // pi's grep tool searches hidden files recursively
-  if (tool === "grep" && reads.concat(reads.length ? [] : [cwd]).some(isHomeOrAncestor)) return "searches file contents across the home directory";
+  if (tool === "grep" && reads.concat(reads.length ? [] : [cwd]).some((p) => isHomeOrAncestor(p) || isHomeOrAncestor(realPath(p)))) return "searches file contents across the home directory";
   if (tool === "bash" && parsed) {
     const cmd = String(input?.command ?? "");
     if (/(?:^|[\s"'/])\.env(?:\.[\w.-]+)?(?=$|[\s"';|&])/.test(cmd) && !/\.env\.(?:example|sample|template)/.test(cmd)) return ".env file";
     const lower = cmd.toLowerCase();
     if (PROTECTED_MARKERS.some((m) => lower.includes(m))) return "reads guard or pi internal state";
     for (const raw of parsed.subcommands) {
+      // `env` alone prints the environment; it is only a wrapper when a command follows
+      const rawHead = basename(raw[0] ?? "");
+      if ((rawHead === "env" || rawHead === "printenv") && raw.slice(1).every((t) => t.startsWith("-") || /^[A-Za-z_]\w*=/.test(t))) return "prints all environment variables";
       const { argv: a } = normalizeArgv(raw, "deny");
       const head = a[0];
       const args = a.slice(1);
-      if ((head === "env" || head === "printenv") && args.every((t) => t.startsWith("-"))) return "prints all environment variables";
       if ((head === "export" && (args.length === 0 || args.includes("-p"))) || (head === "set" && args.length === 0) || (head === "declare" && args.some((t) => /^-[a-z]*[xp]/.test(t)))) return "prints the environment";
       if (head === "jq" && args.some((t) => t.includes("$ENV") || /\benv\b/.test(t))) return "reads environment variables";
       // Searching file contents across ~ or / reaches every secret in the home directory
       if (CONTENT_SEARCH.has(head) && (!isGrepFamily(head) || recursiveGrep(args))) {
-        const targets = nonFlags(a).slice(1).map((t) => resolvePath(cwd, t));
-        if ((targets.length ? targets : [cwd]).some(isHomeOrAncestor)) return "searches file contents across the home directory";
+        // Any directory this command may search, after cd and symlinks
+        if ([cwd, ...reads].some((p) => isHomeOrAncestor(p) || isHomeOrAncestor(realPath(p)))) return "searches file contents across the home directory";
       }
     }
   }
@@ -222,19 +241,24 @@ export function safeAllow(tool: string, input: any, cwd: string, opts: { trusted
       else if (bashWriteTargets(a).length || !isReadOnlyArgv(a)) return false;
     }
     if (creates && !writesStayPlain(tool, input, cwd, parsed)) return false;
+    // Only reads inside the project or in public system directories happen without asking
+    if (!inputPaths(tool, input, cwd, parsed).reads.every((p) => isFreelyReadable(p, cwd))) return false;
     const heads = parsed.subcommands.map((a) => normalizeArgv(a).argv[0]);
     // Read-only git still runs commands configured in .git/config, so it needs a trusted repo with a clean config,
-    // and it must run in the project itself (not after `cd` into another repository)
-    const gitAt = heads.indexOf("git");
-    if (gitAt >= 0) {
-      if (heads.slice(0, gitAt).some((h) => h === "cd" || h === "pushd" || h === "popd")) return false;
-      if (!opts.trusted || !gitConfigIsSafe(cwd) || [...opts.touched].some((p) => /(^|\/)\.git(\/|$)/i.test(p))) return false;
+    // must run in the project itself (no cd anywhere in the command), and nothing this session may have planted a
+    // repository-like directory (HEAD, config, objects/, refs/)
+    if (heads.includes("git")) {
+      if (heads.some((h) => h === "cd" || h === "pushd" || h === "popd")) return false;
+      if (!opts.trusted || !gitConfigIsSafe(cwd)) return false;
+      if ([...opts.touched].some((p) => /(^|\/)(\.git|objects|refs)(\/|$)/i.test(p) || /^(HEAD|config|packed-refs|config\.worktree)$/.test(basename(p)))) return false;
     }
     return true;
   }
   if (tool === "edit" || tool === "write") {
     const { writes } = inputPaths(tool, input, cwd);
     if (!writes.length) return false;
+    // When pi runs in ~ (or above), "the project" would be the whole home directory
+    if (isHomeOrAncestor(cwd)) return false;
     const realCwd = realPath(cwd);
     return writes.every((w) => {
       const r = realPath(w);
@@ -248,6 +272,7 @@ export function safeAllow(tool: string, input: any, cwd: string, opts: { trusted
 
 /** True if every write target stays inside the project and avoids files that tools run later. */
 export function writesStayPlain(tool: string, input: any, cwd: string, parsed?: Parsed): boolean {
+  if (isHomeOrAncestor(cwd)) return false;
   const { writes } = inputPaths(tool, input, cwd, parsed);
   const realCwd = realPath(cwd);
   return writes.every((w) => {

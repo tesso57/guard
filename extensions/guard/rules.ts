@@ -173,7 +173,7 @@ function strictMatchesArgv(m: Match, raw: string[]): boolean {
   const forcePush = a[0] === "git" && words[1] === "push" && words.slice(2).some((w) => w.startsWith("+"));
   return ruleTokens
     .filter((t, i) => i > 0 && t.startsWith("-"))
-    .every((f) => present(f) || (FLAG_ALIASES[f] ?? []).some(present) || ((f === "--force" || f === "-f") && forcePush));
+    .every((f) => present(f) || (Object.hasOwn(FLAG_ALIASES, f) ? FLAG_ALIASES[f] : []).some(present) || ((f === "--force" || f === "-f") && forcePush));
 }
 
 const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "ash"]);
