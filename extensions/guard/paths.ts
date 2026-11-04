@@ -1,4 +1,4 @@
-import { existsSync, globSync, lstatSync, readdirSync, readFileSync, readlinkSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, matchesGlob, normalize, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -53,15 +53,92 @@ export function clearPathCache() {
   globSpent = 0;
 }
 
-/** globSync with its time charged to the per-judgement budget. `truncated` when there were more than 500 matches. */
+/**
+ * Expands a pattern the way bash does: segment by segment, following symlinked directories (node's globSync does
+ * not descend into them), with dotfiles matched only by patterns that start with a dot. Its time is charged to the
+ * per-judgement budget; `truncated` when there were more than 500 matches or too many entries to look at.
+ */
 function timedGlob(p: string, cwd: string): { list: string[]; truncated: boolean } {
   const t = Date.now();
   try {
-    const all = globSync(p, { cwd });
-    return { list: all.slice(0, 500).map(String), truncated: all.length > 500 };
+    const abs = isAbsolute(p);
+    let current = [abs ? "/" : cwd];
+    let seen = 0;
+    let truncated = false;
+    for (const seg of p.split("/").filter((x) => x && x !== ".")) {
+      const next: string[] = [];
+      if (!/[*?[]/.test(seg)) {
+        for (const d of current) next.push(join(d, seg));
+      } else {
+        for (const d of current) {
+          let names: string[];
+          try {
+            names = readdirSync(d);
+          } catch {
+            continue;
+          }
+          for (const name of names) {
+            if (++seen > 20_000) {
+              truncated = true;
+              break;
+            }
+            if (name.startsWith(".") && !seg.startsWith(".")) continue;
+            let hit = false;
+            try {
+              hit = matchesGlob(name, seg);
+            } catch {
+              hit = true;
+            }
+            if (hit) next.push(join(d, name));
+          }
+        }
+      }
+      current = next;
+      if (current.length > 5000) {
+        truncated = true;
+        current = current.slice(0, 5000);
+      }
+    }
+    const existing = current.filter((x) => {
+      try {
+        lstatSync(x);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    return { list: existing.slice(0, 500).map((x) => (abs ? x : relative(cwd, x) || ".")), truncated: truncated || existing.length > 500 };
   } finally {
     globSpent += Date.now() - t;
   }
+}
+
+/** Files whose names could be taken for options when a wildcard expands to them (`--pre=sh`). */
+export function globHitsOptionLikeName(cwd: string, pattern: string): boolean {
+  return expandGlob(cwd, pattern).some((m) => m === UNKNOWN_PATH || basename(m).startsWith("-"));
+}
+
+/**
+ * Whether ripgrep may search hidden files under root although it skips them by default: ignore files can
+ * re-include them with `!` patterns.
+ */
+export function ignoreFilesReinclude(root: string): boolean {
+  return memo(`reinclude:${root}`, () => {
+    let found = false;
+    const check = (p: string) => {
+      try {
+        if (/^\s*!/m.test(readFileSync(p, "utf8"))) found = true;
+      } catch { /* unreadable */ }
+    };
+    for (let d = root; ; d = dirname(d)) {
+      for (const n of [".ignore", ".rgignore", ".gitignore"]) check(join(d, n));
+      if (dirname(d) === d || isHomeOrAncestor(d)) break;
+    }
+    walk(root, (p, name) => {
+      if (!found && (name === ".ignore" || name === ".rgignore" || name === ".gitignore")) check(p);
+    }, 12, 20_000, new Set([".git"]));
+    return found;
+  });
 }
 
 /**
@@ -279,6 +356,8 @@ export function isRiskyProjectFile(rel: string): boolean {
   const parts = rel.toLowerCase().split(sep);
   const b = parts[parts.length - 1];
   return (
+    // Names that look like options (--pre=sh) turn into options when a wildcard expands to them
+    parts.some((x) => x.startsWith("-")) ||
     parts.slice(0, -1).some((d) => RISKY_DIRS.has(d)) ||
     RISKY_FILES.has(b) ||
     /^\.env(\..+)?$/.test(b) ||

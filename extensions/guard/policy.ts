@@ -8,7 +8,7 @@ import { homedir, userInfo } from "node:os";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { hasGluedPathValue, innerCommands, INTERPRETER_NAMES, isLongOption, isReadOnlyArgv, isShell, nonFlags, normalizeArgv, type Parsed, parseShell } from "./shell.ts";
-import { containsProtectedRoot, expandGlobFully, gitConfigIsSafe, globMayReach, isFreelyReadable, isHardLinked, isHomeOrAncestor, isInside, isRiskyProjectFile, memo, pathLikeTokens, pathVariants, protectedReason, protectedRoots, realPath, resolvePath, secretFilesUnder, sensitiveReason } from "./paths.ts";
+import { containsProtectedRoot, expandGlobFully, gitConfigIsSafe, globHitsOptionLikeName, globMayReach, ignoreFilesReinclude, isFreelyReadable, isHardLinked, isHomeOrAncestor, isInside, isRiskyProjectFile, memo, pathLikeTokens, pathVariants, protectedReason, protectedRoots, realPath, resolvePath, secretFilesUnder, sensitiveReason } from "./paths.ts";
 
 const BUILTIN_TOOLS = new Set(["bash", "edit", "write", "read", "grep", "find", "ls"]);
 
@@ -440,6 +440,8 @@ export function hardDeny(tool: string, input: any, cwd: string, roots: string[],
     if (basename(w) === "authorized_keys" || basename(realPath(w)) === "authorized_keys") return "writes to authorized_keys";
   }
   if (tool !== "bash") {
+    // Built-in tools take data (file contents, search patterns), not commands; running such data later is judged then
+    if (BUILTIN_TOOLS.has(tool)) return undefined;
     // Command-like strings in other tools (powershell, MCP shells) get the same hard-deny as bash
     for (const x of allStrings(input)) {
       if (x.length > 16 * 1024 || !/\s/.test(x.trim())) continue;
@@ -595,7 +597,9 @@ function searchExposure(tool: string, input: any, cwd: string, parsed?: Parsed):
     const gitGrep = a[0] === "git" && a.includes("grep");
     if (!((isGrepFamily(a[0]) && recursiveGrep(args)) || a[0] === "rg" || a[0] === "ag" || a[0] === "ack" || gitGrep)) continue;
     const given = bases.flatMap((b) => pathLikeTokens(b, nonFlags(a).slice(1)));
-    const r = check(given.length ? given : bases, a[0] !== "rg" || rgSeesHidden(args));
+    // rg skips hidden files unless told otherwise, or unless an ignore file re-includes them (`!.env`)
+    const roots0 = given.length ? given : bases;
+    const r = check(roots0, a[0] !== "rg" || rgSeesHidden(args) || roots0.some((x) => ignoreFilesReinclude(realPath(x))));
     if (r.hit) return r;
     unknown ||= r.unknown;
   }
@@ -672,6 +676,8 @@ export function safeAllow(tool: string, input: any, cwd: string, opts: { trusted
     if (!parsed || !parsed.ok || parsed.dynamic.length || parsed.writes.length || !parsed.subcommands.length) return false;
     // Glued option values (-f/etc/x, -bf~/x) are easy to misread; such commands always get a judgement
     if (parsed.subcommands.some(hasGluedPathValue)) return false;
+    // A wildcard that expands to a name like `--pre=sh` hands the command an option
+    if (parsed.globs.some((g) => globHitsOptionLikeName(cwd, g))) return false;
     // Here-documents hide text from the parser on purpose; if guard and bash ever disagree on where a body ends,
     // the difference is a hidden command. Commands with them are always judged (they are almost always writes anyway)
     if (parsed.heredocBodies.length || parsed.subs.some((x) => x.heredocs.length)) return false;

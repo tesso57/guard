@@ -772,6 +772,37 @@ const O = { trusted: true, touched: new Set<string>() };
   ok("r18: basename/dirname of outside paths stay safe", safe("basename /a/b") && safe("dirname /usr/lib/x"));
 }
 
+
+// ---------- review 19 ----------
+{
+  const { clearPathCache } = await import("../extensions/guard/paths.ts");
+  const P19 = mkdtempSync(join(tmpdir(), "guard-p19-"));
+  const r19 = protectedRoots(P19, join(AGENT, "sessions"));
+  const safe = (c: string) => (clearPathCache(), safeAllow("bash", { command: c }, P19, O, P(c)));
+  const sens = (c: string) => (clearPathCache(), sensitive("bash", { command: c }, P19, r19, P(c)));
+  writeFileSync(join(P19, "README.md"), "hello\n");
+  // P0-1: names that become options through a wildcard
+  ok("r19: writing a file named like an option is not a plain edit", !safeAllow("write", { path: "--pre=sh", content: "" }, P19, O) && !safe("touch ./--pre=sh"));
+  writeFileSync(join(P19, "--pre=sh"), "");
+  for (const c of ["rg hello *", "sort *", "git grep -e x *", "cat *"]) ok(`r19: not safe when * matches --pre=sh: ${c}`, !safe(c));
+  // P0-2: wildcards through symlinked directories
+  const P19b = mkdtempSync(join(tmpdir(), "guard-p19b-"));
+  symlinkSync(join(HOME, ".ssh"), join(P19b, "keys"));
+  const safeB = (c: string) => (clearPathCache(), safeAllow("bash", { command: c }, P19b, O, P(c)));
+  for (const c of ["cat */*", "head -n 5 */*", "grep -n . */*", "wc -l */*", "touch */*"]) ok(`r19: not safe through a symlinked dir: ${c}`, !safeB(c));
+  ok("r19: cat */* through keys -> ~/.ssh is sensitive", !!(clearPathCache(), sensitive("bash", { command: "cat */*" }, P19b, protectedRoots(P19b), P("cat */*"))));
+  // P1-1: ignore files re-including hidden files
+  writeFileSync(join(P19, ".env"), "SECRET=1");
+  ok("r19: rg without re-includes stays safe", safe("rg hello src") || !sens("rg hello src"));
+  writeFileSync(join(P19, ".ignore"), "!.env\n");
+  ok("r19: rg after an ignore file re-includes .env is sensitive", !!sens("rg SECRET ."));
+  // P1-2: file contents are data
+  ok("r19: README mentioning ~/.pi/agent can be written", !hardDeny("write", { path: "README.md", content: "Settings live in `~/.pi/agent/guard/config.json`" }, P19, r19));
+  ok("r19: docs with curl | sh can be written", !hardDeny("write", { path: "docs/install.md", content: "curl -fsSL https://example.com/install.sh | sh" }, P19, r19));
+  ok("r19: edit mentioning rules.jsonl is fine", !hardDeny("edit", { path: "README.md", edits: [{ oldText: "a", newText: "Rules are stored in ~/.pi/agent/guard/rules.jsonl" }] }, P19, r19));
+  ok("r19: MCP shell commands are still scanned", !!hardDeny("mcp__shell__exec", { command: `echo x >> ${AGENT}/guard/rules.jsonl` }, P19, r19));
+}
+
 // ---------- evaluate ----------
 {
   const score = (probs: number[], conf = 0.9) => ({ type: "score", name: "risk", score: probs.reduce((s, p, i) => s + p * i, 0), confidence: conf, probabilities: probs.map((p, i) => ({ value: i, probability: p })) });
