@@ -41,20 +41,32 @@ export function resolvePath(cwd: string, p: string): string {
 const realCache = new Map<string, string>();
 const memoCache = new Map<string, unknown>();
 let globBudget = 8;
-let globDeadline = Date.now() + 300;
+/** Milliseconds spent expanding globs in the current judgement. */
+let globSpent = 0;
+const GLOB_TIME_BUDGET = 300;
 
 /** Clears per-judgement caches, so every judgement sees the current file system. */
 export function clearPathCache() {
   realCache.clear();
   memoCache.clear();
   globBudget = 8;
-  globDeadline = Date.now() + 300;
+  globSpent = 0;
+}
+
+/** globSync with its time charged to the per-judgement budget. */
+function timedGlob(p: string, cwd: string): string[] {
+  const t = Date.now();
+  try {
+    return globSync(p, { cwd }).slice(0, 500).map(String);
+  } finally {
+    globSpent += Date.now() - t;
+  }
 }
 
 /** Patterns node's glob may take super-linear time on, or that the per-judgement time budget no longer allows. */
 function globTooCostly(p: string, maxWildSegments: number): boolean {
   const wild = p.split("/").filter((s) => /[*?[]/.test(s)).length;
-  return p.length > 256 || (p.match(/\[/g)?.length ?? 0) > 16 || wild > maxWildSegments || Date.now() > globDeadline;
+  return p.length > 256 || (p.match(/\[/g)?.length ?? 0) > 16 || wild > maxWildSegments || globSpent > GLOB_TIME_BUDGET;
 }
 
 /** Memoizes work within one judgement (cleared by clearPathCache). */
@@ -295,7 +307,7 @@ function expandGlob(cwd: string, pattern: string): string[] {
   // bash 3.2 lets `.*` match `..` and node's glob does not, so hidden-file patterns may reach more than we see
   if (wild.some((s) => s.startsWith("."))) out.push(UNKNOWN_PATH);
   try {
-    out.push(...globSync(p, { cwd }).slice(0, 500).map((m) => resolvePath(cwd, String(m))));
+    out.push(...timedGlob(p, cwd).map((m) => resolvePath(cwd, m)));
   } catch {
     out.push(UNKNOWN_PATH);
   }
@@ -311,7 +323,7 @@ export function expandGlobFully(cwd: string, pattern: string): { matches: string
   const base = globBase(cwd, pattern);
   if (globTooCostly(p, 6)) return { matches: [], base, complete: false };
   try {
-    return { matches: globSync(p, { cwd }).slice(0, 500).map((m) => resolvePath(cwd, String(m))), base, complete: true };
+    return { matches: timedGlob(p, cwd).map((m) => resolvePath(cwd, m)), base, complete: true };
   } catch {
     return { matches: [], base, complete: false };
   }
