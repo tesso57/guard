@@ -513,6 +513,17 @@ const O = { trusted: true, touched: new Set<string>() };
   ok("r7: git show HEAD:.env is sensitive", !!sens("git show HEAD:.env"));
 }
 
+
+// ---------- review 8 ----------
+{
+  const hd = (c: string) => hardDeny("bash", { command: c }, PROJ, roots, P(c));
+  const safe = (c: string) => safeAllow("bash", { command: c }, PROJ, O, P(c));
+  for (const c of ["cd ~ && pushd /tmp && popd && rm -rf .p?", "cd ~ && pushd /tmp && popd && printf x >> .p?/agen?/guard/rules.jsonl", "pushd ~ && pushd /tmp && popd && rm -rf .p?", "cd ~ && pushd /tmp && pushd && rm -rf .p?"])
+    ok(`r8: hard-denied after pushd/popd: ${c}`, !!hd(c));
+  ok("r8: cd - returns to the previous directory (no false positive)", safe("cd /tmp && cd - && touch x.txt"));
+  ok("r8: pushd/popd inside the project stays safe", safe("pushd src && ls && popd && ls"));
+}
+
 // ---------- evaluate ----------
 {
   const score = (probs: number[], conf = 0.9) => ({ type: "score", name: "risk", score: probs.reduce((s, p, i) => s + p * i, 0), confidence: conf, probabilities: probs.map((p, i) => ({ value: i, probability: p })) });

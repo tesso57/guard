@@ -122,12 +122,15 @@ function computeInputPaths(tool: string, input: any, cwd: string, parsed?: Parse
     const reads: string[] = [];
     const writes: string[] = [];
     for (const { s, a, bases, dirs } of subsWithBases(parsed, cwd)) {
+      // cd/pushd/popd only move; what runs in the new directory is accounted for by the following subcommands
+      const moves = ["cd", "pushd", "popd"].includes(a[0]);
       for (const base of bases) {
-        reads.push(...pathLikeTokens(base, a.slice(1)), ...s.reads.flatMap((r) => pathVariants(base, r)));
+        if (!moves) reads.push(...pathLikeTokens(base, a.slice(1)));
+        reads.push(...s.reads.flatMap((r) => pathVariants(base, r)));
         // Wildcards in write targets are expanded: `>> ~/.p?/a????/guard/rules.jsonl` writes to the real file
         writes.push(...[...s.writes, ...bashWriteTargets(s.argv)].flatMap((w) => [...pathVariants(base, w), ...(hasGlob(w) ? globTargets(base, w) : [])]));
       }
-      for (const d of dirs) if (d !== cwd) reads.push(d);
+      if (!moves) for (const d of dirs) if (d !== cwd) reads.push(d);
     }
     reads.push(...pathLikeTokens(cwd, [], parsed.globs));
     return { reads, writes };
@@ -169,12 +172,35 @@ function cdTargets(dirs: string[], target: string | undefined, assigns: string[]
  */
 function subsWithBases(parsed: Parsed, cwd: string) {
   const out: { s: Parsed["subs"][number]; a: string[]; bases: string[]; dirs: string[] }[] = [];
+  const union = (...xs: string[][]) => [...new Set(xs.flat())].slice(0, 16);
   let dirs = [cwd];
+  let previous = [cwd]; // OLDPWD
+  const stack: string[][] = []; // pushd/popd directory stack
+  const visited = new Set([cwd]);
   for (const s of parsed.subs) {
     const { argv: a } = normalizeArgv(s.argv, "deny");
-    out.push({ s, a, bases: [...new Set([...dirs, cwd])], dirs });
-    if (a[0] === "cd" || a[0] === "pushd") dirs = cdTargets(dirs, nonFlags(a)[0], s.assigns);
-    else if (a[0] === "popd") dirs = [cwd];
+    out.push({ s, a, bases: union(dirs, [cwd]), dirs });
+    // `cd -` names OLDPWD; a bare `-` is not an option here
+    const arg = a[1] === "-" ? "-" : nonFlags(a)[0];
+    const before = dirs;
+    if (a[0] === "cd") dirs = arg === "-" ? previous : cdTargets(dirs, arg, s.assigns);
+    else if (a[0] === "pushd") {
+      if (arg && /^[+-]\d+$/.test(arg)) dirs = [...visited]; // rotating the stack: any directory seen so far
+      else if (!arg) {
+        // pushd without an argument swaps the top two entries
+        const top = stack.pop();
+        stack.push(dirs);
+        dirs = top ?? dirs;
+      } else {
+        stack.push(dirs);
+        dirs = cdTargets(dirs, arg, s.assigns);
+      }
+    } else if (a[0] === "popd") {
+      // popd returns to the directory before the last pushd; if that pushd failed, the shell may stay put
+      dirs = arg && /^[+-]\d+$/.test(arg) ? [...visited] : union(stack.pop() ?? [...visited], dirs);
+    }
+    if (dirs !== before) previous = before;
+    for (const d of dirs) visited.add(d);
   }
   return out;
 }
