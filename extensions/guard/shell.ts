@@ -379,6 +379,9 @@ export function parseShell(cmd: string, depth = 0): Parsed {
         while (kw === "time" && (a[0] === "-p" || a[0] === "--")) a.shift();
       } else break;
     }
+    // Quoted text that still looks like a substitution can be evaluated later by bash (test -v 'a[$(cmd)]',
+    // arithmetic contexts, eval-like builtins); such commands are never treated as static
+    if (a.some((t) => /\$\(|`|\$\[/.test(t))) dyn("substitution text in a word");
     const head = a[0];
     if (!head) continue;
     const base = basename(head);
@@ -617,6 +620,10 @@ export function isReadOnlyArgv(raw: string[]): boolean {
   if (!head) return false;
   if (a.length === 2 && /^(--version|-V|--help)$/.test(a[1])) return true;
   switch (head) {
+    case "test":
+    case "[":
+      // -v/-R name[subscript] evaluate the subscript arithmetically, which can run code
+      return !a.slice(1).some((t) => /^[A-Za-z_]\w*\[.*\]$/.test(t));
     case "printf":
       // printf -v NAME assigns a shell variable (CDPATH, PATH, HOME, ...)
       return !a.slice(1).some((t) => /^-[A-Za-z]*v/.test(t) && !t.startsWith("--"));

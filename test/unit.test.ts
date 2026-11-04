@@ -740,6 +740,20 @@ const O = { trusted: true, touched: new Set<string>() };
   ok("r15: a here-document after $[ ] still works", P("echo $[1]\ncat <<E\nbody\nE").subs.some((x) => x.heredocs[0] === "body"));
 }
 
+
+// ---------- review 16 ----------
+{
+  const PH = join(HOME, "proj");
+  const rootsH = protectedRoots(PH, join(AGENT, "sessions"));
+  const safe = (c: string) => safeAllow("bash", { command: c }, PH, O, P(c));
+  for (const c of ["test -v 'a[$(touch marker)]'", "[ -v 'a[$(touch marker)]' ]", "test -R 'a[`touch m`]'", "test -v 'z[$(printf x >> ~/.pi/agent/guard/rules.jsonl)]'"])
+    ok(`r16: not safe: ${c}`, !safe(c));
+  ok("r16: substitution text marks the command dynamic", P("test -v 'a[$(id)]'").dynamic.length > 0);
+  ok("r16: test -v name[sub] is not read-only even without substitutions", !safe("test -v 'a[1]'"));
+  ok("r16: plain test stays safe", safe("test -f README.md") && safe("[ -d src ]"));
+  ok("r16: the rules write is hard-denied", !!hardDeny("bash", { command: "test -v 'z[$(printf x >> ~/.pi/agent/guard/rules.jsonl)]'" }, PH, rootsH, P("test -v 'z[$(printf x >> ~/.pi/agent/guard/rules.jsonl)]'")));
+}
+
 // ---------- evaluate ----------
 {
   const score = (probs: number[], conf = 0.9) => ({ type: "score", name: "risk", score: probs.reduce((s, p, i) => s + p * i, 0), confidence: conf, probabilities: probs.map((p, i) => ({ value: i, probability: p })) });
