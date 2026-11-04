@@ -754,6 +754,15 @@ const O = { trusted: true, touched: new Set<string>() };
   ok("r16: the rules write is hard-denied", !!hardDeny("bash", { command: "test -v 'z[$(printf x >> ~/.pi/agent/guard/rules.jsonl)]'" }, PH, rootsH, P("test -v 'z[$(printf x >> ~/.pi/agent/guard/rules.jsonl)]'")));
 }
 
+
+// ---------- review 17 ----------
+{
+  const safe = (c: string) => safeAllow("bash", { command: c }, PROJ, O, P(c));
+  for (const c of ["tree -R -H base . -L 1", "tree -a -R -H base . -L 1 -I .git", "tree -R -l -H base . -L 1", "tree --html=x .", "jq -n -f rd.jq", "jq -nf rd.jq", "jq --from-file rd.jq"])
+    ok(`r17: not safe: ${c}`, !safe(c));
+  ok("r17: plain tree and jq stay safe", safe("tree -L 2") && safe("jq .name package.json"));
+}
+
 // ---------- evaluate ----------
 {
   const score = (probs: number[], conf = 0.9) => ({ type: "score", name: "risk", score: probs.reduce((s, p, i) => s + p * i, 0), confidence: conf, probabilities: probs.map((p, i) => ({ value: i, probability: p })) });

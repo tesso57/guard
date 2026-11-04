@@ -643,7 +643,8 @@ export function isReadOnlyArgv(raw: string[]): boolean {
     case "uniq":
       return nonFlags(a).length <= 1;
     case "tree":
-      return !hasShort(a, "o") && !hasLong(a, "--output");
+      // -o writes a file; -H/-R write 00Tree.html into every directory walked; -l follows links out of the project
+      return !hasShort(a, "o") && !hasLong(a, "--output", "--html", "--follow") && !hasShort(a, "H") && !hasShort(a, "R") && !hasShort(a, "l");
     case "find":
       return !a.some((t) => /^-(exec|execdir|ok|okdir|delete|fprint|fprint0|fprintf|fls)$/.test(t));
     case "rg":
@@ -664,7 +665,8 @@ export function isReadOnlyArgv(raw: string[]): boolean {
       return !hasShort(a, "C") && !hasLong(a, "--compile");
     case "jq":
       // import/include and -L load modules from arbitrary paths
-      return !a.some((t) => /\b(import|include)\b/.test(t)) && !hasShort(a, "L") && !hasLong(a, "--rawfile", "--slurpfile");
+      // a program file (-f) can import modules from any path, like -L
+      return !a.some((t) => /\b(import|include)\b/.test(t)) && !hasShort(a, "L") && !hasShort(a, "f") && !hasLong(a, "--rawfile", "--slurpfile", "--from-file");
     case "sed": {
       // Only printing line ranges (`sed -n 1,80p f`); other scripts can write files (w) or run commands (e)
       if (!a.slice(1).every((t) => !t.startsWith("-") || t === "-n" || t === "-E" || t === "-r")) return false;
