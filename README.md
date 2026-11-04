@@ -1,104 +1,104 @@
 # guard
 
-[pi coding agent](https://github.com/badlogic/pi-mono) の拡張です。エージェントのツール呼び出しを**実行前に**判定し、許可・確認・ブロックのどれかにします。
-判定には [OpenAI Decisions API](https://platform.openai.com/docs/guides/decisions)(`gpt-6-luna`)を使います。利用者が過去に下した判断は規則として記憶します。
+An extension for the [pi coding agent](https://github.com/badlogic/pi-mono). guard judges every tool call **before it runs** and decides whether to allow it, ask you to confirm it, or block it.
+It uses the [OpenAI Decisions API](https://platform.openai.com/docs/guides/decisions) (`gpt-6-luna`) for the judgement, and it remembers the decisions you make as rules.
 
-> guard はサンドボックスの代わりにはなりません。確認の手間を減らしつつ、明らかに危ない操作を止めるための層です。信頼できないコードを扱うときは、コンテナや VM と併用してください。
+> guard is not a sandbox. It is a layer that stops obviously dangerous actions while cutting down on approval prompts. When you work with untrusted code, run pi inside a container or VM as well.
 
-## インストール
+## Install
 
 ```bash
 pi install git:github.com/tesso57/guard
 ```
 
-`OPENAI_API_KEY` を設定してから pi を起動します。
+Set `OPENAI_API_KEY`, then start pi:
 
 ```bash
 export OPENAI_API_KEY=sk-...
 ```
 
-キーが無いときも guard は動きます。ただし model の判定が必要な呼び出しは、すべて確認に回ります(UI が無いモードではブロックされます)。
+guard still works without a key, but every call that needs a model judgement is sent to you for confirmation instead. In modes without a UI, those calls are blocked.
 
-## 判定の流れ
+## How a call is judged
 
-| 順番 | チェック | 結果 |
+| Order | Check | Result |
 |---|---|---|
-| 1 | 絶対禁止。ルートやホームの再帰削除、`curl … \| sh`、`authorized_keys` への書き込み、**guard の規則・セッション記録・拡張・pi 設定の書き換え**など | ブロック(規則やダイアログでも解除できません) |
-| 2 | 拒否規則・確認規則(どのスコープでも) | ブロック / 確認 |
-| 3 | 許可規則。bash はすべてのサブコマンドが一致し、`$()` や変数展開などの動的な要素が無い場合だけ当てます | 軽量チェック(情報流出・依頼の範囲外・判定者を操作する文)だけを経て許可 |
-| 4 | 機密パス(`~/.ssh`、`.env`、鍵ファイルなど) | 確認 |
-| 5 | 安全リスト(読み取り専用の bash、プロジェクト内の通常ファイルの編集) | 許可(API を呼びません) |
-| 6 | Decisions API | 許可 / 確認 / ブロック |
+| 1 | Hard deny: recursive deletion of `/` or `~`, `curl … \| sh`, writes to `authorized_keys`, and **any change to guard's rules, pi's session logs, extensions or pi settings** | Block. No rule or dialog can override it |
+| 2 | Deny and ask rules, in any scope | Block / confirm |
+| 3 | Allow rules. For bash, every subcommand must match and the command must have no dynamic parts such as `$()` or variable expansion | Allow, after a light check for exfiltration, actions outside your request, and text aimed at the judge |
+| 4 | Sensitive paths (`~/.ssh`, `.env`, key files, …) | Confirm |
+| 5 | Safe list: read-only bash commands, and edits to ordinary files inside the project | Allow, without calling the API |
+| 6 | Decisions API | Allow / confirm / block |
 
-API の失敗、回答拒否、入力の切り詰めが起きたときは、安全側(確認、UI が無いモードではブロック)に倒します。
+If the API call fails, the model refuses to answer, or the input had to be truncated, guard takes the safe side: it asks you to confirm, or blocks the call when there is no UI.
 
-Decisions API には、次のものを渡します。
+guard sends the Decisions API:
 
-- 利用者の直近の発言(依頼の意図)
-- 直近のツール呼び出し
-- 過去の判断
-- 判定対象の呼び出し
+- your most recent messages, so the model knows what you asked for
+- the agent's recent tool calls
+- your past decisions
+- the call being judged
 
-アシスタント自身の文章とツールの結果は渡しません。プロンプトインジェクションへの対策です。セッション中に書かれたスクリプトを bash で実行するときは、その中身も添付して判定します。秘密らしき文字列は送信前に伏せ字にします。
+It never sends the assistant's own text or tool outputs. This limits prompt injection. When bash runs a script that was written earlier in the same session, guard attaches the script's contents so the model can judge what will actually run. Strings that look like secrets are redacted before anything is sent.
 
-危険度は 0〜4 の 5 段階のスコアです。判定には加重平均だけでなく、高リスク側の確率も使います。そのため、「致命的 45%・無害 55%」のような分布も見逃しません。
+Risk is scored on five levels, from 0 to 4. guard looks at the probability of the high-risk levels as well as the weighted average, so a split such as "45% catastrophic, 55% harmless" is still caught.
 
-## 確認ダイアログ
+## Approval dialog
 
 ```
-許可(今回だけ)
-許可(このセッション中: npm install …)
-許可して記憶… ▸     → このプロジェクト / 全体
-拒否
-拒否して記憶… ▸     → このプロジェクト / 全体 / このセッション中
+Allow (this time only)
+Allow (this session: npm install …)
+Allow and remember… ▸     → this project / global
+Deny
+Deny and remember… ▸      → this project / global / this session
 ```
 
-- 記憶するときは、規則の一致する例と一致しない例を表示します。例: `npm test …` は `npm test -- foo` に一致し、`npm publish` には一致しません。
-- `rm`、`git push`、`curl` のように前方一致で許すと危ないコマンドは、引数まで完全一致する規則として記憶します。
-- 次の場合は「記憶して許可」を出しません。
-  - リスクが高い呼び出し
-  - インタプリタ(`python x.py` など)
-  - 動的な要素を含むコマンド
-- 「全体」スコープの許可は、低リスクの区分(読み取り、ビルド・テスト、プロジェクト内の編集)でだけ選べます。
-- 拒否するときに理由を書くと、その理由がエージェントに伝わります。
+- When you remember a decision, guard shows an example that matches the rule and one that does not. For example, `npm test …` matches `npm test -- foo` but not `npm publish`.
+- Commands that are risky to allow by prefix, such as `rm`, `git push` and `curl`, are remembered only as exact matches, including their arguments.
+- "Allow and remember" is not offered for:
+  - high-risk calls
+  - interpreters, such as `python x.py`
+  - commands with dynamic parts
+- Global allow rules are offered only for low-risk categories: read-only, build and test, and edits inside the project.
+- If you give a reason when you deny a call, the reason is passed to the agent.
 
-## スコープと優先順位
+## Scopes and precedence
 
-| スコープ | 保存先 | 寿命 |
+| Scope | Stored in | Lifetime |
 |---|---|---|
-| セッション | pi のセッション記録 | セッションの間だけ。`/tree` で前に戻ると、その時点より後の承認も外れます |
-| プロジェクト | `~/.pi/agent/guard/projects/*.jsonl` | 許可は 30 日、拒否は無期限 |
-| 全体 | `~/.pi/agent/guard/rules.jsonl` | 同上 |
-| リポジトリ | `.pi/guard.json`(信頼済みのプロジェクトのみ) | 拒否と確認だけを受け付けます(リポジトリから許可を持ち込ませないため) |
+| Session | pi's session log | Until the session ends. Rewinding with `/tree` also drops approvals made after that point |
+| Project | `~/.pi/agent/guard/projects/*.jsonl` | Allow rules: 30 days. Deny rules: no expiry |
+| Global | `~/.pi/agent/guard/rules.jsonl` | Same as project |
+| Repository | `.pi/guard.json`, read only for trusted projects | Deny and ask rules only, so a repository cannot grant itself permissions |
 
-スコープの広さではなく、**判定の厳しさ**で優先順位を決めます(拒否 > 確認 > 許可)。そのため、どのスコープの拒否も、別のスコープの許可より優先されます。
+Precedence follows **strictness**, not scope: deny > ask > allow. A deny rule in any scope therefore wins over an allow rule in any other scope.
 
 ```json
 // .pi/guard.json
 { "deny": ["git push --force"], "ask": ["npm publish"] }
 ```
 
-## コマンド
+## Commands
 
-| コマンド | 内容 |
+| Command | What it does |
 |---|---|
-| `/guard` | 状態を表示 |
-| `/guard on` / `/guard off` | このセッションで有効 / 無効にする |
-| `/guard check <cmd>` | bash コマンドを採点だけする |
-| `/guard rules` | 規則の一覧を表示(選ぶと削除できます) |
-| `/guard rules rm <id>` | 規則を削除 |
-| `/guard rules promote <id> project\|global` | セッションの規則を昇格させる |
-| `/guard rules add <allow\|deny\|ask> <session\|project\|global> <コマンドの先頭語… \| tool:<name> \| path:<path>>` | 規則を手で追加する |
-| `/guard log [n]` | 監査ログ(`~/.pi/agent/guard/audit.jsonl`)を表示 |
-| `/guard reload` | 設定と規則を再読み込みする |
+| `/guard` | Shows the current status |
+| `/guard on` / `/guard off` | Turns guard on or off for this session |
+| `/guard check <cmd>` | Scores a bash command without running it |
+| `/guard rules` | Lists rules. Select one to delete it |
+| `/guard rules rm <id>` | Deletes a rule |
+| `/guard rules promote <id> project\|global` | Promotes a session rule to a wider scope |
+| `/guard rules add <allow\|deny\|ask> <session\|project\|global> <command words… \| tool:<name> \| path:<path>>` | Adds a rule by hand |
+| `/guard log [n]` | Shows the audit log (`~/.pi/agent/guard/audit.jsonl`) |
+| `/guard reload` | Reloads settings and rules |
 
-同じセッション規則が 3 回使われると、プロジェクトへの昇格を提案します。
+When a session rule has been used three times, guard suggests promoting it to the project scope.
 
-ブロックが連続 3 回、または合計 20 回に達すると、エージェントの処理を停止して利用者に知らせます。
+After 3 blocks in a row, or 20 blocks in total, guard stops the agent and tells you.
 
-## 設定
+## Configuration
 
-設定は `~/.pi/agent/guard/config.json` で変えられます(すべて省略可能)。
+Settings live in `~/.pi/agent/guard/config.json`. Every field is optional.
 
 ```json
 {
@@ -110,24 +110,24 @@ Decisions API には、次のものを渡します。
 }
 ```
 
-閾値は仮の値です。誤検知が多すぎる、または見逃しが多すぎると感じたら、`/guard log` で実際の判定を見ながら調整してください。
+The default thresholds are starting points. If guard asks too often or lets too much through, adjust them while checking real decisions with `/guard log`.
 
-環境変数でも上書きできます。
+Environment variables override the config file:
 
-| 環境変数 | 内容 |
+| Variable | What it sets |
 |---|---|
-| `RISK_MODEL` | 判定に使うモデル |
-| `RISK_TIMEOUT_MS` | 判定のタイムアウト(ミリ秒) |
-| `RISK_CONFIRM_AT` | 確認に回すスコアの閾値 |
-| `RISK_SKIP_TOOLS` | model の判定を省くツール |
-| `OPENAI_BASE_URL` | API の接続先(ゲートウェイ経由にする場合) |
-| `RISK_DISABLE=1` | guard を完全に無効にする |
+| `RISK_MODEL` | The model used for judgement |
+| `RISK_TIMEOUT_MS` | The judgement timeout, in milliseconds |
+| `RISK_CONFIRM_AT` | The score at which a call needs confirmation |
+| `RISK_SKIP_TOOLS` | Tools that skip the model judgement |
+| `OPENAI_BASE_URL` | The API endpoint, for example a gateway |
+| `RISK_DISABLE=1` | Turns guard off completely |
 
-guard は最後にロードしてください。ほかの拡張が判定の後でツールの入力を書き換えると、guard はそれを検出して警告します。
+Load guard last. If another extension rewrites a tool call's input after guard has judged it, guard detects the change and warns you.
 
-## 開発
+## Development
 
-Node.js 22.19 以上が必要です(pi 本体と同じ条件)。開発には現行 LTS の Node 26 を推奨します(`.node-version`)。
+Requires Node.js 22.19 or later, the same as pi. The current LTS, Node 26, is recommended (see `.node-version`).
 
 ```bash
 npm ci
@@ -137,11 +137,11 @@ npm ci
 npm run check
 ```
 
-`npm run check` は次の 4 つを順に実行します。
+`npm run check` runs, in order:
 
-- 型チェック
-- knip(未使用コードの検出)
-- 単体テスト
-- E2E:本物の pi を、モックのモデルとモックの Decisions API で動かします
+- type checking
+- knip, to find unused code
+- unit tests
+- an end-to-end test that runs the real pi against a mock model and a mock Decisions API
 
-同じものが GitHub Actions(`.github/workflows/ci.yml`)でも走ります。
+GitHub Actions (`.github/workflows/ci.yml`) runs the same checks on the current LTS.
