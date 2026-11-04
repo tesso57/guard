@@ -671,6 +671,9 @@ export function safeAllow(tool: string, input: any, cwd: string, opts: { trusted
     if (!parsed || !parsed.ok || parsed.dynamic.length || parsed.writes.length || !parsed.subcommands.length) return false;
     // Glued option values (-f/etc/x, -bf~/x) are easy to misread; such commands always get a judgement
     if (parsed.subcommands.some(hasGluedPathValue)) return false;
+    // Here-documents hide text from the parser on purpose; if guard and bash ever disagree on where a body ends,
+    // the difference is a hidden command. Commands with them are always judged (they are almost always writes anyway)
+    if (parsed.heredocBodies.length || parsed.subs.some((x) => x.heredocs.length)) return false;
     // The directory stack (pushd -n, rotations) is too easy to get wrong; never a shortcut
     if (parsed.subcommands.some((a) => ["pushd", "popd", "dirs"].includes(normalizeArgv(a).argv[0]))) return false;
     if (searchExposure(tool, input, cwd, parsed).unknown) return false;

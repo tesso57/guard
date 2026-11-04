@@ -726,6 +726,20 @@ const O = { trusted: true, touched: new Set<string>() };
   ok("r14: many << stay fast", time(() => P("echo a << b ".repeat(1400))) < 500);
 }
 
+
+// ---------- review 15 ----------
+{
+  const PH = join(HOME, "proj");
+  const rootsH = protectedRoots(PH, join(AGENT, "sessions"));
+  const c = "echo $[1<<2]\necho INJECTED >> ~/.pi/agent/guard/rules.jsonl\n2]";
+  ok("r15: $[ ] is arithmetic, so the next line is a command", P(c).subcommands.some((a) => a[0] === "echo" && a[1] === "INJECTED"));
+  ok("r15: ... the command is not safe", !safeAllow("bash", { command: c }, PH, O, P(c)));
+  ok("r15: ... and the write to rules is hard-denied", !!hardDeny("bash", { command: c }, PH, rootsH, P(c)));
+  ok("r15: $[ ] marks the command dynamic", P("echo $[1+2]").dynamic.length > 0);
+  ok("r15: commands with here-documents never take the safe-list shortcut", !safeAllow("bash", { command: "cat <<E\nhello\nE" }, PH, O, P("cat <<E\nhello\nE")));
+  ok("r15: a here-document after $[ ] still works", P("echo $[1]\ncat <<E\nbody\nE").subs.some((x) => x.heredocs[0] === "body"));
+}
+
 // ---------- evaluate ----------
 {
   const score = (probs: number[], conf = 0.9) => ({ type: "score", name: "risk", score: probs.reduce((s, p, i) => s + p * i, 0), confidence: conf, probabilities: probs.map((p, i) => ({ value: i, probability: p })) });

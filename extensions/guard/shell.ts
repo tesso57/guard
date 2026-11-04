@@ -61,12 +61,15 @@ export function parseShell(cmd: string, depth = 0): Parsed {
   if (cmd.length > MAX_COMMAND) return { ok: false, subs: [], subcommands: [], writes: [], globs: [], dynamic: ["command too long to analyze"], substitutions: [], heredocBodies: [] };
   const substitutions: string[] = [];
   const nestedBodies: string[] = [];
-  // arithDepth[i]: how many "((" minus "))" come before position i (computed once, so the lexer stays linear)
+  // arithDepth[i]: how deep position i is inside "(( ))" or the old "$[ ]" arithmetic (computed once, so the lexer
+  // stays linear)
   const arithDepth = new Int32Array(cmd.length + 1);
-  for (let k = 0, d = 0; k < cmd.length; k++) {
+  for (let k = 0, d = 0, brackets = 0; k < cmd.length; k++) {
     arithDepth[k] = d;
     if (cmd[k] === "(" && cmd[k + 1] === "(") { d++; arithDepth[k + 1] = d; k++; }
     else if (cmd[k] === ")" && cmd[k + 1] === ")") { d = Math.max(0, d - 1); arithDepth[k + 1] = d; k++; }
+    else if (cmd[k] === "$" && cmd[k + 1] === "[") { d++; brackets++; arithDepth[k + 1] = d; k++; }
+    else if (cmd[k] === "]" && brackets > 0) { d = Math.max(0, d - 1); brackets--; }
   }
   arithDepth[cmd.length] = 0;
   const dynamic: string[] = [];
@@ -145,6 +148,7 @@ export function parseShell(cmd: string, depth = 0): Parsed {
       }
       else if (n === "{" || (n && /[A-Za-z_0-9@*#?!$-]/.test(n))) dyn("variable expansion");
       else if (n === "'" || n === '"') dyn("ANSI-C / locale quoting");
+      else if (n === "[") dyn("arithmetic expansion $[ ]");
       tok += c;
       inTok = true;
       continue;
