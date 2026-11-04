@@ -246,7 +246,8 @@ export function parseShell(cmd: string): Parsed {
     if (base === "find" && a.some((t) => /^-(exec|execdir|ok|okdir|delete|fprint|fprint0|fprintf|fls)$/.test(t))) dyn("find action that runs or writes");
     if (base === "git" && a.some((t, i) => i > 0 && (t === "-c" || t.startsWith("--config") || t === "--exec-path" || t.startsWith("--exec-path=")))) dyn("git config override");
   }
-  const kept = subs.filter((s) => s.argv.length || s.writes.length || s.reads.length);
+  // Bare assignments (`HOME=x;`) are kept: they change what later commands mean
+  const kept = subs.filter((s) => s.argv.length || s.assigns.length || s.writes.length || s.reads.length);
   if (kept.length > 128) dyn("too many subcommands to analyze");
   for (const s of kept) s.writes = s.writes.filter((w) => !HARMLESS_DEVICES.test(w));
   return { ok, subs: kept, subcommands: kept.map((s) => s.argv), writes: kept.flatMap((s) => s.writes), globs, dynamic };
@@ -426,7 +427,14 @@ export function isReadOnlyArgv(raw: string[]): boolean {
   if (a.length === 2 && /^(--version|-V|--help)$/.test(a[1])) return true;
   switch (head) {
     case "sort":
-      return !hasShort(a, "o") && !hasLong(a, "--output", "--compress-program");
+      // --files0-from reads a list of file names from a file, which can point anywhere
+      return !hasShort(a, "o") && !hasLong(a, "--output", "--compress-program", "--files0-from");
+    case "wc":
+    case "du":
+      return !hasLong(a, "--files0-from");
+    case "diff":
+      // diff -r follows symlinks inside the trees and prints the contents they point at
+      return !hasShort(a, "r") && !hasLong(a, "--recursive");
     case "uniq":
       return nonFlags(a).length <= 1;
     case "tree":

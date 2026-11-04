@@ -87,8 +87,14 @@ function changesTrees(c: ToolCallLike): boolean {
   return p.subcommands.some((raw) => {
     const a = normalizeArgv(raw, "deny").argv;
     const sub = a.find((t, i) => i > 0 && !t.startsWith("-")) ?? "";
-    return TREE_TOOLS.has(a[0]) || (a[0] === "git" && TREE_GIT.has(sub)) || (PACKAGE_MANAGERS.has(a[0]) && PM_TREE.has(sub));
+    // Creating a branch from the current HEAD (checkout -b, switch -c) leaves the files as they are
+    const newBranchOnly = a[0] === "git" && ((sub === "checkout" && a.some((t) => t === "-b" || t === "-B") && nonFlagsAfter(a, sub).length <= 1) || (sub === "switch" && a.some((t) => t === "-c" || t === "-C") && nonFlagsAfter(a, sub).length <= 1));
+    return TREE_TOOLS.has(a[0]) || (a[0] === "git" && TREE_GIT.has(sub) && !newBranchOnly) || (PACKAGE_MANAGERS.has(a[0]) && PM_TREE.has(sub));
   });
+}
+
+function nonFlagsAfter(a: string[], word: string): string[] {
+  return a.slice(a.indexOf(word) + 1).filter((t) => !t.startsWith("-"));
 }
 
 /** Whether the call writes anything (tools that write, or bash that is not strictly read-only). */

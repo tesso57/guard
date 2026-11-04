@@ -5,10 +5,10 @@
  *   safeAllow : obviously safe → allow without calling the model
  */
 import { homedir } from "node:os";
-import { existsSync } from "node:fs";
-import { basename, join } from "node:path";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { hasGluedPathValue, isLongOption, isReadOnlyArgv, nonFlags, normalizeArgv, type Parsed, parseShell } from "./shell.ts";
-import { containsProtectedRoot, expandGlobFully, gitConfigIsSafe, isFreelyReadable, isHardLinked, isHomeOrAncestor, isInside, isRiskyProjectFile, memo, pathLikeTokens, pathVariants, protectedReason, realPath, resolvePath, secretFilesUnder, sensitiveReason } from "./paths.ts";
+import { containsProtectedRoot, expandGlobFully, gitConfigIsSafe, globMayReach, isFreelyReadable, isHardLinked, isHomeOrAncestor, isInside, isRiskyProjectFile, memo, pathLikeTokens, pathVariants, protectedReason, protectedRoots, realPath, resolvePath, secretFilesUnder, sensitiveReason } from "./paths.ts";
 
 const BUILTIN_TOOLS = new Set(["bash", "edit", "write", "read", "grep", "find", "ls"]);
 
@@ -50,6 +50,8 @@ const optionValue = (a: string[], names: string[]) => {
   a.forEach((t, i) => {
     for (const n of names) {
       if (t === n && a[i + 1]) out.push(a[i + 1]);
+      // -C../x, -t../x: a value glued to a short option
+      else if (n.length === 2 && n.startsWith("-") && t.startsWith(n) && t.length > 2 && !t.startsWith("--")) out.push(t.slice(2));
       else if (n.startsWith("--") && isLongOption(t, n)) {
         // --output=x, and the abbreviations GNU tools accept (--outp=x, --outp x)
         const eq = t.indexOf("=");
@@ -149,6 +151,37 @@ function computeInputPaths(tool: string, input: any, cwd: string, parsed?: Parse
   return { reads: p, writes: [] };
 }
 
+/** Files a `git apply`, `git am` or `patch` would change, read from the patch file itself (undefined if unreadable). */
+function patchFiles(a: string[], s: Parsed["subs"][number], bases: string[]): { files: string[]; readable: boolean } | undefined {
+  const sub = a.find((t, i) => i > 0 && !t.startsWith("-"));
+  const isPatch = a[0] === "patch" || (a[0] === "git" && (sub === "apply" || sub === "am"));
+  if (!isPatch) return undefined;
+  const sources = [...s.reads, ...optionValue(a, ["-i", "--input"]), ...(a[0] === "git" ? nonFlags(a).slice(1) : [])];
+  const strip = Number(optionValue(a, ["-p"])[0] ?? (a[0] === "git" ? 1 : 0)) || 0;
+  const files: string[] = [];
+  let readable = sources.length > 0;
+  for (const src of sources) {
+    const path = resolvePath(bases[0], src);
+    let text: string;
+    try {
+      if (statSync(path).size > 2_000_000) throw new Error("too large");
+      text = readFileSync(path, "utf8");
+    } catch {
+      readable = false;
+      continue;
+    }
+    for (const m of text.matchAll(/^(?:\+\+\+ |--- |rename to |copy to |diff --git a\/\S+ b\/)(\S+)/gm)) {
+      const name = m[1].split("/").slice(m[0].startsWith("diff --git") ? 0 : strip).join("/");
+      if (name && name !== "/dev/null") for (const b of bases) files.push(resolvePath(b, name));
+    }
+  }
+  return { files, readable };
+}
+
+function patchTargets(a: string[], s: Parsed["subs"][number], bases: string[]): string[] {
+  return patchFiles(a, s, bases)?.files ?? [];
+}
+
 /** Existing matches of a wildcard target, or its static base when it was too costly to expand. */
 function globTargets(base: string, t: string): string[] {
   const e = expandGlobFully(base, t);
@@ -156,18 +189,26 @@ function globTargets(base: string, t: string): string[] {
 }
 
 /** Where `cd target` may lead from each of the current candidates (globs, CDPATH, a failed cd). */
-function cdTargets(dirs: string[], target: string | undefined, assigns: string[]): string[] {
+function cdTargets(dirs: string[], target: string | undefined, assigns: string[], roots: string[]): { dirs: string[]; unknown: boolean } {
   const home = assigns.find((x) => x.startsWith("HOME="))?.slice(5);
-  if (!target || target === "-") return [home ? resolvePath(dirs[0], home) : homedir()];
+  if (!target || target === "-") return { dirs: [home ? resolvePath(dirs[0], home) : homedir()], unknown: false };
   const cdpath = assigns.find((x) => x.startsWith("CDPATH="))?.slice(7) ?? process.env.CDPATH;
   const out: string[] = [];
+  let unknown = false;
   for (const d of dirs) {
-    out.push(...(hasGlob(target) ? globTargets(d, target).slice(0, 4) : [resolvePath(d, target)]));
+    if (hasGlob(target)) {
+      const e = expandGlobFully(d, target);
+      if (!e.complete) unknown = true;
+      out.push(...e.matches);
+      // A pattern that can reach guard's state adds that place, whatever is on disk now
+      for (const r of roots) for (let x = r; x !== dirname(x); x = dirname(x)) if (globMayReach(d, target, [x]).into && globMayReach(d, target, [x]).around) out.push(x);
+    } else out.push(resolvePath(d, target));
     // With CDPATH set, a relative cd may go to <entry>/<target> instead
     if (cdpath && !/^(\/|\.\.?(\/|$)|~)/.test(target))
       for (const e of cdpath.split(":").filter(Boolean)) out.push(resolvePath(e, target));
   }
-  return [...new Set(out)].slice(0, 8);
+  const all = [...new Set(out)];
+  return { dirs: all.slice(0, 16), unknown: unknown || all.length > 16 };
 }
 
 /**
@@ -175,8 +216,24 @@ function cdTargets(dirs: string[], target: string | undefined, assigns: string[]
  * pipeline, popd, CDPATH), so each subcommand is resolved against all candidates plus the original cwd.
  */
 function subsWithBases(parsed: Parsed, cwd: string) {
-  const out: { s: Parsed["subs"][number]; a: string[]; bases: string[]; dirs: string[] }[] = [];
-  const union = (...xs: string[][]) => [...new Set(xs.flat())].slice(0, 16);
+  return memo(`subs:${cwd}:${JSON.stringify(parsed.subs)}`, () => computeSubsWithBases(parsed, cwd));
+}
+
+function computeSubsWithBases(parsed: Parsed, cwd: string) {
+  const out: { s: Parsed["subs"][number]; a: string[]; bases: string[]; dirs: string[]; unknown: boolean }[] = [];
+  const roots = protectedRoots(cwd);
+  // Once the shell's directory cannot be pinned down, it stays unknown for the rest of the command
+  let unknown = false;
+  const union = (...xs: string[][]) => {
+    const all = [...new Set(xs.flat())];
+    if (all.length > 16) unknown = true;
+    return all.slice(0, 16);
+  };
+  const cd = (from: string[], target: string | undefined, assigns: string[]) => {
+    const r = cdTargets(from, target, assigns, roots);
+    if (r.unknown) unknown = true;
+    return r.dirs;
+  };
   // Options that make a command act in another directory: their values are extra bases for that command
   const locationDirs = (raw: string[], from: string[]) =>
     LOCATION_VALUE_OPTIONS.flatMap((o) => optionValue(raw, [o])).flatMap((v) => from.map((d) => resolvePath(d, v)));
@@ -186,18 +243,18 @@ function subsWithBases(parsed: Parsed, cwd: string) {
   const visited = new Set([cwd]);
   for (const s of parsed.subs) {
     const { argv: a } = normalizeArgv(s.argv, "deny");
-    const loc = locationDirs(s.argv, union(dirs, [cwd]));
-    out.push({ s, a, bases: union(dirs, [cwd], loc), dirs });
+    const loc = locationDirs(s.argv, [...new Set([...dirs, cwd])]);
+    out.push({ s, a, bases: union(dirs, [cwd], loc), dirs, unknown });
     // `cd -` names OLDPWD; a bare `-` is not an option here
     const arg = a[1] === "-" ? "-" : nonFlags(a)[0];
     const before = dirs;
     const oldpwd = s.assigns.find((x) => x.startsWith("OLDPWD="))?.slice(7);
-    if (a[0] === "cd") dirs = arg === "-" ? (oldpwd ? cdTargets(dirs, oldpwd, s.assigns) : previous) : cdTargets(dirs, arg, s.assigns);
+    if (a[0] === "cd") dirs = arg === "-" ? (oldpwd ? cd(dirs, oldpwd, s.assigns) : previous) : cd(dirs, arg, s.assigns);
     else if (a[0] === "pushd" && s.argv.includes("-n")) {
       // pushd -n adds to the stack without changing directory; a later `pushd` swaps it in
-      if (arg) stack.push(cdTargets(dirs, arg, s.assigns));
+      if (arg) stack.push(cd(dirs, arg, s.assigns));
     } else if (a[0] === "pushd") {
-      if (arg && /^[+-]\d+$/.test(arg)) dirs = [...visited]; // rotating the stack: any directory seen so far
+      if (arg && /^[+-]\d+$/.test(arg)) dirs = union([...visited]); // rotating the stack: any directory seen so far
       else if (!arg) {
         // pushd without an argument swaps the top two entries
         const top = stack.pop();
@@ -205,11 +262,11 @@ function subsWithBases(parsed: Parsed, cwd: string) {
         dirs = top ?? dirs;
       } else {
         stack.push(dirs);
-        dirs = cdTargets(dirs, arg, s.assigns);
+        dirs = cd(dirs, arg, s.assigns);
       }
     } else if (a[0] === "popd") {
       // popd returns to the directory before the last pushd; if that pushd failed, the shell may stay put
-      dirs = arg && /^[+-]\d+$/.test(arg) ? [...visited] : union(stack.pop() ?? [...visited], dirs);
+      dirs = arg && /^[+-]\d+$/.test(arg) ? union([...visited]) : union(stack.pop() ?? [...visited], dirs);
     }
     if (dirs !== before) previous = before;
     for (const d of dirs) visited.add(d);
@@ -291,7 +348,7 @@ export function hardDeny(tool: string, input: any, cwd: string, roots: string[],
     return undefined;
   }
   const cmd = String(input?.command ?? "");
-  if (cmd.length <= 4096 && /[{]|\$'/.test(cmd))
+  if (cmd.length <= 16 * 1024 && /[{]|\$'/.test(cmd))
     for (const v of staticVariants(cmd)) {
       const r = hardDeny("bash", { command: v }, cwd, roots, parseShell(v));
       if (r) return r;
@@ -301,7 +358,23 @@ export function hardDeny(tool: string, input: any, cwd: string, roots: string[],
   if (scan.length <= 16 * 1024) for (const [re, why] of HARD_DENY_BASH) if (re.test(scan)) return why;
   if (parsed) {
     const resolveAll = (b: string, t: string) => [...pathVariants(b, t), ...(hasGlob(t) ? globTargets(b, t) : [])];
-    for (const { s, a: a0, bases } of subsWithBases(parsed, cwd)) {
+    const outerRoots = roots.filter((r) => !isInside(r, cwd));
+    // Wildcards are checked against guard's state by pattern, so a skipped or truncated expansion cannot hide them
+    const globInto = (b: string, t: string, rs: string[]) => hasGlob(t) && globMayReach(b, t, rs).into;
+    const globAround = (b: string, t: string, rs: string[]) => hasGlob(t) && globMayReach(b, t, rs).around;
+    for (const { s, a: a0, bases, unknown } of subsWithBases(parsed, cwd)) {
+      // Changing HOME, CDPATH or OLDPWD for later commands changes what ~, cd and cd - mean
+      const setsPathVars =
+        (s.argv.length === 0 && s.assigns.some((x) => /^(HOME|CDPATH|OLDPWD|PWD)=/.test(x))) ||
+        (["export", "declare", "typeset", "readonly", "local"].includes(a0[0]) && a0.some((t) => /^(HOME|CDPATH|OLDPWD|PWD)(=|$)/.test(t))) ||
+        (a0[0] === "shopt" && a0.includes("cdable_vars"));
+      if (setsPathVars) return "changes HOME, CDPATH or OLDPWD, which decide where later paths point";
+      // Redirects make even `echo` a writing command
+      const changing = (!isReadOnlyArgv(s.argv) || s.writes.length > 0) && !["cd", "pushd", "popd"].includes(a0[0]);
+      if (unknown && changing) return "runs a changing command in a directory guard cannot determine";
+      for (const t of [...s.writes, ...bashWriteTargets(s.argv)]) if (bases.some((b) => globInto(b, t, roots))) return "a wildcard write target can reach guard's or pi's state";
+      // Patches name their targets inside the patch file
+      for (const target of patchTargets(a0, s, bases)) if (protectedReason(target, roots)) return "applies a patch to guard's or pi's state";
       // Check the command after every wrapper too (time -p, setarch x86_64, fakeroot), not just position 0
       for (const i of commandPositions(a0)) {
         const a = [basename(a0[i]), ...a0.slice(i + 1)];
@@ -309,7 +382,7 @@ export function hardDeny(tool: string, input: any, cwd: string, roots: string[],
         if (isRecursiveRm(a) && args.some((t) => bases.some((b) => isDangerousDeleteTarget(b, t)))) return "recursive deletion of /, ~ or a system directory";
         // Deleting or moving away a directory that contains guard's state (`rm -rf ~/.p*`, `mv ~/.pi x`)
         const removes = DELETERS.has(a[0]) ? args : a[0] === "mv" ? args.slice(0, -1) : [];
-        if (removes.some((t) => bases.some((b) => resolveAll(b, t).some((p) => containsProtectedRoot(p, roots)))))
+        if (removes.some((t) => bases.some((b) => globInto(b, t, roots) || globAround(b, t, roots) || resolveAll(b, t).some((p) => containsProtectedRoot(p, roots)))))
           return "deletes or moves a directory that contains guard's or pi's state";
         if (!PLACERS.has(a[0]) || args.length < 2) continue;
         const dest = args[args.length - 1];
@@ -332,20 +405,24 @@ export function hardDeny(tool: string, input: any, cwd: string, roots: string[],
       // Any other command that changes things and names a directory containing guard's state (find ~/.p? -delete,
       // chmod -R 000 ~/.p?, tar -xf x -C ~/.p?) is blocked; copy destinations and cd targets are handled above
       const a = a0;
-      if (!isReadOnlyArgv(s.argv) && !["cd", "pushd", "popd"].includes(a[0])) {
+      if (changing) {
         // Raw argv too, so location values (git -C x, npm --prefix x) are seen; a copy's destination is checked above
         const named = [...new Set([...nonFlags(a), ...nonFlags(s.argv)])].filter((t) => !(PLACERS.has(a[0]) && t === nonFlags(a).at(-1)));
         // The project's own .pi/.agents are guarded by the explicit write checks; counting the project as their
         // parent would block every `git add .` or `prettier --write .` in projects that have .pi/guard.json
-        const outerRoots = roots.filter((r) => !isInside(r, cwd));
-        if (named.some((t) => bases.some((b) => resolveAll(b, t).some((p) => containsProtectedRoot(p, outerRoots) || (protectedReason(p, roots) && !isInside(p, cwd))))))
+        const hits = (p: string) => containsProtectedRoot(p, outerRoots) || (protectedReason(p, roots) && !isInside(p, cwd));
+        if (named.some((t) => bases.some((b) => globInto(b, t, outerRoots) || globAround(b, t, outerRoots) || resolveAll(b, t).some(hits))))
           return "changes guard's or pi's state, or a directory that contains it";
+        // Values glued to options (-C../../.pi, -t../x, --directory=../x)
+        const optionPaths = bases.flatMap((b) => pathLikeTokens(b, s.argv.slice(1).filter((t) => t.startsWith("-"))));
+        if (optionPaths.some(hits)) return "changes guard's or pi's state, or a directory that contains it";
       }
     }
   }
   // Reading guard's or pi's state with a strictly read-only command only needs confirmation (see sensitive);
   // anything else that touches it, by path or by name (interpreters, cd + relative paths), is blocked.
-  const lower = cmd.toLowerCase();
+  // Names in quoted text (commit messages, search strings) are not paths
+  const lower = scan.toLowerCase();
   const touchesProtected =
     reads.some((p) => protectedReason(p, roots)) || roots.some((r) => lower.includes(r.toLowerCase())) || PROTECTED_MARKERS.some((m) => lower.includes(m));
   if (touchesProtected && !strictlyReadOnly(parsed, writes)) return "may modify a protected path (guard rules, pi state, extensions or settings)";
@@ -406,10 +483,12 @@ function relativeHasHidden(root: string, file: string): boolean {
 
 export function sensitive(tool: string, input: any, cwd: string, roots: string[], parsed?: Parsed): string | undefined {
   const { reads, writes } = inputPaths(tool, input, cwd, parsed);
+  // The project's own .pi/ holds project files (prompts, guard.json); reading them is fine
+  const outerRoots = roots.filter((r) => !isInside(r, cwd));
   for (const p of [...reads, ...writes]) {
     const r = sensitiveReason(p);
     if (r) return r;
-    if (protectedReason(p, roots)) return "reads guard or pi internal state";
+    if (protectedReason(p, outerRoots)) return "reads guard or pi internal state";
   }
   // pi's grep tool searches hidden files recursively
   if (tool === "grep" && reads.concat(reads.length ? [] : [cwd]).some((p) => isHomeOrAncestor(p) || isHomeOrAncestor(realPath(p)))) return "searches file contents across the home directory";
@@ -419,9 +498,13 @@ export function sensitive(tool: string, input: any, cwd: string, roots: string[]
   if (tool === "bash" && parsed) {
     const cmd = String(input?.command ?? "");
     if (/(?:^|[\s"'/:])\.env(?:\.[\w.-]+)?(?=$|[\s"';|&])/.test(cmd) && !/\.env\.(?:example|sample|template)/.test(cmd)) return ".env file";
-    for (const { a, bases } of subsWithBases(parsed, cwd)) {
+    for (const { s: sub, a, bases } of subsWithBases(parsed, cwd)) {
       // Extracting an archive where .pi/ or .agents/ could appear (pi loads them), or recursive permission changes
-      const extracts = (a[0] === "tar" && /^-?[A-Za-z]*x/.test(a[1] ?? "")) || a[0] === "unzip" || a[0] === "7z" || a[0] === "bsdtar";
+      const extracts =
+        ((a[0] === "tar" || a[0] === "bsdtar") && a.slice(1).some((t, i) => (i === 0 && /^[A-Za-z]*x/.test(t)) || (/^-[A-Za-z]*x/.test(t) && !t.startsWith("--")) || isLongOption(t, "--extract") || isLongOption(t, "--get"))) ||
+        a[0] === "unzip" || a[0] === "7z";
+      const patch = patchFiles(a, sub, bases);
+      if (patch && !patch.readable) return "applies a patch guard cannot read";
       const recursivePerms = ["chmod", "chown", "chattr", "chgrp"].includes(a[0]) && a.some((t) => /^-[A-Za-z]*R/.test(t) || t === "--recursive");
       if (extracts || recursivePerms) {
         const given = extracts ? optionValue(a, ["-C", "--directory", "-d"]) : nonFlags(a).slice(1);
@@ -431,7 +514,7 @@ export function sensitive(tool: string, input: any, cwd: string, roots: string[]
           return extracts ? "extracts an archive where .pi/ or .agents/ could be created" : "changes permissions recursively where guard's or pi's state lives";
       }
     }
-    const lower = cmd.toLowerCase();
+    const lower = (parsed.ok && !parsed.dynamic.length ? stripQuoted(cmd) : cmd).toLowerCase();
     if (PROTECTED_MARKERS.some((m) => lower.includes(m))) return "reads guard or pi internal state";
     for (const raw of parsed.subcommands) {
       // `env` alone prints the environment; it is only a wrapper when a command follows

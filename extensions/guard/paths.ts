@@ -1,6 +1,6 @@
 import { existsSync, globSync, lstatSync, readdirSync, readFileSync, readlinkSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, matchesGlob, normalize, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AGENT_DIR } from "./config.ts";
 
@@ -53,14 +53,41 @@ export function clearPathCache() {
   globSpent = 0;
 }
 
-/** globSync with its time charged to the per-judgement budget. */
-function timedGlob(p: string, cwd: string): string[] {
+/** globSync with its time charged to the per-judgement budget. `truncated` when there were more than 500 matches. */
+function timedGlob(p: string, cwd: string): { list: string[]; truncated: boolean } {
   const t = Date.now();
   try {
-    return globSync(p, { cwd }).slice(0, 500).map(String);
+    const all = globSync(p, { cwd });
+    return { list: all.slice(0, 500).map(String), truncated: all.length > 500 };
   } finally {
     globSpent += Date.now() - t;
   }
+}
+
+/**
+ * Whether a wildcard pattern can reach a protected root, decided from the pattern alone (no file system access), so
+ * an expansion that was skipped or cut short cannot hide it. `into`: some match may lie inside a root;
+ * `around`: some match may be a root or one of its parents (deleting or moving it affects the root).
+ */
+export function globMayReach(cwd: string, pattern: string, roots: string[]): { into: boolean; around: boolean } {
+  const q = normalizeInput(pattern).replace(/\*\*+/g, "*");
+  const abs = normalize(isAbsolute(q) ? q : `${cwd}/${q}`);
+  const pSegs = abs.split("/").filter(Boolean);
+  let into = false;
+  let around = false;
+  const test = (path: string, pat: string[]) => {
+    try {
+      return matchesGlob(path, `/${pat.join("/")}`);
+    } catch {
+      return true; // a pattern we cannot evaluate counts as reaching
+    }
+  };
+  for (const r of roots) {
+    const rSegs = r.split("/").filter(Boolean);
+    if (pSegs.length >= rSegs.length && test(`/${rSegs.join("/")}`, pSegs.slice(0, rSegs.length))) into = true;
+    if (pSegs.length <= rSegs.length && test(`/${rSegs.slice(0, pSegs.length).join("/")}`, pSegs)) around = true;
+  }
+  return { into, around };
 }
 
 /** Patterns node's glob may take super-linear time on, or that the per-judgement time budget no longer allows. */
@@ -307,7 +334,9 @@ function expandGlob(cwd: string, pattern: string): string[] {
   // bash 3.2 lets `.*` match `..` and node's glob does not, so hidden-file patterns may reach more than we see
   if (wild.some((s) => s.startsWith("."))) out.push(UNKNOWN_PATH);
   try {
-    out.push(...timedGlob(p, cwd).map((m) => resolvePath(cwd, m)));
+    const g = timedGlob(p, cwd);
+    out.push(...g.list.map((m) => resolvePath(cwd, m)));
+    if (g.truncated) out.push(UNKNOWN_PATH);
   } catch {
     out.push(UNKNOWN_PATH);
   }
@@ -323,7 +352,8 @@ export function expandGlobFully(cwd: string, pattern: string): { matches: string
   const base = globBase(cwd, pattern);
   if (globTooCostly(p, 6)) return { matches: [], base, complete: false };
   try {
-    return { matches: timedGlob(p, cwd).map((m) => resolvePath(cwd, m)), base, complete: true };
+    const g = timedGlob(p, cwd);
+    return { matches: g.list.map((m) => resolvePath(cwd, m)), base, complete: !g.truncated };
   } catch {
     return { matches: [], base, complete: false };
   }

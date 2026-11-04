@@ -49,6 +49,8 @@ Recursive content searches (`grep -r` in any spelling, `rg`, `git grep`, pi's `g
 
 Commands that change things are blocked whenever they name guard's state or a directory containing it, whatever wrapper comes first (`time -p`, `setarch`, `fakeroot`), however the shell gets there (`cd` through wildcards or `CDPATH`, `pushd`/`popd`, `OLDPWD`, `git -C`, `npm --prefix`, brace expansion), and including links (`ln`, `cp -l`) that would let a later plain write reach it. Command-like arguments of other tools (powershell, MCP shells) get the same check. A project's own `.pi/` is protected from writes, but does not block commands such as `git add .` or `prettier --write .`. Options with glued path values (`-f/etc/x`) and the directory stack (`pushd`, `popd`) never count as safe.
 
+Where guard cannot pin something down, it errs on the side of blocking: wildcards are matched against guard's state as patterns (so a skipped or truncated expansion cannot hide them), commands that change `HOME`, `CDPATH` or `OLDPWD` are blocked, and a changing command whose working directory guard cannot determine is blocked. Patches (`git apply`, `git am`, `patch`) are read to see which files they change; a patch guard cannot read asks first.
+
 When an earlier call in the same message may swap whole directories (`git checkout`, `git pull`, extracting archives, `cp`, `rsync`, package installs), later calls that write ask you first, because neither guard nor the model can see what those directories will contain. Strings that look like secrets are redacted before anything is sent.
 
 Risk is scored on five levels, from 0 to 4. guard looks at the probability of the high-risk levels as well as the weighted average, so a split such as "45% catastrophic, 55% harmless" is still caught.

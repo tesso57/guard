@@ -564,6 +564,52 @@ const O = { trusted: true, touched: new Set<string>() };
   ok("r9: more secrets are redacted", !/hunter2pass|s3cr3tpw|abcdef123|sk_live_abc|hf_abcdef|wJalrXUtnFEMI/.test(red), red);
 }
 
+
+// ---------- review 10 ----------
+{
+  const PH = join(HOME, "proj");
+  const rootsH = protectedRoots(PH, join(AGENT, "sessions"));
+  const hd = (c: string, cwd = PROJ, r = roots) => hardDeny("bash", { command: c }, cwd, r, P(c));
+  const safe = (c: string, cwd = PROJ) => safeAllow("bash", { command: c }, cwd, O, P(c));
+  const { clearPathCache } = await import("../extensions/guard/paths.ts");
+  // P0-1: expansion budget or truncation must not hide guard's state
+  clearPathCache();
+  ok("r10: budget-exhausting globs then >> into rules is hard-denied", !!hd("echo > /usr/*/*/*/*/*/q1; echo > /usr/*/*/*/*/*/q2; echo pwn >> ~/.p?/a????/guard/rules.jsonl"));
+  const P10 = mkdtempSync(join(tmpdir(), "guard-p10-"));
+  mkdirSync(join(P10, ".pi"));
+  for (let i = 0; i < 700; i++) mkdirSync(join(P10, `.h${String(i).padStart(3, "0")}`));
+  const r10 = protectedRoots(P10, join(AGENT, "sessions"));
+  clearPathCache();
+  ok("r10: rm -rf .[a-z]* with 700 hidden dirs still sees .pi", !!hd("rm -rf .[a-z]*", P10, r10));
+  ok("r10: write through a glob into the project .pi is hard-denied", !!hd("rm -f /usr/*/*/*/*/*/q1; echo '{}' > .p?/guard.json", P10, r10));
+  // P0-2: HOME / CDPATH / OLDPWD set in other statements
+  for (const c of [`export HOME=${HOME}/.pi; echo pwn >> ~/agent/guard/rules.jsonl`, `export CDPATH=${HOME}/.pi; cd agent; echo pwn >> guard/rules.jsonl`, `HOME=${HOME}/.pi; cd; cd agent; echo pwn >> guard/rules.jsonl`, "declare -x HOME=/tmp", "shopt -s cdable_vars"])
+    ok(`r10: hard-denied: ${c}`, !!hd(c));
+  // P0-3: too many cd candidates
+  const many = Array.from({ length: 9 }, (_, i) => `a${i}`).join(":");
+  ok("r10: long CDPATH that reaches ~/.pi is hard-denied", !!hd(`CDPATH=${many}:${HOME}/.pi cd agent; echo pwn1 >> guard/rules.jsonl`));
+  const deep = Array.from({ length: 20 }, (_, i) => `cd a${i}`).join("; ");
+  ok("r10: rotating a deep stack is hard-denied before writing", !!hd(`${deep}; pushd ${HOME}/.pi; pushd a21; pushd +1; echo pwn2 >> agent/guard/rules.jsonl`));
+  // P0-4: glued option values pointing at parents of guard's state
+  for (const c of ["tar -C../.pi -xf evil.tar", "cp -rt../.pi agent", "tar -xf evil.tar --directory=../.pi"])
+    ok(`r10: hard-denied from ~/proj: ${c}`, !!hd(c, PH, rootsH));
+  // P0-5: padding does not switch off brace expansion
+  ok("r10: long command with braces is still expanded", !!hd(`# ${"x".repeat(4200)}\necho pwn | tee -a ~/.p{i,i}/agent/guard/rules.jsonl`));
+  // P0-6: reads that reach outside through file lists or symlinks
+  for (const c of ["sort --files0-from=list", "wc --files0-from=list", "du --files0-from=list", "diff -r fixtures/b fixtures/a"]) ok(`r10: not safe: ${c}`, !safe(c));
+  ok("r10: plain diff stays safe", safe("diff a.txt b.txt"));
+  // P1-1: patches
+  writeFileSync(join(P10, "fix.patch"), "diff --git a/.pi/extensions/x.ts b/.pi/extensions/x.ts\nnew file mode 100644\n--- /dev/null\n+++ b/.pi/extensions/x.ts\n@@ -0,0 +1 @@\n+evil\n");
+  ok("r10: git apply of a patch touching .pi is hard-denied", !!hd("git apply fix.patch", P10, r10));
+  ok("r10: patch -p1 < fix.patch is hard-denied", !!hd("patch -p1 < fix.patch", P10, r10));
+  ok("r10: an unreadable patch asks first", !!sensitive("bash", { command: "git apply missing.patch" }, P10, r10, P("git apply missing.patch")));
+  writeFileSync(join(P10, "ok.patch"), "--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-a\n+b\n");
+  ok("r10: a normal patch is not hard-denied", !hd("git apply ok.patch", P10, r10));
+  // P2: false positives
+  ok("r10: commit message mentioning ~/.pi is not hard-denied", !hd("git commit -m 'docs: explain ~/.pi layout'"));
+  ok("r10: reading the project's own .pi needs no confirmation", !sensitive("bash", { command: "cat .pi/guard.json" }, P10, r10, P("cat .pi/guard.json")) && !sensitive("bash", { command: "ls -la .pi" }, P10, r10, P("ls -la .pi")));
+}
+
 // ---------- evaluate ----------
 {
   const score = (probs: number[], conf = 0.9) => ({ type: "score", name: "risk", score: probs.reduce((s, p, i) => s + p * i, 0), confidence: conf, probabilities: probs.map((p, i) => ({ value: i, probability: p })) });
@@ -950,6 +996,19 @@ selectScript = [["Deny"]];
 inputs = [""];
 const w2 = await h.tool_call({ type: "tool_call", toolCallId: "w2", toolName: "write", input: swap[1].arguments }, ctx);
 ok("int: a write after git checkout in the same message asks first", w2?.block === true && selectScript.length === 0);
+
+// review 10 P2: creating a branch does not swap files, so a following edit keeps its shortcut
+responder = (b) => ({ answers: answersFor([0.95, 0.05, 0, 0, 0])(b) });
+const br = [
+  { type: "toolCall", id: "v1", name: "bash", arguments: { command: "git checkout -b feature-x" } },
+  { type: "toolCall", id: "v2", name: "edit", arguments: { path: "src/a.ts", edits: [{ oldText: "a", newText: "b" }] } },
+];
+await h.message_end({ type: "message_end", message: { role: "assistant", content: br } }, ctx);
+branch.push({ type: "message", message: { role: "assistant", content: br } });
+await h.tool_call({ type: "tool_call", toolCallId: "v1", toolName: "bash", input: br[0].arguments }, ctx);
+calls = [];
+const v2 = await h.tool_call({ type: "tool_call", toolCallId: "v2", toolName: "edit", input: br[1].arguments }, ctx);
+ok("int: an edit after git checkout -b does not ask", v2 === undefined);
 
 // commands
 notes.length = 0;
