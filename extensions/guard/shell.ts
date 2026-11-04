@@ -616,6 +616,49 @@ export const isLongOption = (t: string, name: string) => {
 const hasLong = (a: string[], ...names: string[]) => flags(a).some((t) => names.some((n) => isLongOption(t, n)));
 const onlyFlagsFrom = (a: string[], allowed: string[]) => a.slice(2).every((t) => allowed.includes(t));
 
+// rg options that only change what is searched or printed. -z (runs decompressors), -L/--follow, --pre,
+// --hostname-bin, --hyperlink-format, --engine, --no-config/--config-path style options are not listed.
+const RG_SHORT_FLAGS = new Set([..."abcFhHiIlnNoOpqsSuUvwxy0".split(""), "."]);
+const RG_SHORT_VALUES = new Set([..."ABCdeEgjmMrtT".split("")]);
+const RG_LONG_FLAGS = new Set([
+  "binary", "byte-offset", "case-sensitive", "column", "count", "count-matches", "crlf", "files", "files-with-matches",
+  "files-without-match", "fixed-strings", "glob-case-insensitive", "heading", "hidden", "ignore-case", "include-zero", "invert-match",
+  "json", "line-number", "line-regexp", "max-columns-preview", "multiline", "multiline-dotall", "no-filename", "no-heading", "no-ignore",
+  "no-ignore-dot", "no-ignore-exclude", "no-ignore-files", "no-ignore-global", "no-ignore-parent", "no-ignore-vcs", "no-line-number",
+  "no-messages", "no-column", "no-unicode", "null", "null-data", "one-file-system", "only-matching", "passthru", "pcre2", "pretty",
+  "quiet", "smart-case", "stats", "text", "trim", "type-list", "unrestricted", "vimgrep", "with-filename", "word-regexp", "no-hidden",
+  "no-follow", "no-binary", "no-text", "no-trim", "no-pcre2", "no-stats", "no-multiline", "no-crlf", "no-fixed-strings", "no-invert-match",
+]);
+const RG_LONG_VALUES = new Set([
+  "after-context", "before-context", "context", "color", "colors", "context-separator", "field-context-separator", "field-match-separator",
+  "encoding", "file", "glob", "iglob", "max-columns", "max-count", "max-depth", "maxdepth", "max-filesize", "path-separator", "regexp",
+  "replace", "sort", "sortr", "threads", "type", "type-not", "type-add", "type-clear", "dfa-size-limit", "regex-size-limit",
+]);
+function rgOptionsAreKnown(a: string[]): boolean {
+  for (let i = 1; i < a.length; i++) {
+    const t = a[i];
+    if (t === "--") return true;
+    if (!t.startsWith("-") || t === "-") continue;
+    if (t.startsWith("--")) {
+      const eq = t.indexOf("=");
+      const name = t.slice(2, eq < 0 ? undefined : eq);
+      if (RG_LONG_FLAGS.has(name) && eq < 0) continue;
+      if (!RG_LONG_VALUES.has(name)) return false;
+      if (eq < 0) i++;
+      continue;
+    }
+    for (let k = 1; k < t.length; k++) {
+      const c = t[k];
+      if (RG_SHORT_VALUES.has(c)) {
+        if (k === t.length - 1) i++;
+        break;
+      }
+      if (!RG_SHORT_FLAGS.has(c)) return false;
+    }
+  }
+  return true;
+}
+
 const READ_ONLY = new Set([
   "ls", "pwd", "echo", "printf", "cat", "head", "tail", "wc", "which", "whoami", "uname", "stat", "cd", "pushd", "popd",
   "du", "df", "grep", "egrep", "fgrep", "cut", "tr", "basename", "dirname", "realpath", "readlink", "ps",
@@ -664,8 +707,8 @@ export function isReadOnlyArgv(raw: string[]): boolean {
     case "find":
       return !a.some((t) => /^-(exec|execdir|ok|okdir|delete|fprint|fprint0|fprintf|fls)$/.test(t));
     case "rg":
-      // --follow / -L walks symlinks out of the project
-      return !hasLong(a, "--pre", "--pre-glob", "--follow") && !hasShort(a, "L");
+      // An allowlist: rg keeps gaining options that run programs (--pre, --hostname-bin) or follow links out (-L)
+      return rgOptionsAreKnown(a);
     case "grep":
     case "egrep":
     case "fgrep":

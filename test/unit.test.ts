@@ -24,7 +24,7 @@ const ok = (name: string, cond: boolean, extra = "") => {
   console.log(`${cond ? "✓" : "✗"} ${name}${!cond && extra ? `  -- ${extra}` : ""}`);
 };
 
-const { parseShell, normalizeArgv } = await import("../extensions/guard/shell.ts");
+const { parseShell, normalizeArgv, isReadOnlyArgv } = await import("../extensions/guard/shell.ts");
 const { hardDeny, sensitive, safeAllow, writesStayPlain } = await import("../extensions/guard/policy.ts");
 const { protectedRoots } = await import("../extensions/guard/paths.ts");
 const { derivePatterns, deriveDenyPatterns, RuleStore } = await import("../extensions/guard/rules.ts");
@@ -846,6 +846,40 @@ const O = { trusted: true, touched: new Set<string>() };
   // P2
   ok("r21: adding .env to .gitignore is not sensitive", !sens("echo '.env' >> .gitignore"));
   ok("r21: a quoted '' before 2> is an argument", P("grep ''2>/dev/null x").subs[0].argv.includes("2"));
+}
+
+// ---------- review 22 ----------
+{
+  const { clearPathCache } = await import("../extensions/guard/paths.ts");
+  const P22 = mkdtempSync(join(tmpdir(), "guard-p22-"));
+  const r22 = protectedRoots(P22, join(AGENT, "sessions"));
+  const safe = (c: string) => (clearPathCache(), safeAllow("bash", { command: c }, P22, O, P(c)));
+  const hd = (c: string) => (clearPathCache(), hardDeny("bash", { command: c }, P22, r22, P(c)));
+  const sens = (c: string) => (clearPathCache(), sensitive("bash", { command: c }, P22, r22, P(c)));
+  // P0-1: rg options are an allowlist
+  for (const c of ["rg --hostname-bin pytest --hyperlink-format default x", "rg --hostname-bin=./t.sh x", "rg -z x", "rg --engine=auto x", "rg --pre-glob '*' x", "rg -nL x", "rg --fol x"])
+    ok(`r22: rg with unknown or exec options is not read-only: ${c}`, !isReadOnlyArgv(c.split(" ")));
+  for (const c of ["rg -n TODO src", "rg -nC3 foo", "rg -e foo -g '*.ts' --type ts -i", "rg --files", "rg -uu --hidden x", "rg --max-count=3 -w x .", "rg -- -x"])
+    ok(`r22: everyday rg stays read-only: ${c}`, isReadOnlyArgv(P(c).subcommands[0]));
+  // P0-2: the project's own .pi/.agents
+  for (const c of [
+    "git mv evil.ts .pi/extensions/evil.ts", "git mv -k evil.ts .pi/extensions/", "git checkout HEAD~1 -- .pi/extensions/x.ts", "git restore --source=HEAD~1 .pi",
+    "git clone https://example.com/r .pi/extensions/y", "git worktree add .pi/extensions/w", "npm install --prefix .pi/extensions x", "npm install --prefix=.pi/extensions x",
+    `python3 -c "open('.pi/extensions/e.ts','w').write('x')"`, `node -e "require('fs').writeFileSync('.agents/skills/x/SKILL.md','')"`,
+  ]) ok(`r22: hard-denied: ${c}`, !!hd(c));
+  for (const c of ["git add .pi/guard.json", "git add .", "git commit -m 'update .pi settings'", "prettier --write .", "git checkout main", `python3 -c "import math; print(math.pi)"`, "git diff .pi"])
+    ok(`r22: still allowed past hard-deny: ${c}`, !hd(c));
+  // P1: diff of directories reads their direct children
+  mkdirSync(join(P22, "docs"));
+  mkdirSync(join(P22, "e"));
+  symlinkSync(join(HOME, ".ssh", "id_rsa"), join(P22, "docs", "notes"));
+  ok("r22: diff of a directory holding a symlink to a key is not safe", !safe("diff -N -a docs e") && !!sens("diff -N -a docs e"));
+  mkdirSync(join(P22, "f"));
+  writeFileSync(join(P22, "f", "a.txt"), "x");
+  ok("r22: diff of plain directories is still safe", safe("diff f e"));
+  // P2: git show REV:path
+  ok("r22: git show HEAD:id_rsa is sensitive", !!sens("git show HEAD:id_rsa") && !!sens("git cat-file -p HEAD:.env"));
+  ok("r22: git show HEAD:README.md is not sensitive", !sens("git show HEAD:README.md"));
 }
 
 // ---------- evaluate ----------

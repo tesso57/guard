@@ -5,7 +5,7 @@
  *   safeAllow : obviously safe → allow without calling the model
  */
 import { homedir, userInfo } from "node:os";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { hasGluedPathValue, innerCommands, INTERPRETER_NAMES, isLongOption, isReadOnlyArgv, isShell, nonFlags, normalizeArgv, type Parsed, parseShell } from "./shell.ts";
 import { containsProtectedRoot, expandGlobFully, gitConfigIsSafe, globHitsOptionLikeName, globMayReach, ignoreFilesReinclude, isFreelyReadable, isHardLinked, isHomeOrAncestor, isInside, isRiskyProjectFile, memo, pathLikeTokens, pathVariants, protectedReason, protectedRoots, realPath, resolvePath, secretFilesUnder, sensitiveReason } from "./paths.ts";
@@ -148,6 +148,10 @@ function computeInputPaths(tool: string, input: any, cwd: string, parsed?: Parse
         writes.push(...[...s.writes, ...bashWriteTargets(s.argv)].flatMap((w) => [...pathVariants(base, w.startsWith("-") ? `./${w}` : w), ...(hasGlob(w) ? globTargets(base, w) : [])]));
       }
       if (!moves) for (const d of dirs) if (d !== cwd) reads.push(d);
+      // diff of two directories compares (and prints) every file directly inside them, following symlinks
+      if (a[0] === "diff") for (const base of bases) reads.push(...dirChildren(pathLikeTokens(base, nonFlags(a))));
+      // git show REV:path and git cat-file -p REV:path print a committed file
+      if (a[0] === "git") for (const t of nonFlags(a).slice(1)) { const m = /^[^:\s]*:(?!\/\/)(.+)$/.exec(t); if (m) reads.push(...pathVariants(cwd, m[1])); }
     }
     reads.push(...pathLikeTokens(cwd, [], parsed.globs));
     return { reads, writes };
@@ -163,6 +167,23 @@ function computeInputPaths(tool: string, input: any, cwd: string, parsed?: Parse
   for (const k of ["path", "file_path", "filePath", "file", "dir", "directory"]) if (typeof input?.[k] === "string") p.push(...pathVariants(cwd, input[k]));
   if (tool === "edit" || tool === "write") return { reads: [], writes: p };
   return { reads: p, writes: [] };
+}
+
+/** Entries directly inside the given directories (bounded; a huge directory counts as unreadable `/`). */
+function dirChildren(paths: string[]): string[] {
+  const out: string[] = [];
+  for (const p of paths) {
+    let names: string[];
+    try {
+      if (!statSync(p).isDirectory()) continue;
+      names = readdirSync(p);
+    } catch {
+      continue;
+    }
+    if (names.length > 2000) return ["/"];
+    out.push(...names.map((n) => join(p, n)));
+  }
+  return out;
 }
 
 /** Files a `git apply`, `git am` or `patch` would change, read from the patch file itself (undefined if unreadable). */
@@ -543,6 +564,16 @@ export function hardDeny(tool: string, input: any, cwd: string, roots: string[],
         // Values glued to options (-C../../.pi, -t../x, --directory=../x)
         const optionPaths = bases.flatMap((b) => pathLikeTokens(b, s.argv.slice(1).filter((t) => t.startsWith("-"))));
         if (optionPaths.some(hits)) return "changes guard's or pi's state, or a directory that contains it";
+        // The project's own .pi/.agents (code pi loads): any changing command naming a path inside them
+        // (git mv x .pi/extensions/, git checkout -- .pi/x, npm i --prefix .pi/extensions). Directories that merely
+        // contain them (`.`, `src/..`) stay allowed.
+        const innerRoots = roots.filter((r) => isInside(r, cwd));
+        const inInner = (p: string) => !!protectedReason(p, innerRoots);
+        if (named.some((t) => bases.some((b) => globInto(b, t, innerRoots) || resolveAll(b, t).some(inInner))) || optionPaths.some(inInner))
+          return "changes the project's .pi/ or .agents/ (code and settings pi loads)";
+        // Interpreter code naming them (python3 -c "open('.pi/extensions/e.ts','w')")
+        if (INTERPRETER_NAMES.has(basename(a[0] ?? "")) && a.slice(1).some((t) => INNER_NAME.test(t) || innerRoots.some((r) => t.includes(r))))
+          return "an interpreter command names the project's .pi/ or .agents/";
       }
     }
   }
@@ -557,6 +588,8 @@ export function hardDeny(tool: string, input: any, cwd: string, roots: string[],
   if (touchesProtected && !strictlyReadOnly(parsed, writes)) return "may modify a protected path (guard rules, pi state, extensions or settings)";
   return undefined;
 }
+
+const INNER_NAME = /(?:^|[^\w.-])\.(?:pi|agents)(?:[/\\'"\s)]|$)/;
 
 const CONTENT_SEARCH = new Set(["rg", "ag", "ack", "grep", "egrep", "fgrep"]);
 const isGrepFamily = (h: string) => h === "grep" || h === "egrep" || h === "fgrep";
