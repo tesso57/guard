@@ -10,7 +10,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { DATA_DIR } from "./config.ts";
-import { isLongOption, normalizeArgv, type Parsed, parseShell } from "./shell.ts";
+import { innerCommands, isLongOption, normalizeArgv, type Parsed, parseShell } from "./shell.ts";
 import { inputPaths } from "./policy.ts";
 
 export type Decision = "allow" | "deny" | "ask";
@@ -191,10 +191,8 @@ function strictMatchesArgv(m: Match, raw: string[]): boolean {
     .every((f) => present(f) || (Object.hasOwn(FLAG_ALIASES, f) ? FLAG_ALIASES[f] : []).some(present) || ((f === "--force" || f === "-f") && forcePush));
 }
 
-const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "ash"]);
-
 /**
- * Subcommands plus the commands hidden inside `bash -c '…'` and `eval '…'` (up to 3 levels),
+ * Subcommands plus the commands hidden inside `bash -c '…'`, `eval '…'` and similar (up to 3 levels),
  * so deny and ask rules also see them.
  */
 function expandSubcommands(subs: string[][], depth = 0): string[][] {
@@ -202,23 +200,7 @@ function expandSubcommands(subs: string[][], depth = 0): string[][] {
   for (const raw of subs) {
     out.push(raw);
     if (depth >= 3) continue;
-    const inner: string[] = [];
-    const head = basename(raw[0] ?? "");
-    const a = normalizeArgv(raw, "deny").argv;
-    if (head === "eval" || head === "watch" || head === "parallel") inner.push(raw.slice(1).filter((t) => !t.startsWith("-")).join(" "));
-    // sh -c 'cmd', bash -c -- 'cmd', su -c 'cmd', script -qc 'cmd'
-    const c = a.findIndex((t, i) => i > 0 && /^-[a-z]*c[a-z]*$/.test(t));
-    if ((SHELLS.has(a[0]) || a[0] === "su" || a[0] === "runuser" || a[0] === "script") && c > 0) {
-      const next = a[c + 1] === "--" ? a[c + 2] : a[c + 1];
-      if (next !== undefined) inner.push(next);
-    }
-    // env -S 'cmd args'
-    if (head === "env") raw.forEach((t, i) => (t === "-S" || t === "--split-string") && raw[i + 1] && inner.push(raw[i + 1]));
-    // find … -exec cmd {} ;
-    raw.forEach((t, i) => {
-      if (/^-(exec|execdir|ok|okdir)$/.test(t)) inner.push(raw.slice(i + 1, raw.findIndex((x, j) => j > i && (x === ";" || x === "+")) >>> 0).join(" "));
-    });
-    for (const x of inner) if (x) out.push(...expandSubcommands(parseShell(x).subcommands, depth + 1));
+    for (const x of innerCommands(raw)) out.push(...expandSubcommands(parseShell(x).subcommands, depth + 1));
   }
   return out;
 }

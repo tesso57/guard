@@ -4,10 +4,10 @@
  *   sensitive : access to paths that likely hold secrets, or to guard's own state → confirm
  *   safeAllow : obviously safe → allow without calling the model
  */
-import { homedir } from "node:os";
+import { homedir, userInfo } from "node:os";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { hasGluedPathValue, isLongOption, isReadOnlyArgv, nonFlags, normalizeArgv, type Parsed, parseShell } from "./shell.ts";
+import { hasGluedPathValue, innerCommands, INTERPRETER_NAMES, isLongOption, isReadOnlyArgv, isShell, nonFlags, normalizeArgv, type Parsed, parseShell } from "./shell.ts";
 import { containsProtectedRoot, expandGlobFully, gitConfigIsSafe, globMayReach, isFreelyReadable, isHardLinked, isHomeOrAncestor, isInside, isRiskyProjectFile, memo, pathLikeTokens, pathVariants, protectedReason, protectedRoots, realPath, resolvePath, secretFilesUnder, sensitiveReason } from "./paths.ts";
 
 const BUILTIN_TOOLS = new Set(["bash", "edit", "write", "read", "grep", "find", "ls"]);
@@ -26,6 +26,14 @@ const HARD_DENY_BASH: [RegExp, string][] = [
 
 /** Spellings of guard's and pi's state that can appear in commands without resolving to a known path. */
 const PROTECTED_MARKERS = ["~/.pi", "$home/.pi", "${home}/.pi", ".pi/agent"];
+
+/**
+ * Here-document bodies (commit messages, docs), also inside $(…), are left out of the name scan. Bodies fed to a
+ * shell are hard-denied separately as scripts, and bodies fed to other interpreters are scanned on their own.
+ */
+function dropCatHeredocs(cmd: string): string {
+  return cmd.replace(/<<-?\s*(['"]?)([A-Za-z_][\w-]*)\1([^\n]*)\n[\s\S]*?\n[ \t]*\2(?=\s|$|\)|;)/g, "<<$1$2$1$3");
+}
 
 /** Commands that delete their arguments. */
 const DELETERS = new Set(["rm", "rmdir", "shred", "unlink"]);
@@ -188,10 +196,24 @@ function globTargets(base: string, t: string): string[] {
   return e.complete ? e.matches : [e.base];
 }
 
+function safeUser(): string {
+  try {
+    return userInfo().username;
+  } catch {
+    return "";
+  }
+}
+
 /** Where `cd target` may lead from each of the current candidates (globs, CDPATH, a failed cd). */
 function cdTargets(dirs: string[], target: string | undefined, assigns: string[], roots: string[]): { dirs: string[]; unknown: boolean } {
   const home = assigns.find((x) => x.startsWith("HOME="))?.slice(5);
   if (!target || target === "-") return { dirs: [home ? resolvePath(dirs[0], home) : homedir()], unknown: false };
+  // ~user: the current user's home is ~; anyone else's home is somewhere guard does not track
+  const tilde = /^~([^/]+)(.*)$/.exec(target);
+  if (tilde) {
+    if (tilde[1] !== safeUser()) return { dirs, unknown: true };
+    target = `~${tilde[2]}`;
+  }
   const cdpath = assigns.find((x) => x.startsWith("CDPATH="))?.slice(7) ?? process.env.CDPATH;
   const out: string[] = [];
   let unknown = false;
@@ -280,7 +302,7 @@ const LOCATION_VALUE_OPTIONS = ["-C", "--git-dir", "--work-tree", "--prefix", "-
 const RUNS_NEXT = new Set([
   "time", "nice", "nohup", "setsid", "timeout", "sudo", "doas", "env", "stdbuf", "ionice", "chrt", "taskset", "flock", "unbuffer",
   "fakeroot", "setarch", "unshare", "strace", "ltrace", "busybox", "command", "builtin", "exec", "xargs", "parallel", "watch", "eval",
-  "nsenter", "chroot", "proot", "firejail", "systemd-run", "caffeinate", "arch",
+  "nsenter", "chroot", "proot", "firejail", "systemd-run", "caffeinate", "arch", "npx", "bunx", "pnpx", "uvx",
 ]);
 
 /**
@@ -299,23 +321,98 @@ function commandPositions(a: string[]): number[] {
   return [...new Set(out)].filter((i) => i < a.length);
 }
 
-/** Static expansions of brace lists and $'…' quoting, so hard-deny also sees `.{p,q}i` and `$'.pi'`. */
+const ANSI_ESCAPES: Record<string, string> = { n: "\n", t: "\t", r: "\r", a: "\x07", b: "\b", e: "\x1b", E: "\x1b", f: "\f", v: "\v" };
+
+function decodeAnsiC(s: string): string {
+  return s.replace(/\\(x[0-9a-fA-F]{1,2}|u[0-9a-fA-F]{1,4}|U[0-9a-fA-F]{1,8}|[0-7]{1,3}|c.|.)/g, (_m, e: string) => {
+    if (e[0] === "x") return String.fromCharCode(parseInt(e.slice(1), 16));
+    if (e[0] === "u" || e[0] === "U") return String.fromCodePoint(Math.min(parseInt(e.slice(1), 16), 0x10ffff));
+    if (/^[0-7]/.test(e)) return String.fromCharCode(parseInt(e, 8) & 0xff);
+    if (e[0] === "c") return String.fromCharCode(e.charCodeAt(1) & 31);
+    return ANSI_ESCAPES[e] ?? e;
+  });
+}
+
+/** Alternatives of one brace group: a comma list (quotes respected) or a sequence {a..e} / {1..9}. */
+function braceAlternatives(inner: string): string[] | undefined {
+  const seq = /^(-?\d+|[A-Za-z])\.\.(-?\d+|[A-Za-z])(?:\.\.-?\d+)?$/.exec(inner);
+  if (seq) {
+    const num = /^-?\d/.test(seq[1]);
+    const from = num ? Number(seq[1]) : seq[1].charCodeAt(0);
+    const to = num ? Number(seq[2]) : seq[2].charCodeAt(0);
+    const out: string[] = [];
+    for (let x = from; out.length < 16; x += from <= to ? 1 : -1) {
+      out.push(num ? String(x) : String.fromCharCode(x));
+      if (x === to) break;
+    }
+    return out;
+  }
+  const parts: string[] = [];
+  let cur = "";
+  let q: string | null = null;
+  for (const ch of inner) {
+    if (q) {
+      if (ch === q) q = null;
+      cur += ch;
+    } else if (ch === "'" || ch === '"') {
+      q = ch;
+      cur += ch;
+    } else if (ch === ",") {
+      parts.push(cur);
+      cur = "";
+    } else cur += ch;
+  }
+  parts.push(cur);
+  return parts.length > 1 ? parts.slice(0, 8) : undefined;
+}
+
+/**
+ * Static expansions of brace lists and sequences, $'…' (all escapes) and $"…", so hard-deny also sees `.{p,q}i`,
+ * `.p{i..i}` and `$'\056pi'`. A last variant replaces whatever is left with `*`, which the wildcard checks then
+ * match against guard's state by pattern.
+ */
 function staticVariants(cmd: string): string[] {
-  let variants = [cmd.replace(/\$'((?:[^'\\]|\\.)*)'/g, (_m, s: string) => `'${s.replace(/\\x([0-9a-f]{2})/gi, (_x, h) => String.fromCharCode(parseInt(h, 16))).replace(/\\(.)/g, "$1")}'`)];
+  const unquoted = cmd
+    .replace(/\$'((?:[^'\\]|\\.)*)'/g, (_m, x: string) => `'${decodeAnsiC(x).replace(/'/g, "")}'`)
+    .replace(/\$"((?:[^"\\]|\\.)*)"/g, (_m, x: string) => `"${x}"`);
+  let variants = [unquoted];
   for (let round = 0; round < 3; round++) {
     const next: string[] = [];
     for (const v of variants) {
-      const m = /\{([^{}\s]*,[^{}\s]*)\}/.exec(v);
-      if (!m) next.push(v);
-      else for (const alt of m[1].split(",").slice(0, 8)) next.push(v.slice(0, m.index) + alt + v.slice(m.index + m[0].length));
+      const m = /\{([^{}]*)\}/.exec(v);
+      const alts = m ? braceAlternatives(m[1]) : undefined;
+      if (!m || !alts) next.push(v);
+      else for (const alt of alts) next.push(v.slice(0, m.index) + alt + v.slice(m.index + m[0].length));
     }
     variants = next.slice(0, 32);
   }
-  return variants.filter((v) => v !== cmd);
+  const wild = cmd.replace(/\$'(?:[^'\\]|\\.)*'|\$"(?:[^"\\]|\\.)*"|\{[^{}\s]*\}/g, "*");
+  return [...new Set([...variants, wild])].filter((v) => v !== cmd);
 }
 
 const isLinking = (a: string[]) =>
   a[0] === "ln" || (a[0] === "cp" && a.some((t) => /^-[A-Za-z]*[ls]/.test(t) || isLongOption(t, "--link") || isLongOption(t, "--symbolic-link")));
+
+const PATH_VARS = /^(HOME|CDPATH|OLDPWD|PWD)(\+?=|$)/;
+
+/** Whether a subcommand changes HOME, CDPATH, OLDPWD or PWD for the commands after it. */
+function setsPathVars(s: Parsed["subs"][number], a: string[]): boolean {
+  if (s.argv.length === 0 && s.assigns.some((x) => PATH_VARS.test(x))) return true;
+  const head = a[0];
+  const names = (xs: string[]) => xs.some((t) => PATH_VARS.test(t));
+  if (["export", "declare", "typeset", "readonly", "local", "unset", "read", "mapfile", "readarray", "getopts"].includes(head) && names(a.slice(1))) return true;
+  if (head === "printf") {
+    const i = a.findIndex((t) => /^-[A-Za-z]*v/.test(t));
+    if (i > 0 && names([a[i].replace(/^-[A-Za-z]*v/, "") || a[i + 1] || ""])) return true;
+  }
+  return head === "shopt" && a.includes("cdable_vars");
+}
+
+/** Whether text names guard's or pi's state (a root path or a marker such as ~/.pi). */
+function namesProtected(text: string, roots: string[]): boolean {
+  const lower = text.toLowerCase();
+  return roots.some((r) => lower.includes(r.toLowerCase())) || PROTECTED_MARKERS.some((m) => lower.includes(m));
+}
 
 function isRecursiveRm(a: string[]): boolean {
   return a[0] === "rm" && a.slice(1).some((t) => t === "--recursive" || (/^-[A-Za-z]+$/.test(t) && /[rR]/.test(t)));
@@ -331,7 +428,7 @@ function strictlyReadOnly(parsed: Parsed | undefined, writes: string[]): boolean
   return !!parsed && parsed.ok && !parsed.dynamic.length && !writes.length && parsed.subcommands.every(isReadOnlyArgv);
 }
 
-export function hardDeny(tool: string, input: any, cwd: string, roots: string[], parsed?: Parsed): string | undefined {
+export function hardDeny(tool: string, input: any, cwd: string, roots: string[], parsed?: Parsed, depth = 0): string | undefined {
   const { reads, writes } = inputPaths(tool, input, cwd, parsed);
   for (const w of writes) {
     const r = protectedReason(w, roots);
@@ -342,15 +439,15 @@ export function hardDeny(tool: string, input: any, cwd: string, roots: string[],
     // Command-like strings in other tools (powershell, MCP shells) get the same hard-deny as bash
     for (const x of allStrings(input)) {
       if (x.length > 16 * 1024 || !/\s/.test(x.trim())) continue;
-      const r = hardDeny("bash", { command: x }, cwd, roots, parseShell(x));
+      const r = hardDeny("bash", { command: x }, cwd, roots, parseShell(x), depth + 1);
       if (r) return `${r} (in ${tool})`;
     }
     return undefined;
   }
   const cmd = String(input?.command ?? "");
-  if (cmd.length <= 16 * 1024 && /[{]|\$'/.test(cmd))
+  if (depth < 3 && cmd.length <= 16 * 1024 && /[{]|\$['"]/.test(cmd))
     for (const v of staticVariants(cmd)) {
-      const r = hardDeny("bash", { command: v }, cwd, roots, parseShell(v));
+      const r = hardDeny("bash", { command: v }, cwd, roots, parseShell(v), depth + 1);
       if (r) return r;
     }
   const scan = parsed && parsed.ok && !parsed.dynamic.length ? stripQuoted(cmd) : cmd;
@@ -364,11 +461,24 @@ export function hardDeny(tool: string, input: any, cwd: string, roots: string[],
     const globAround = (b: string, t: string, rs: string[]) => hasGlob(t) && globMayReach(b, t, rs).around;
     for (const { s, a: a0, bases, unknown } of subsWithBases(parsed, cwd)) {
       // Changing HOME, CDPATH or OLDPWD for later commands changes what ~, cd and cd - mean
-      const setsPathVars =
-        (s.argv.length === 0 && s.assigns.some((x) => /^(HOME|CDPATH|OLDPWD|PWD)=/.test(x))) ||
-        (["export", "declare", "typeset", "readonly", "local"].includes(a0[0]) && a0.some((t) => /^(HOME|CDPATH|OLDPWD|PWD)(=|$)/.test(t))) ||
-        (a0[0] === "shopt" && a0.includes("cdable_vars"));
-      if (setsPathVars) return "changes HOME, CDPATH or OLDPWD, which decide where later paths point";
+      if (setsPathVars(s, a0)) return "changes HOME, CDPATH or OLDPWD, which decide where later paths point";
+      // pi's own CLI changes which packages and extensions pi loads
+      for (const i of commandPositions(a0)) {
+        if (basename(a0[i]) !== "pi") continue;
+        const sub = a0.slice(i + 1).find((t) => !t.startsWith("-"));
+        if (sub && ["install", "remove", "uninstall", "update", "config", "link"].includes(sub)) return "changes pi's packages or configuration (pi install/remove/update/config)";
+      }
+      // Commands run by this one (sh -c '…', eval, trap, su -c) and scripts fed to a shell's stdin
+      if (depth < 3) {
+        const head = basename(a0[0] ?? "");
+        const scripts = [...innerCommands(s.argv), ...(isShell(head) ? s.heredocs : [])];
+        for (const x of scripts) {
+          const r = hardDeny("bash", { command: x }, cwd, roots, parseShell(x), depth + 1);
+          if (r) return r;
+        }
+        // Other interpreters reading a here-document: their code naming guard's state is blocked
+        if (INTERPRETER_NAMES.has(head) && s.heredocs.some((b) => namesProtected(b, roots))) return "an interpreter script names guard's or pi's state";
+      }
       // Redirects make even `echo` a writing command
       const changing = (!isReadOnlyArgv(s.argv) || s.writes.length > 0) && !["cd", "pushd", "popd"].includes(a0[0]);
       if (unknown && changing) return "runs a changing command in a directory guard cannot determine";
@@ -421,8 +531,8 @@ export function hardDeny(tool: string, input: any, cwd: string, roots: string[],
   }
   // Reading guard's or pi's state with a strictly read-only command only needs confirmation (see sensitive);
   // anything else that touches it, by path or by name (interpreters, cd + relative paths), is blocked.
-  // Names in quoted text (commit messages, search strings) are not paths
-  const lower = scan.toLowerCase();
+  // Names in quoted text and in here-documents fed to cat (commit messages, docs) are not paths
+  const lower = (parsed && parsed.ok && !parsed.dynamic.length ? stripQuoted(dropCatHeredocs(cmd)) : dropCatHeredocs(cmd)).toLowerCase();
   const touchesProtected =
     reads.some((p) => protectedReason(p, roots)) || roots.some((r) => lower.includes(r.toLowerCase())) || PROTECTED_MARKERS.some((m) => lower.includes(m));
   if (touchesProtected && !strictlyReadOnly(parsed, writes)) return "may modify a protected path (guard rules, pi state, extensions or settings)";
@@ -498,7 +608,11 @@ export function sensitive(tool: string, input: any, cwd: string, roots: string[]
   if (tool === "bash" && parsed) {
     const cmd = String(input?.command ?? "");
     if (/(?:^|[\s"'/:])\.env(?:\.[\w.-]+)?(?=$|[\s"';|&])/.test(cmd) && !/\.env\.(?:example|sample|template)/.test(cmd)) return ".env file";
-    for (const { s: sub, a, bases } of subsWithBases(parsed, cwd)) {
+    // cd to a computed path ($(…), $VAR) and then changing files: guard cannot tell where that happens
+    const subs = subsWithBases(parsed, cwd);
+    const computedCd = subs.findIndex((x) => ["cd", "pushd"].includes(x.a[0]) && /[$`]/.test(x.s.argv.slice(1).join(" ")));
+    if (computedCd >= 0 && subs.slice(computedCd + 1).some((x) => !isReadOnlyArgv(x.s.argv) || x.s.writes.length)) return "changes files after cd to a computed directory";
+    for (const { s: sub, a, bases } of subs) {
       // Extracting an archive where .pi/ or .agents/ could appear (pi loads them), or recursive permission changes
       const extracts =
         ((a[0] === "tar" || a[0] === "bsdtar") && a.slice(1).some((t, i) => (i === 0 && /^[A-Za-z]*x/.test(t)) || (/^-[A-Za-z]*x/.test(t) && !t.startsWith("--")) || isLongOption(t, "--extract") || isLongOption(t, "--get"))) ||
@@ -514,7 +628,7 @@ export function sensitive(tool: string, input: any, cwd: string, roots: string[]
           return extracts ? "extracts an archive where .pi/ or .agents/ could be created" : "changes permissions recursively where guard's or pi's state lives";
       }
     }
-    const lower = (parsed.ok && !parsed.dynamic.length ? stripQuoted(cmd) : cmd).toLowerCase();
+    const lower = (parsed.ok && !parsed.dynamic.length ? stripQuoted(dropCatHeredocs(cmd)) : dropCatHeredocs(cmd)).toLowerCase();
     if (PROTECTED_MARKERS.some((m) => lower.includes(m))) return "reads guard or pi internal state";
     for (const raw of parsed.subcommands) {
       // `env` alone prints the environment; it is only a wrapper when a command follows

@@ -48,7 +48,9 @@ const O = { trusted: true, touched: new Set<string>() };
   ok("shell: brace expansion dynamic", P("rm {a,b}.txt").dynamic.includes("brace expansion"));
   ok("shell: env prefix dynamic", P("PATH=/x npm test").dynamic.length > 0);
   ok("shell: unterminated", !P(`echo "abc`).ok);
-  ok("shell: heredoc dynamic", P("cat <<EOF\nhi\nEOF").dynamic.length > 0);
+  ok("shell: heredoc body without expansions is static data", P("cat <<EOF\nhi ~/.pi\nEOF").dynamic.length === 0 && P("cat <<EOF\nhi\nEOF").subs[0].heredocs[0] === "hi");
+  ok("shell: heredoc body with $ is dynamic", P("cat <<EOF\n$HOME\nEOF").dynamic.length > 0);
+  ok("shell: quoted heredoc body with $ stays static", P("cat <<'EOF'\n$HOME\nEOF").dynamic.length === 0);
   ok("shell: unicode space dynamic", P("ls -la").dynamic.length > 0);
   ok("shell: globs recorded, quoted not", JSON.stringify(P(`cat *.ts "x*"`).globs) === JSON.stringify(["*.ts"]));
   ok("shell: deny normalization strips git -C", JSON.stringify(normalizeArgv(["/usr/bin/git", "-C", ".", "--no-pager", "push", "-f"], "deny").argv) === JSON.stringify(["git", "push", "-f"]));
@@ -608,6 +610,36 @@ const O = { trusted: true, touched: new Set<string>() };
   // P2: false positives
   ok("r10: commit message mentioning ~/.pi is not hard-denied", !hd("git commit -m 'docs: explain ~/.pi layout'"));
   ok("r10: reading the project's own .pi needs no confirmation", !sensitive("bash", { command: "cat .pi/guard.json" }, P10, r10, P("cat .pi/guard.json")) && !sensitive("bash", { command: "ls -la .pi" }, P10, r10, P("ls -la .pi")));
+}
+
+
+// ---------- review 11 ----------
+{
+  const PH = join(HOME, "proj");
+  const rootsH = protectedRoots(PH, join(AGENT, "sessions"));
+  const hd = (c: string, cwd = PH, r = rootsH) => hardDeny("bash", { command: c }, cwd, r, P(c));
+  const safe = (c: string, cwd = PH) => safeAllow("bash", { command: c }, cwd, O, P(c));
+  // P0-1/2: printf -v and other ways to set variables
+  ok("r11: printf -v CDPATH is not safe", !safe("printf -v CDPATH %s%s . .; cd .ssh && cat id*"));
+  ok("r11: printf -v PATH is not safe", !safe("printf -v PATH %s .; ls -la") && !safe("printf -vPATH %s .; ls"));
+  for (const c of ["printf -v HOME ../.pi; tee ~/agent/settings.json", "printf -v CDPATH ..; cd .pi; tee agent/x", "HOME+=/.pi; tee ~/agent/settings.json", "read HOME < f", "unset CDPATH", "mapfile -t OLDPWD < f", "getopts ab HOME"])
+    ok(`r11: hard-denied: ${c}`, !!hd(c));
+  // static expansion forms
+  for (const c of ["tee ../.p{i..i}/agent/settings.json </dev/null", "tee ../.{pi,'a b'}/agent/settings.json", "tee ../$'\\056'pi/agent/settings.json", 'tee ../$".pi"/agent/settings.json'])
+    ok(`r11: hard-denied: ${c}`, !!hd(c));
+  ok("r11: cd ~otheruser then writing is hard-denied", !!hd("cd ~nobody-xyz/.pi && cd agent && tee settings.json"));
+  // commands inside other commands
+  for (const c of [`sh -c 'cd ../.p""i/agent && tee settings.json'`, `eval "tee ../.pi/agent/settings.json"`, `trap "tee ../.pi/agent/settings.json" EXIT`, `bash <<'EOF'\ntee ../.pi/agent/settings.json\nEOF`])
+    ok(`r11: hard-denied: ${c.split("\n")[0]}`, !!hd(c));
+  // pi's own CLI
+  for (const c of ["pi install npm:evil", "pi remove x", "pi update", "npx pi install ../ext", "pi install -l ./ext"]) ok(`r11: hard-denied: ${c}`, !!hd(c));
+  // P1: here-documents fed to cat are data
+  ok("r11: docs heredoc mentioning ~/.pi/agent is not hard-denied", !hd("cat > docs/setup.md <<'EOF'\nCopy the extension to ~/.pi/agent/extensions\nEOF"));
+  ok("r11: commit message heredoc in $(…) is not hard-denied", !hd(`git commit -m "$(cat <<'EOF'\nfix: resolve ~/.pi/agent path\nEOF\n)"`));
+  // P2
+  ok("r11: cd to a computed path then writing asks first", !!sensitive("bash", { command: 'cd "$(git rev-parse --show-toplevel)" && tee x' }, PH, rootsH, P('cd "$(git rev-parse --show-toplevel)" && tee x')));
+  ok("r11: cd to a computed path then npm test is not hard-denied", !hd('cd "$(git rev-parse --show-toplevel)" && npm test'));
+  ok("r11: less +!cmd is not safe", !safe("less '+!id' README.md"));
 }
 
 // ---------- evaluate ----------

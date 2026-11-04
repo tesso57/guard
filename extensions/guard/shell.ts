@@ -14,6 +14,8 @@ type Sub = {
   writes: string[];
   /** Targets of input redirects (<). */
   reads: string[];
+  /** Bodies of here-documents fed to this command's stdin. */
+  heredocs: string[];
 };
 
 export type Parsed = {
@@ -32,6 +34,7 @@ export type Parsed = {
 };
 
 /** If argv[0] is one of these, the arguments can be arbitrary code, so rules are never applied. */
+export const INTERPRETER_NAMES = new Set(["python", "python2", "python3", "node", "deno", "bun", "ruby", "perl", "php", "lua", "awk", "gawk", "osascript", "pwsh", "powershell"]);
 const INTERPRETERS = new Set([
   "sh", "bash", "zsh", "fish", "dash", "ksh", "csh", "tcsh",
   "python", "python2", "python3", "node", "deno", "bun", "ruby", "perl", "php", "lua", "awk", "gawk",
@@ -55,18 +58,23 @@ export function parseShell(cmd: string): Parsed {
   const dynamic: string[] = [];
   const globs: string[] = [];
   const subs: Sub[] = [];
-  let cur: Sub = { argv: [], assigns: [], writes: [], reads: [] };
+  let cur: Sub = { argv: [], assigns: [], writes: [], reads: [], heredocs: [] };
+  /** Here-documents whose bodies start after the current line. */
+  const pendingDocs: { sub: Sub; delim: string; stripTabs: boolean; quoted: boolean }[] = [];
   let tok = "";
   let inTok = false;
   let globbed = false;
   let tildeStart = false;
   let quote: "'" | '"' | null = null;
-  let pendingRedirect: "write" | "read" | null = null;
+  let pendingRedirect: "write" | "read" | "data" | null = null;
 
   const endTok = () => {
     if (!inTok) return;
     if (pendingRedirect === "write") cur.writes.push(tok);
     else if (pendingRedirect === "read") cur.reads.push(tok);
+    else if (pendingRedirect === "data") {
+      /* here-string word: data, not a path */
+    }
     else cur.argv.push(tok);
     if (globbed && tok !== "[" && tok !== "]") globs.push(tok);
     // ~user, ~+ and ~- are expanded by the shell to other directories
@@ -80,7 +88,7 @@ export function parseShell(cmd: string): Parsed {
   const endCmd = () => {
     endTok();
     if (cur.argv.length || cur.writes.length || cur.reads.length) subs.push(cur);
-    cur = { argv: [], assigns: [], writes: [], reads: [] };
+    cur = { argv: [], assigns: [], writes: [], reads: [], heredocs: [] };
   };
   const dyn = (why: string) => {
     if (!dynamic.includes(why)) dynamic.push(why);
@@ -136,6 +144,31 @@ export function parseShell(cmd: string): Parsed {
     }
     if (c === "\n" || c === ";") {
       endCmd();
+      if (c === "\n" && pendingDocs.length) {
+        // Here-document bodies follow the line that opened them; they are data for the command, not words
+        let pos = i + 1;
+        for (const d of pendingDocs.splice(0)) {
+          const lines: string[] = [];
+          let closed = false;
+          while (pos <= cmd.length) {
+            const nl = cmd.indexOf("\n", pos);
+            const end = nl === -1 ? cmd.length : nl;
+            const line = cmd.slice(pos, end);
+            pos = end + 1;
+            if ((d.stripTabs ? line.replace(/^\t+/, "") : line) === d.delim) {
+              closed = true;
+              break;
+            }
+            lines.push(line);
+            if (nl === -1) break;
+          }
+          const body = lines.join("\n");
+          d.sub.heredocs.push(body);
+          if (!closed) dyn("unterminated here-document");
+          if (!d.quoted && /[$`]/.test(body)) dyn("expansion inside a here-document");
+        }
+        i = pos - 1;
+      }
       continue;
     }
     if (c === "&" || c === "|") {
@@ -158,11 +191,30 @@ export function parseShell(cmd: string): Parsed {
     if (c === "<") {
       if (inTok && /^\d+$/.test(tok)) { tok = ""; inTok = false; }
       endTok();
+      if (n === "<" && cmd[i + 2] === "<") {
+        // <<< word: a here-string, the word is data
+        i += 2;
+        pendingRedirect = "data";
+        continue;
+      }
       if (n === "<") {
-        dyn("heredoc / herestring");
+        // << DELIM or <<- DELIM: the body is read after the end of this line
         i++;
-        if (cmd[i + 1] === "<") i++;
-        pendingRedirect = "read";
+        let stripTabs = false;
+        if (cmd[i + 1] === "-") {
+          stripTabs = true;
+          i++;
+        }
+        while (cmd[i + 1] === " " || cmd[i + 1] === "\t") i++;
+        let delim = "";
+        let quoted = false;
+        while (i + 1 < cmd.length && !/[\s;&|<>()]/.test(cmd[i + 1])) {
+          const ch = cmd[++i];
+          if (ch === "'" || ch === '"' || ch === "\\") quoted = true;
+          else delim += ch;
+        }
+        if (!delim) dyn("malformed here-document");
+        pendingDocs.push({ sub: cur, delim, stripTabs, quoted });
         continue;
       }
       if (n === "&") {
@@ -220,14 +272,15 @@ export function parseShell(cmd: string): Parsed {
     inTok = true;
   }
   endTok();
+  if (pendingDocs.length) dyn("unterminated here-document");
   const ok = quote === null && pendingRedirect === null;
   endCmd();
 
   for (const s of subs) {
     const a = s.argv;
     for (;;) {
-      // A leading VAR=value can change what the command does (PATH=..., GIT_SSH_COMMAND=..., ...)
-      if (a.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(a[0])) {
+      // A leading VAR=value (or VAR+=value) can change what the command does (PATH=..., GIT_SSH_COMMAND=..., ...)
+      if (a.length && /^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(a[0])) {
         s.assigns.push(a.shift()!);
         dyn("environment assignment prefix");
       } else if (a.length && RESERVED.has(a[0])) {
@@ -389,6 +442,32 @@ function canonicalScripts(a: string[]): string[] {
 
 export const nonFlags = (a: string[]) => a.slice(1).filter((t) => !t.startsWith("-"));
 
+const SHELL_NAMES = new Set(["sh", "bash", "zsh", "dash", "ksh", "ash", "busybox"]);
+
+/** True for shells (whose stdin or -c argument is a script). */
+export const isShell = (head: string) => SHELL_NAMES.has(head);
+
+/** Command strings run by this subcommand: sh -c '…', eval …, trap '…', su -c, script -c, watch, env -S, find -exec. */
+export function innerCommands(raw: string[]): string[] {
+  const out: string[] = [];
+  const head = basename(raw[0] ?? "");
+  const a = normalizeArgv(raw, "deny").argv;
+  if (head === "eval" || head === "watch" || head === "parallel") out.push(raw.slice(1).filter((t) => !t.startsWith("-")).join(" "));
+  if (head === "trap" && raw[1] && !raw[1].startsWith("-")) out.push(raw[1]);
+  const c = a.findIndex((t, i) => i > 0 && /^-[a-z]*c[a-z]*$/.test(t));
+  if ((SHELL_NAMES.has(a[0]) || a[0] === "su" || a[0] === "runuser" || a[0] === "script") && c > 0) {
+    const next = a[c + 1] === "--" ? a[c + 2] : a[c + 1];
+    if (next !== undefined) out.push(next);
+  }
+  if (head === "env") raw.forEach((t, i) => (t === "-S" || t === "--split-string") && raw[i + 1] && out.push(raw[i + 1]));
+  raw.forEach((t, i) => {
+    if (!/^-(exec|execdir|ok|okdir)$/.test(t)) return;
+    const end = raw.findIndex((x, j) => j > i && (x === ";" || x === "+"));
+    out.push(raw.slice(i + 1, end === -1 ? undefined : end).join(" "));
+  });
+  return out.filter(Boolean);
+}
+
 /**
  * True if a short option carries a glued value that looks like a path (`-f/etc/x`, `-bf~/.aws/x`, `-L$HOME`).
  * Such values are easy to misparse, so commands using them are never treated as safe.
@@ -426,6 +505,13 @@ export function isReadOnlyArgv(raw: string[]): boolean {
   if (!head) return true;
   if (a.length === 2 && /^(--version|-V|--help)$/.test(a[1])) return true;
   switch (head) {
+    case "printf":
+      // printf -v NAME assigns a shell variable (CDPATH, PATH, HOME, ...)
+      return !a.slice(1).some((t) => /^-[A-Za-z]*v/.test(t) && !t.startsWith("--"));
+    case "less":
+    case "more":
+      // +cmd runs less/more commands, including shell escapes
+      return !a.slice(1).some((t) => t.startsWith("+") || isLongOption(t, "--lesskey-file"));
     case "sort":
       // --files0-from reads a list of file names from a file, which can point anywhere
       return !hasShort(a, "o") && !hasLong(a, "--output", "--compress-program", "--files0-from");
