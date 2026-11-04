@@ -134,8 +134,9 @@ export function parseShell(cmd: string): Parsed {
       continue;
     }
     if (c === "#" && !inTok) {
-      while (i < cmd.length && cmd[i] !== "\n") i++;
-      endCmd();
+      // Skip to just before the newline, so the newline branch ends the command and reads pending here-documents
+      const nl = cmd.indexOf("\n", i);
+      i = (nl === -1 ? cmd.length : nl) - 1;
       continue;
     }
     if (c === " " || c === "\t") {

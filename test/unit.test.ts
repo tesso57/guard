@@ -642,6 +642,21 @@ const O = { trusted: true, touched: new Set<string>() };
   ok("r11: less +!cmd is not safe", !safe("less '+!id' README.md"));
 }
 
+
+// ---------- review 12 ----------
+{
+  const PH = join(HOME, "proj");
+  const rootsH = protectedRoots(PH, join(AGENT, "sessions"));
+  const safe = (c: string) => safeAllow("bash", { command: c }, PH, O, P(c));
+  const hd = (c: string) => hardDeny("bash", { command: c }, PH, rootsH, P(c));
+  const doc = P("cat <<true # c\ntrue\ntouch $HOME/MK\ntrue");
+  ok("r12: a comment after << does not shift the here-document body", JSON.stringify(doc.subs[0].heredocs) === JSON.stringify([""]) && doc.subcommands.some((a) => a[0] === "touch"));
+  ok("r12: ... so the command after the body is not safe", !safe("cat <<true # c\ntrue\ntouch /tmp/MK\ntrue"));
+  ok("r12: ... and a write to guard's rules there is hard-denied", !!hd("cat <<true # c\ntrue\necho MARK >> ~/.pi/agent/guard/rules.jsonl\ntrue"));
+  ok("r12: plain comments still work", JSON.stringify(P("ls # list\npwd").subcommands) === JSON.stringify([["ls"], ["pwd"]]));
+  ok("r12: a trailing comment without newline still works", JSON.stringify(P("ls -la # all").subcommands) === JSON.stringify([["ls", "-la"]]));
+}
+
 // ---------- evaluate ----------
 {
   const score = (probs: number[], conf = 0.9) => ({ type: "score", name: "risk", score: probs.reduce((s, p, i) => s + p * i, 0), confidence: conf, probabilities: probs.map((p, i) => ({ value: i, probability: p })) });
