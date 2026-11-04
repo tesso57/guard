@@ -10,19 +10,14 @@ permissions:
 
 jobs:
   check:
-    name: check (node ${{ matrix.node }})
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        # 26 = active LTS, 24/22 = maintenance (pi requires >=22.19)
-        node: [26, 24, 22]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
-          node-version: ${{ matrix.node }}
+          # 現行 LTS(.node-version で一元管理)
+          node-version-file: .node-version
           cache: npm
       - run: npm ci
       - name: Typecheck
