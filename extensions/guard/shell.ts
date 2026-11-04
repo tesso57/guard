@@ -61,6 +61,14 @@ export function parseShell(cmd: string, depth = 0): Parsed {
   if (cmd.length > MAX_COMMAND) return { ok: false, subs: [], subcommands: [], writes: [], globs: [], dynamic: ["command too long to analyze"], substitutions: [], heredocBodies: [] };
   const substitutions: string[] = [];
   const nestedBodies: string[] = [];
+  // arithDepth[i]: how many "((" minus "))" come before position i (computed once, so the lexer stays linear)
+  const arithDepth = new Int32Array(cmd.length + 1);
+  for (let k = 0, d = 0; k < cmd.length; k++) {
+    arithDepth[k] = d;
+    if (cmd[k] === "(" && cmd[k + 1] === "(") { d++; arithDepth[k + 1] = d; k++; }
+    else if (cmd[k] === ")" && cmd[k + 1] === ")") { d = Math.max(0, d - 1); arithDepth[k + 1] = d; k++; }
+  }
+  arithDepth[cmd.length] = 0;
   const dynamic: string[] = [];
   const globs: string[] = [];
   const subs: Sub[] = [];
@@ -179,8 +187,17 @@ export function parseShell(cmd: string, depth = 0): Parsed {
           while (pos <= cmd.length) {
             const nl = cmd.indexOf("\n", pos);
             const end = nl === -1 ? cmd.length : nl;
-            const line = cmd.slice(pos, end);
+            let line = cmd.slice(pos, end);
             pos = end + 1;
+            // In an unquoted body bash joins `\<newline>` lines before comparing with the delimiter
+            while (!d.quoted && /(^|[^\\])(\\\\)*\\$/.test(line) && pos <= cmd.length) {
+              dyn("line continuation in a here-document");
+              const nl2 = cmd.indexOf("\n", pos);
+              const end2 = nl2 === -1 ? cmd.length : nl2;
+              line = line.slice(0, -1) + cmd.slice(pos, end2);
+              pos = end2 + 1;
+              if (nl2 === -1) break;
+            }
             if ((d.stripTabs ? line.replace(/^\t+/, "") : line) === d.delim) {
               closed = true;
               break;
@@ -215,6 +232,15 @@ export function parseShell(cmd: string, depth = 0): Parsed {
       continue;
     }
     if (c === "<") {
+      const arith = arithDepth[i] > 0;
+      if (n === "<" && (arith || /^[A-Za-z_]\w*\[[^\]]*$/.test(tok))) {
+        // Inside (( )), $(( )) or an array subscript a[…]=, << is a shift operator, not a here-document
+        dyn("arithmetic or array subscript");
+        tok += "<<";
+        inTok = true;
+        i++;
+        continue;
+      }
       if (inTok && /^\d+$/.test(tok)) { tok = ""; inTok = false; }
       endTok();
       if (n === "<" && cmd[i + 2] === "<") {
@@ -523,6 +549,17 @@ export function innerCommands(raw: string[]): string[] {
   const a = normalizeArgv(raw, "deny").argv;
   if (head === "eval" || head === "watch" || head === "parallel") out.push(raw.slice(1).filter((t) => !t.startsWith("-")).join(" "));
   if (head === "trap" && raw[1] && !raw[1].startsWith("-")) out.push(raw[1]);
+  // Code stored now and run later: alias values, git aliases, package.json scripts
+  if (head === "alias") for (const t of raw.slice(1)) if (t.includes("=")) out.push(t.slice(t.indexOf("=") + 1));
+  if (a[0] === "git" && a.includes("config")) {
+    const k = a.findIndex((t) => /^alias\./i.test(t));
+    const v = k > 0 ? a[k + 1] : undefined;
+    if (v) out.push(v.startsWith("!") ? v.slice(1) : `git ${v}`);
+  }
+  if (a[0] === "npm" || a[0] === "pnpm" || a[0] === "yarn" || a[0] === "bun") {
+    if (a[1] === "pkg" && a[2] === "set") for (const t of a.slice(3)) if (/^scripts\./.test(t) && t.includes("=")) out.push(t.slice(t.indexOf("=") + 1));
+    if (a[1] === "set-script" && a[3]) out.push(a[3]);
+  }
   const c = a.findIndex((t, i) => i > 0 && /^-[a-z]*c[a-z]*$/.test(t));
   if ((SHELL_NAMES.has(a[0]) || a[0] === "su" || a[0] === "runuser" || a[0] === "script") && c > 0) {
     const next = a[c + 1] === "--" ? a[c + 2] : a[c + 1];

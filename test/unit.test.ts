@@ -703,6 +703,29 @@ const O = { trusted: true, touched: new Set<string>() };
   ok("r13: rm -rf .pi/cache is still hard-denied", !!hardDeny("bash", { command: "rm -rf .pi/cache" }, P13, r13, P("rm -rf .pi/cache")));
 }
 
+
+// ---------- review 14 ----------
+{
+  const PH = join(HOME, "proj");
+  const rootsH = protectedRoots(PH, join(AGENT, "sessions"));
+  const safe = (c: string) => safeAllow("bash", { command: c }, PH, O, P(c));
+  const hd = (c: string) => hardDeny("bash", { command: c }, PH, rootsH, P(c));
+  // P0-1: continuations inside an unquoted here-document body are joined before the delimiter check
+  const cont = "cat <<EOF\nEO\\\nF\necho x >> ~/.pi/agent/guard/rules.jsonl\nEOF";
+  ok("r14: joined delimiter ends the body early, so echo is a command", P(cont).subcommands.some((a) => a[0] === "echo"));
+  ok("r14: ... and is not safe", !safe(cont) && !safe("cat <<E\nE\\\n\nzz\nE"));
+  ok("r14: ... and the write to rules is hard-denied", !!hd(cont));
+  ok("r14: quoted bodies keep backslashes literally", P("cat <<'EOF'\nEO\\\nF\nEOF").subcommands.length === 1);
+  // P0-2: << inside arithmetic or array subscripts is a shift
+  for (const c of ["a[1<<X]=5\necho x >> ~/.pi/agent/guard/rules.jsonl\nX]=5", "echo $((1 <<X))\nrm -rf ~/.pi\nX", "(( y = 1 <<X ))\nrm -rf ~/.pi\nX"])
+    ok(`r14: hard-denied: ${c.split("\n")[0]}`, !!hd(c));
+  // P0/P1-3: code stored for later
+  for (const c of ["shopt -s expand_aliases\nalias l='echo x >> ~/.pi/agent/guard/rules.jsonl'\nl", "git config alias.p '!mv ~/.pi ~/moved' && git p", "npm pkg set scripts.x='echo x >> ~/.pi/agent/guard/rules.jsonl' && npm run x", "npm set-script x 'rm -rf ~/.pi'"])
+    ok(`r14: hard-denied: ${c.split("\n").at(-2) ?? c}`, !!hd(c));
+  const time = (f: () => void) => { const t = Date.now(); f(); return Date.now() - t; };
+  ok("r14: many << stay fast", time(() => P("echo a << b ".repeat(1400))) < 500);
+}
+
 // ---------- evaluate ----------
 {
   const score = (probs: number[], conf = 0.9) => ({ type: "score", name: "risk", score: probs.reduce((s, p, i) => s + p * i, 0), confidence: conf, probabilities: probs.map((p, i) => ({ value: i, probability: p })) });
