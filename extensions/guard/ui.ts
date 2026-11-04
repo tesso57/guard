@@ -8,63 +8,62 @@ export type DialogSpec = {
   body: string;
   tool: string;
   patterns?: Match[];
-  /** 記憶して許可を出すか(高リスク・ask 規則・パターン不可なら false) */
+  /** Offer "allow and remember" (false for high risk, ask rules, or calls without a safe pattern). */
   rememberAllow: boolean;
-  /** 全体スコープの許可を出すか(低リスク区分のみ) */
+  /** Offer a global allow (low-risk categories in trusted projects only). */
   globalAllow: boolean;
   projectName: string;
+  timeoutMs: number;
 };
 
-const ONCE = "許可(今回だけ)";
-const DENY = "拒否";
+const ONCE = "Allow (this time only)";
+const DENY = "Deny";
+const BACK = "← Back";
 
-/** 2 段構成の確認ダイアログ。Esc・タイムアウト・未選択は「拒否(今回だけ)」 */
+/** Two-step approval dialog. Esc, timeout or no selection count as "deny this time". */
 export async function confirmDialog(ctx: ExtensionContext, s: DialogSpec): Promise<Choice> {
+  const opts = { timeout: s.timeoutMs };
   const label = s.patterns?.map((p) => describeMatch(s.tool, p)).join(" / ");
-  const sessionOpt = label ? `許可(このセッション中: ${label})` : undefined;
-  const rememberOpt = "許可して記憶… ▸";
-  const denyRememberOpt = "拒否して記憶… ▸";
-  const opts = [ONCE];
-  if (sessionOpt && s.rememberAllow) opts.push(sessionOpt);
-  if (label && s.rememberAllow) opts.push(rememberOpt);
-  opts.push(DENY);
-  if (label) opts.push(denyRememberOpt);
+  const sessionOpt = label ? `Allow (this session: ${label})` : undefined;
+  const rememberOpt = "Allow and remember… ▸";
+  const denyRememberOpt = "Deny and remember… ▸";
+  const options = [ONCE];
+  if (sessionOpt && s.rememberAllow) options.push(sessionOpt, rememberOpt);
+  options.push(DENY);
+  if (label) options.push(denyRememberOpt);
+  const askReason = async () => (await ctx.ui.input("Reason (optional, passed to the agent)", "", opts))?.trim() || undefined;
 
   for (;;) {
-    const pick = await ctx.ui.select(`${s.title}\n\n${s.body}`, opts);
+    const pick = await ctx.ui.select(`${s.title}\n\n${s.body}`, options, opts);
     if (pick === ONCE) return { decision: "allow", scope: "once" };
     if (pick === sessionOpt) return { decision: "allow", scope: "session" };
     if (pick === rememberOpt || pick === denyRememberOpt) {
       const decision = pick === rememberOpt ? "allow" : "deny";
-      const ex = s.patterns?.map((p) => examples(p)).filter(Boolean)[0];
-      const scopes = [`このプロジェクト(${s.projectName})`];
-      // deny はどのスコープでも安全側なので常に全体を出す
-      if (decision === "deny" || s.globalAllow) scopes.push("全体");
-      if (decision === "deny") scopes.push("このセッション中");
-      scopes.push("← 戻る");
-      const head = `${decision === "allow" ? "許可" : "拒否"}として記憶: ${label}` + (ex ? `\n一致: ${ex.yes}\n不一致: ${ex.no}` : "");
-      const sc = await ctx.ui.select(head, scopes);
-      if (!sc || sc === "← 戻る") continue;
-      const scope = sc === "全体" ? "global" : sc === "このセッション中" ? "session" : "project";
-      let reason: string | undefined;
-      if (decision === "deny") reason = (await ctx.ui.input("拒否の理由(任意・エージェントに伝えます)", ""))?.trim() || undefined;
-      return { decision, scope, reason };
+      const ex = s.patterns?.map((p) => examples(p)).find(Boolean);
+      const scopes = [`This project (${s.projectName})`];
+      // A deny is always on the safe side, so every scope is offered for it
+      if (decision === "deny" || s.globalAllow) scopes.push("Global");
+      if (decision === "deny") scopes.push("This session");
+      scopes.push(BACK);
+      const head = `Remember as ${decision}: ${label}` + (ex ? `\nmatches: ${ex.yes}\ndoes not match: ${ex.no}` : "");
+      const sc = await ctx.ui.select(head, scopes, opts);
+      if (!sc) return { decision: "deny", scope: "once" };
+      if (sc === BACK) continue;
+      const scope = sc === "Global" ? "global" : sc === "This session" ? "session" : "project";
+      return { decision, scope, reason: decision === "deny" ? await askReason() : undefined };
     }
-    if (pick === DENY) {
-      const reason = (await ctx.ui.input("拒否の理由(任意・エージェントに伝えます)", ""))?.trim() || undefined;
-      return { decision: "deny", scope: "once", reason };
-    }
+    if (pick === DENY) return { decision: "deny", scope: "once", reason: await askReason() };
     return { decision: "deny", scope: "once" };
   }
 }
 
-/** 確認ダイアログ用の要約。edit は差分、write は本文の先頭と末尾を見せる */
+/** Summary for the dialog: diffs for edit, head and tail of the content for write. */
 export function preview(tool: string, input: any): string {
   const cut = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
   if (tool === "bash" || tool === "powershell") return cut(String(input?.command ?? ""), 1500);
   if (tool === "edit" && Array.isArray(input?.edits)) {
     const parts = input.edits.slice(0, 3).map((e: any) => `- ${cut(String(e.oldText ?? ""), 200)}\n+ ${cut(String(e.newText ?? ""), 200)}`);
-    return `edit ${input.path}\n${parts.join("\n")}${input.edits.length > 3 ? `\n…(他 ${input.edits.length - 3} 箇所)` : ""}`;
+    return `edit ${input.path}\n${parts.join("\n")}${input.edits.length > 3 ? `\n… (${input.edits.length - 3} more)` : ""}`;
   }
   if (tool === "write" && typeof input?.content === "string") {
     const c: string = input.content;

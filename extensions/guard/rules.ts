@@ -1,15 +1,16 @@
 /**
- * 利用者の判断を規則として記憶する。
+ * Remembered decisions.
  *
- * スコープ: session(pi のセッション記録) / project / global / repo(.pi/guard.json、信頼済みのみ・deny/ask 限定)
- * 優先順位はスコープの広さではなく判定の厳しさ: deny > ask > allow
- * bash の allow は「すべてのサブコマンドが一致」かつ「動的要素なし」のときだけ適用する。
+ * Scopes: session (pi session log) / project / global / repo (.pi/guard.json, trusted projects only, deny/ask only).
+ * Precedence follows strictness, not scope: deny > ask > allow.
+ * A bash allow applies only when every subcommand matches and the command has no dynamic parts.
+ * Global allow rules apply only in trusted projects, so a freshly cloned repository cannot reuse them.
  */
 import { createHash, randomBytes } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { DATA_DIR } from "./config.ts";
-import type { Parsed } from "./shell.ts";
+import { normalizeArgv, type Parsed } from "./shell.ts";
 import { inputPaths } from "./policy.ts";
 
 export type Decision = "allow" | "deny" | "ask";
@@ -26,25 +27,34 @@ export type Rule = {
   tool: string;
   match: Match;
   scope: Scope;
-  /** session 規則が作られた cwd。違う cwd では当てない */
+  /** cwd a session rule was created in; it does not apply elsewhere. */
   cwd?: string;
   createdAt: string;
   expiresAt?: string;
-  hits: number;
-  /** 判断したときの model と危険度(ドリフト調査用) */
+  /** Model and risk at decision time, for investigating drift. */
   model?: string;
   risk?: number;
   note?: string;
 };
 
-const SESSION_ENTRY ="guard-rule";
+const SESSION_ENTRY = "guard-rule";
 
-/** 前方一致で許すと危ないコマンド。これらは引数まで完全一致の規則にする */
+/** Commands that are dangerous to allow by prefix. Allow rules for them must match the whole argv. */
 const EXACT_ONLY: string[][] = [
   ["rm"], ["rmdir"], ["mv"], ["dd"], ["chmod"], ["chown"], ["kill"], ["pkill"], ["killall"], ["truncate"], ["shred"],
   ["git", "push"], ["git", "reset"], ["git", "clean"], ["git", "checkout"], ["git", "restore"], ["git", "rebase"], ["git", "branch"],
-  ["curl"], ["wget"], ["ssh"], ["scp"], ["rsync"], ["docker"], ["kubectl"], ["terraform"], ["npm", "publish"], ["cargo", "publish"],
+  ["git", "tag"], ["git", "remote"], ["git", "config"], ["git", "filter-branch"], ["git", "update-ref"],
+  ["curl"], ["wget"], ["ssh"], ["scp"], ["rsync"], ["docker"], ["kubectl"], ["terraform"], ["helm"], ["aws"], ["gcloud"], ["az"],
+  ["npm", "publish"], ["pnpm", "publish"], ["yarn", "publish"], ["cargo", "publish"], ["gem", "push"], ["twine"], ["gh"],
+  // Installing packages runs their install scripts, so each package must be approved on its own
+  ["npm", "install"], ["npm", "i"], ["npm", "add"], ["pnpm", "add"], ["pnpm", "install"], ["pnpm", "i"], ["yarn", "add"],
+  ["bun", "add"], ["bun", "install"], ["pip", "install"], ["pip3", "install"], ["uv", "add"], ["uv", "pip"], ["cargo", "install"],
+  ["go", "install"], ["gem", "install"], ["brew", "install"],
 ];
+/** Subcommands whose next word picks an arbitrary script, so the rule needs three words. */
+const SCRIPT_SUBCOMMANDS = new Set(["run", "run-script", "exec", "x", "dlx"]);
+
+const isExactOnly = (a: string[]) => EXACT_ONLY.some((p) => p.every((t, i) => a[i] === t));
 
 export function newId(): string {
   return randomBytes(3).toString("hex");
@@ -55,26 +65,26 @@ export function describeMatch(tool: string, m: Match): string {
     case "argv": return `${m.prefix.join(" ")} …`;
     case "argv-exact": return m.argv.join(" ");
     case "path": return `${tool} ${m.path}`;
-    case "tool": return `${tool}(すべての入力)`;
+    case "tool": return `${tool} (any input)`;
   }
 }
 
 /**
- * 承認したい呼び出しから規則のパターンを導く。導けない(安全に一般化できない)なら undefined。
- * 例: npm test -- foo → ["npm","test"] / rm a.txt → 完全一致 / python x.py → 不可
+ * Derives rule patterns from a call the user wants to remember. Returns undefined when it cannot be generalized safely.
+ * npm test -- foo → ["npm","test"] / npm run lint → ["npm","run","lint"] / rm a.txt → exact / git -C x status → ["git","status"] / python x.py → none
  */
 export function derivePatterns(tool: string, input: any, cwd: string, parsed?: Parsed): Match[] | undefined {
   if (tool === "bash") {
     if (!parsed || !parsed.ok || parsed.dynamic.length || !parsed.subcommands.length) return undefined;
     const out: Match[] = [];
-    for (const a of parsed.subcommands) {
-      const exact = EXACT_ONLY.some((p) => p.every((t, i) => a[i] === t));
+    for (const raw of parsed.subcommands) {
+      const { argv: a, unknownOption } = normalizeArgv(raw);
+      const sub = a[1];
+      const word = (t?: string) => !!t && /^[a-z][\w:.@/-]*$/i.test(t) && !t.startsWith("-");
       let m: Match;
-      if (exact || parsed.writes.length) m = { kind: "argv-exact", argv: a };
-      else {
-        const prefix = a[1] && /^[a-z][\w:.-]*$/.test(a[1]) ? a.slice(0, 2) : a.slice(0, 1);
-        m = { kind: "argv", prefix };
-      }
+      if (unknownOption || isExactOnly(a) || parsed.writes.length || !word(sub)) m = { kind: "argv-exact", argv: a };
+      else if (SCRIPT_SUBCOMMANDS.has(sub)) m = word(a[2]) ? { kind: "argv", prefix: a.slice(0, 3) } : { kind: "argv-exact", argv: a };
+      else m = { kind: "argv", prefix: a.slice(0, 2) };
       if (!out.some((x) => JSON.stringify(x) === JSON.stringify(m))) out.push(m);
     }
     return out;
@@ -86,32 +96,57 @@ export function derivePatterns(tool: string, input: any, cwd: string, parsed?: P
   return undefined;
 }
 
-/** 規則が一致する例・一致しない例(ダイアログ表示用) */
+/** An example the rule matches and one it does not, for the dialog. */
 export function examples(m: Match): { yes: string; no: string } | undefined {
-  if (m.kind === "argv") return { yes: `${m.prefix.join(" ")} --foo`, no: m.prefix.length > 1 ? `${m.prefix[0]} publish` : `${m.prefix[0]}x` };
+  if (m.kind === "argv") return { yes: `${m.prefix.join(" ")} --foo`, no: m.prefix.length > 1 ? `${m.prefix.slice(0, -1).join(" ")} publish` : `${m.prefix[0]}x` };
   if (m.kind === "argv-exact") return { yes: m.argv.join(" "), no: `${m.argv.join(" ")} --other` };
   return undefined;
 }
 
-function matchArgv(m: Match, a: string[]): boolean {
-  if (m.kind === "argv") return m.prefix.every((t, i) => a[i] === t);
+/** Strict matching for allow rules. Prefix rules never cover EXACT_ONLY commands. */
+function allowMatchesArgv(m: Match, raw: string[]): boolean {
+  const a = normalizeArgv(raw).argv;
   if (m.kind === "argv-exact") return m.argv.length === a.length && m.argv.every((t, i) => a[i] === t);
+  if (m.kind === "argv") return !isExactOnly(a) && m.prefix.every((t, i) => a[i] === t);
   return false;
 }
 
-function matches(r: Rule, tool: string, input: any, cwd: string, parsed: Parsed | undefined, mode: "any" | "all"): boolean {
-  if (r.tool !== tool) return false;
-  if (r.scope === "session" && r.cwd && r.cwd !== cwd) return false;
-  if (r.expiresAt && Date.parse(r.expiresAt) < Date.now()) return false;
+const FLAG_ALIASES: Record<string, string[]> = {
+  "--force": ["-f", "--force-with-lease", "--force-if-includes"],
+  "-f": ["--force", "--force-with-lease", "--force-if-includes"],
+  "--recursive": ["-r", "-R"],
+  "-r": ["-R", "--recursive"],
+  "-R": ["-r", "--recursive"],
+  "--delete": ["-d", "-D"],
+  "-d": ["--delete", "-D"],
+  "-D": ["-d", "--delete"],
+  "--all": ["-a"],
+  "-a": ["--all"],
+};
+
+/**
+ * Loose matching for deny and ask rules: the rule's words must prefix the command's words (flags ignored),
+ * and each flag in the rule must be present in any spelling (`--force` also matches `-f`, `-fu`, `--force-with-lease`).
+ */
+function strictMatchesArgv(m: Match, raw: string[]): boolean {
+  const ruleTokens = m.kind === "argv" ? m.prefix : m.kind === "argv-exact" ? m.argv : undefined;
+  if (!ruleTokens) return false;
+  const a = normalizeArgv(raw).argv;
+  const words = a.filter((t, i) => i === 0 || !t.startsWith("-"));
+  const ruleWords = ruleTokens.filter((t, i) => i === 0 || !t.startsWith("-"));
+  if (!ruleWords.every((t, i) => words[i] === t)) return false;
+  const present = (f: string) =>
+    a.some((t) => t === f || t.startsWith(`${f}=`) || (f.length === 2 && /^-[A-Za-z]+$/.test(t) && t.includes(f[1])));
+  return ruleTokens.filter((t, i) => i > 0 && t.startsWith("-")).every((f) => present(f) || (FLAG_ALIASES[f] ?? []).some(present));
+}
+
+function matchesNonBash(r: Rule, tool: string, input: any, cwd: string, mode: "any" | "all"): boolean {
   const m = r.match;
   if (m.kind === "tool") return true;
-  if (m.kind === "path") {
-    const { reads, writes } = inputPaths(tool, input, cwd, parsed);
-    const ps = [...reads, ...writes];
-    return mode === "any" ? ps.includes(m.path) : ps.length > 0 && ps.every((p) => p === m.path);
-  }
-  if (!parsed) return false;
-  return mode === "any" ? parsed.subcommands.some((a) => matchArgv(m, a)) : false;
+  if (m.kind !== "path") return false;
+  const { reads, writes } = inputPaths(tool, input, cwd);
+  const ps = [...reads, ...writes];
+  return mode === "any" ? ps.includes(m.path) : ps.length > 0 && ps.every((p) => p === m.path);
 }
 
 function readJsonl(file: string): Rule[] {
@@ -122,11 +157,35 @@ function readJsonl(file: string): Rule[] {
   }
 }
 
-function writeJsonl(file: string, rules: Rule[]) {
-  mkdirSync(dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.tmp`;
-  writeFileSync(tmp, rules.map((r) => JSON.stringify(r)).join("\n") + (rules.length ? "\n" : ""), { mode: 0o600 });
-  renameSync(tmp, file);
+/**
+ * Runs fn on the freshly read file contents under a lock, then writes atomically.
+ * Prevents lost updates when several pi processes change rules at the same time.
+ */
+function updateFile(file: string, fn: (rules: Rule[]) => Rule[]): Rule[] {
+  mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+  const lock = `${file}.lock`;
+  const deadline = Date.now() + 3000;
+  for (;;) {
+    try {
+      mkdirSync(lock);
+      break;
+    } catch {
+      try {
+        if (Date.now() - statSync(lock).mtimeMs > 10_000) rmSync(lock, { recursive: true, force: true });
+      } catch { /* the lock disappeared in the meantime */ }
+      if (Date.now() > deadline) throw new Error(`guard: could not lock ${file}`);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+    }
+  }
+  try {
+    const next = fn(readJsonl(file));
+    const tmp = `${file}.${process.pid}.tmp`;
+    writeFileSync(tmp, next.map((r) => JSON.stringify(r)).join("\n") + (next.length ? "\n" : ""), { mode: 0o600 });
+    renameSync(tmp, file);
+    return next;
+  } finally {
+    rmSync(lock, { recursive: true, force: true });
+  }
 }
 
 function projectFile(cwd: string): string {
@@ -134,35 +193,60 @@ function projectFile(cwd: string): string {
   return join(DATA_DIR, "projects", `${basename(cwd).replace(/[^\w.-]/g, "_")}-${h}.jsonl`);
 }
 
+const live = (r: Rule) => !r.expiresAt || Date.parse(r.expiresAt) >= Date.now();
+
 export class RuleStore {
   global: Rule[] = [];
   project: Rule[] = [];
   repo: Rule[] = [];
-  /** セッション記録から再構築した規則 + まだ記録に現れていない追加分 */
+  /** Bumped on every change, so pre-judged results made before a change can be discarded. */
+  version = 0;
   private sessionFromBranch: Rule[] = [];
   private sessionPending: Rule[] = [];
-  private sessionHits = new Map<string, number>();
-  cwd = "";
+  private hits = new Map<string, number>();
+  private mtimes = new Map<string, number>();
+  private trusted = false;
+  private cwd = "";
+
+  private files() {
+    return { global: join(DATA_DIR, "rules.jsonl"), project: projectFile(this.cwd) };
+  }
 
   load(cwd: string, trusted: boolean) {
     this.cwd = cwd;
-    this.global = readJsonl(join(DATA_DIR, "rules.jsonl"));
-    this.project = readJsonl(projectFile(cwd));
+    this.trusted = trusted;
+    this.mtimes.clear();
+    this.refresh(true);
     this.repo = [];
     if (trusted) {
       try {
         const cfg = JSON.parse(readFileSync(join(cwd, ".pi", "guard.json"), "utf8"));
-        // リポジトリからは deny / ask だけを受け付ける(allow を持ち込ませない)
+        // A repository may only add deny and ask rules, never allow rules
         for (const d of ["deny", "ask"] as const)
           for (const p of cfg[d] ?? [])
-            this.repo.push({ id: `repo-${d}-${p}`, decision: d, tool: "bash", match: { kind: "argv", prefix: String(p).trim().split(/\s+/) }, scope: "repo", createdAt: "", hits: 0 });
+            this.repo.push({ id: `repo-${d}-${p}`, decision: d, tool: "bash", match: { kind: "argv", prefix: String(p).trim().split(/\s+/) }, scope: "repo", createdAt: "" });
       } catch {
-        /* 無ければ何もしない */
+        /* no repo config */
+      }
+    }
+    this.version++;
+  }
+
+  /** Re-reads rule files that another pi process changed. */
+  private refresh(force = false) {
+    const f = this.files();
+    for (const scope of ["global", "project"] as const) {
+      let m = -1;
+      try { m = statSync(f[scope]).mtimeMs; } catch { /* missing file */ }
+      if (force || this.mtimes.get(scope) !== m) {
+        this[scope] = readJsonl(f[scope]);
+        this.mtimes.set(scope, m);
+        if (!force) this.version++;
       }
     }
   }
 
-  /** pi のセッション記録(現在のブランチ)から session 規則を復元する。/tree で戻れば承認も外れる */
+  /** Rebuilds session rules from the current branch of the pi session, so rewinding with /tree drops later approvals. */
   syncSession(branch: { type: string; customType?: string; data?: any }[]) {
     const rules = new Map<string, Rule>();
     for (const e of branch) {
@@ -170,49 +254,56 @@ export class RuleStore {
       if (e.data?.op === "add") rules.set(e.data.rule.id, e.data.rule);
       if (e.data?.op === "remove") rules.delete(e.data.id);
     }
+    const before = this.sessionFromBranch.map((r) => r.id).join();
     this.sessionFromBranch = [...rules.values()];
     this.sessionPending = this.sessionPending.filter((r) => !rules.has(r.id));
+    if (before !== this.sessionFromBranch.map((r) => r.id).join()) this.version++;
   }
 
   resetSession() {
     this.sessionFromBranch = [];
     this.sessionPending = [];
-    this.sessionHits.clear();
+    this.hits.clear();
   }
 
   session(): Rule[] {
-    return [...this.sessionFromBranch, ...this.sessionPending].map((r) => ({ ...r, hits: this.sessionHits.get(r.id) ?? r.hits }));
+    return [...this.sessionFromBranch, ...this.sessionPending];
+  }
+
+  hitCount(id: string): number {
+    return this.hits.get(id) ?? 0;
   }
 
   all(): Rule[] {
-    return [...this.session(), ...this.repo, ...this.project, ...this.global];
+    this.refresh();
+    return [...this.session(), ...this.repo, ...this.project, ...this.global].filter(live);
   }
 
-  /** 最も厳しい判定を返す。bash の allow は全サブコマンドが allow 規則に一致した場合のみ */
+  /** The strictest decision that applies. A bash allow needs every subcommand to match an allow rule. */
   find(tool: string, input: any, cwd: string, parsed?: Parsed): { decision: Decision; rules: Rule[] } | undefined {
-    const rules = this.all();
+    const rules = this.all().filter((r) => r.tool === tool && (r.scope !== "session" || !r.cwd || r.cwd === cwd));
     for (const d of ["deny", "ask"] as const) {
-      const hit = rules.filter((r) => r.decision === d && matches(r, tool, input, cwd, parsed, "any"));
+      const hit = rules.filter((r) => r.decision === d && (tool === "bash" ? !!parsed && parsed.subcommands.some((a) => strictMatchesArgv(r.match, a)) : matchesNonBash(r, tool, input, cwd, "any")));
       if (hit.length) return { decision: d, rules: hit };
     }
-    const allows = rules.filter((r) => r.decision === "allow");
+    const allows = rules.filter((r) => r.decision === "allow" && (r.scope !== "global" || this.trusted));
     if (tool === "bash") {
       if (!parsed || !parsed.ok || parsed.dynamic.length || !parsed.subcommands.length) return undefined;
       const used: Rule[] = [];
       for (const a of parsed.subcommands) {
-        const r = allows.find((x) => x.tool === "bash" && (x.scope !== "session" || !x.cwd || x.cwd === cwd) && (!x.expiresAt || Date.parse(x.expiresAt) >= Date.now()) && matchArgv(x.match, a));
+        const r = allows.find((x) => allowMatchesArgv(x.match, a));
         if (!r) return undefined;
         if (!used.includes(r)) used.push(r);
       }
       return { decision: "allow", rules: used };
     }
-    const hit = allows.filter((r) => matches(r, tool, input, cwd, parsed, "all"));
+    const hit = allows.filter((r) => matchesNonBash(r, tool, input, cwd, "all"));
     return hit.length ? { decision: "allow", rules: hit } : undefined;
   }
 
-  /** 判定の参考に model へ渡す、同じツール・近いパターンの過去の判断(最大 5 件) */
+  /** Past decisions on the same tool with a similar pattern, passed to the model as evidence (max 5). */
   related(tool: string, input: any, cwd: string, parsed?: Parsed): Rule[] {
-    const heads = new Set(parsed?.subcommands.map((a) => a[0]) ?? []);
+    const heads = new Set(parsed?.subcommands.map((a) => normalizeArgv(a).argv[0]) ?? []);
     const { reads, writes } = inputPaths(tool, input, cwd, parsed);
     const dirs = new Set([...reads, ...writes].map((p) => dirname(p)));
     return this.all()
@@ -231,13 +322,11 @@ export class RuleStore {
     if (rule.scope === "session") {
       this.sessionPending.push(rule);
       appendEntry(SESSION_ENTRY, { op: "add", rule });
-    } else if (rule.scope === "project") {
-      this.project.push(rule);
-      writeJsonl(projectFile(this.cwd), this.project);
-    } else if (rule.scope === "global") {
-      this.global.push(rule);
-      writeJsonl(join(DATA_DIR, "rules.jsonl"), this.global);
+    } else if (rule.scope === "project" || rule.scope === "global") {
+      this[rule.scope] = updateFile(this.files()[rule.scope], (rs) => [...rs, rule]);
+      this.mtimes.set(rule.scope, statSync(this.files()[rule.scope]).mtimeMs);
     }
+    this.version++;
   }
 
   remove(id: string, appendEntry: (type: string, data: unknown) => void): Rule | undefined {
@@ -246,30 +335,25 @@ export class RuleStore {
       this.sessionPending = this.sessionPending.filter((r) => r.id !== id);
       this.sessionFromBranch = this.sessionFromBranch.filter((r) => r.id !== id);
       appendEntry(SESSION_ENTRY, { op: "remove", id });
+      this.version++;
       return s;
     }
-    for (const scope of ["project", "global"] as const) {
-      const list = this[scope];
-      const r = list.find((x) => x.id === id);
-      if (r) {
-        this[scope] = list.filter((x) => x.id !== id);
-        writeJsonl(scope === "project" ? projectFile(this.cwd) : join(DATA_DIR, "rules.jsonl"), this[scope]);
-        return r;
-      }
-    }
-    return undefined;
+    this.refresh();
+    const scope = (["project", "global"] as const).find((sc) => this[sc].some((x) => x.id === id));
+    if (!scope) return undefined;
+    let removed: Rule | undefined;
+    const file = this.files()[scope];
+    this[scope] = updateFile(file, (rs) => {
+      removed = rs.find((x) => x.id === id);
+      return rs.filter((x) => x.id !== id);
+    });
+    this.mtimes.set(scope, statSync(file).mtimeMs);
+    this.version++;
+    return removed;
   }
 
+  /** Hit counts are kept in memory only, so counting never rewrites rule files. */
   hit(rules: Rule[]) {
-    let dirty: ("project" | "global")[] = [];
-    for (const r of rules) {
-      if (r.scope === "session") this.sessionHits.set(r.id, (this.sessionHits.get(r.id) ?? r.hits) + 1);
-      else if (r.scope === "project" || r.scope === "global") {
-        const x = this[r.scope].find((y) => y.id === r.id);
-        if (x) { x.hits++; dirty.push(r.scope); }
-      }
-    }
-    if (dirty.includes("project")) writeJsonl(projectFile(this.cwd), this.project);
-    if (dirty.includes("global")) writeJsonl(join(DATA_DIR, "rules.jsonl"), this.global);
+    for (const r of rules) this.hits.set(r.id, this.hitCount(r.id) + 1);
   }
 }

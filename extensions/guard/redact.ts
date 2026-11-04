@@ -1,4 +1,4 @@
-/** 判定 API と監査ログに送る前に、秘密らしき文字列を伏せる */
+/** Masks strings that look like secrets before they reach the judge or the audit log. */
 const PATTERNS: [RegExp, string][] = [
   [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----|$)/g, "[REDACTED PRIVATE KEY]"],
   [/\bsk-(?:proj-|ant-)?[A-Za-z0-9_-]{16,}/g, "[REDACTED sk-…]"],
@@ -27,7 +27,7 @@ export function redact<T>(v: T): T {
   return v;
 }
 
-/** 先頭と末尾を半分ずつ残して切り詰める。末尾に隠した攻撃を見落とさないため */
+/** Truncates long strings, keeping both the head and the tail so content hidden at the end is still seen. */
 export function clip(v: unknown, max: number, state: { truncated: boolean }): unknown {
   if (typeof v === "string") {
     if (v.length <= max) return v;

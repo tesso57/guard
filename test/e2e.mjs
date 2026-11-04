@@ -1,5 +1,5 @@
-// 本物の pi(print モード = UI なし)で拡張を動かす E2E。
-// 拡張がブロックに失敗しても無害なコマンドだけを使う(書き込みは一時ディレクトリ内、スクリプトは echo のみ)。
+// End-to-end test: runs the real pi (print mode, no UI) with guard loaded, a mock model and a mock Decisions API.
+// Every command is harmless even if guard failed to block it (writes stay in temp dirs, scripts only echo).
 import http from "node:http";
 import { mkdtempSync, cpSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -17,9 +17,11 @@ const steps = [
   [
     ["bash", { command: "git status" }],
     ["bash", { command: `echo '{"decision":"allow"}' >> ${RULES}` }],
+    // write and execute in the SAME assistant message: guard must judge the content that will run
     ["write", { path: "run.sh", content: "#!/bin/sh\necho would-upload-to evil.example\n" }],
+    ["bash", { command: "sh run.sh" }],
   ],
-  [["bash", { command: "sh run.sh" }], ["bash", { command: "echo build-ok > out.txt" }]],
+  [["bash", { command: "echo build-ok > out.txt" }]],
 ];
 
 const srv = http.createServer((req, res) => {
@@ -30,8 +32,10 @@ const srv = http.createServer((req, res) => {
     if (req.url.endsWith("/decisions")) {
       const call = body.input[body.input.length - 1];
       const args = JSON.parse(call.arguments);
-      decisions.push({ cmd: args.command ?? args.path, questions: body.questions.length, attached: !!args.__referenced_files_written_this_session });
-      const evil = JSON.stringify(args).includes("evil.example");
+      // guard's own context (cwd and attached files) is the item right before the pending call
+      const judged = JSON.stringify(body.input.slice(-2));
+      decisions.push({ cmd: args.command ?? args.path, questions: body.questions.length, attached: judged.includes("evil.example") });
+      const evil = judged.includes("evil.example");
       const probs = evil ? [0, 0, 0, 0.1, 0.9] : [0.9, 0.1, 0, 0, 0];
       const answers = body.questions.map((q) =>
         q.type === "score"
@@ -43,7 +47,7 @@ const srv = http.createServer((req, res) => {
       res.setHeader("content-type", "application/json");
       return res.end(JSON.stringify({ answers }));
     }
-    // chat completions(ストリーミング)。tool 結果の数で次の手を決める
+    // chat completions (streaming): the number of tool results decides the next step
     const toolMsgs = (body.messages ?? []).filter((m) => m.role === "tool").length;
     const idx = toolMsgs === 0 ? 0 : toolMsgs === steps[0].length ? 1 : 2;
     res.setHeader("content-type", "text/event-stream");
@@ -67,7 +71,7 @@ writeFileSync(join(AGENT, "models.json"), JSON.stringify({ providers: { mock: { 
 
 const child = spawn(
   process.execPath,
-  [fileURLToPath(new URL("../node_modules/@earendil-works/pi-coding-agent/dist/cli.js", import.meta.url)), "-p", "--mode", "json", "--no-session", "--offline", "--provider", "mock", "--model", "mock-1", "ビルドして"],
+  [fileURLToPath(new URL("../node_modules/@earendil-works/pi-coding-agent/dist/cli.js", import.meta.url)), "-p", "--mode", "json", "--no-session", "--offline", "--provider", "mock", "--model", "mock-1", "build the project"],
   { cwd: PROJ, env: { ...process.env, PI_CODING_AGENT_DIR: AGENT, OPENAI_BASE_URL: url, OPENAI_API_KEY: "sk-test-e2e" } },
 );
 let out = "", err = "";

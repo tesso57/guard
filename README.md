@@ -17,17 +17,17 @@ Set `OPENAI_API_KEY`, then start pi:
 export OPENAI_API_KEY=sk-...
 ```
 
-guard still works without a key, but every call that needs a model judgement is sent to you for confirmation instead. In modes without a UI, those calls are blocked.
+Without a key, guard runs in **rules-only mode**: the deterministic checks and your remembered rules still apply, and every call that would need a model judgement asks you first (or is blocked in modes without a UI).
 
 ## How a call is judged
 
 | Order | Check | Result |
 |---|---|---|
-| 1 | Hard deny: recursive deletion of `/` or `~`, `curl … \| sh`, writes to `authorized_keys`, and **any change to guard's rules, pi's session logs, extensions or pi settings** | Block. No rule or dialog can override it |
+| 1 | Hard deny: recursive deletion of `/`, `~` or system directories, `curl … \| sh`, writes to `authorized_keys`, and **any change to guard's rules, pi's state and session logs, or the project resources pi loads (`.pi/`, `.agents/`)** | Block. No rule or dialog can override it |
 | 2 | Deny and ask rules, in any scope | Block / confirm |
 | 3 | Allow rules. For bash, every subcommand must match and the command must have no dynamic parts such as `$()` or variable expansion | Allow, after a light check for exfiltration, actions outside your request, and text aimed at the judge |
-| 4 | Sensitive paths (`~/.ssh`, `.env`, key files, …) | Confirm |
-| 5 | Safe list: read-only bash commands, and edits to ordinary files inside the project | Allow, without calling the API |
+| 4 | Sensitive paths (`~/.ssh`, `.env`, key files, `/proc/*/environ`, …, after resolving symlinks and globs), printing the environment, and content searches across `~` | Confirm |
+| 5 | Safe list: read-only bash commands (judged by command **and options**, so `git log --output=…` or `sort -o` are not read-only), and edits to ordinary files inside the project | Allow, without calling the API |
 | 6 | Decisions API | Allow / confirm / block |
 
 If the API call fails, the model refuses to answer, or the input had to be truncated, guard takes the safe side: it asks you to confirm, or blocks the call when there is no UI.
@@ -39,7 +39,7 @@ guard sends the Decisions API:
 - your past decisions
 - the call being judged
 
-It never sends the assistant's own text or tool outputs. This limits prompt injection. When bash runs a script that was written earlier in the same session, guard attaches the script's contents so the model can judge what will actually run. Strings that look like secrets are redacted before anything is sent.
+It never sends the assistant's own text or tool outputs. This limits prompt injection. When bash runs a script that was written or edited earlier, guard attaches what the script will contain, including changes made by earlier calls in the same assistant message that have not run yet; running such a file always asks you first. When a test runner or build tool (`npm`, `pytest`, `make`, …) runs after build files such as `package.json` or `conftest.py` were changed, guard does a full judgement with those files attached, even if an allow rule matches. Strings that look like secrets are redacted before anything is sent.
 
 Risk is scored on five levels, from 0 to 4. guard looks at the probability of the high-risk levels as well as the weighted average, so a split such as "45% catastrophic, 55% harmless" is still caught.
 
@@ -54,12 +54,14 @@ Deny and remember… ▸      → this project / global / this session
 ```
 
 - When you remember a decision, guard shows an example that matches the rule and one that does not. For example, `npm test …` matches `npm test -- foo` but not `npm publish`.
-- Commands that are risky to allow by prefix, such as `rm`, `git push` and `curl`, are remembered only as exact matches, including their arguments.
+- Commands are normalized first, so `git -C . status` and `/usr/bin/git status` are both `git status`. Script runners keep the script name (`npm run lint` does not cover `npm run deploy`).
+- Commands that are risky to allow by prefix, such as `rm`, `git push`, `curl` and package installs (`npm install foo`), are remembered only as exact matches, including their arguments.
 - "Allow and remember" is not offered for:
   - high-risk calls
   - interpreters, such as `python x.py`
   - commands with dynamic parts
-- Global allow rules are offered only for low-risk categories: read-only, build and test, and edits inside the project.
+- Global allow rules are offered only for read-only calls in trusted projects, and they only apply in trusted projects, so a freshly cloned repository cannot reuse them.
+- The dialog counts as a deny after 10 minutes without an answer.
 - If you give a reason when you deny a call, the reason is passed to the agent.
 
 ## Scopes and precedence
@@ -71,7 +73,9 @@ Deny and remember… ▸      → this project / global / this session
 | Global | `~/.pi/agent/guard/rules.jsonl` | Same as project |
 | Repository | `.pi/guard.json`, read only for trusted projects | Deny and ask rules only, so a repository cannot grant itself permissions |
 
-Precedence follows **strictness**, not scope: deny > ask > allow. A deny rule in any scope therefore wins over an allow rule in any other scope.
+Precedence follows **strictness**, not scope: deny > ask > allow. A deny rule in any scope therefore wins over an allow rule in any other scope. Deny and ask rules also match other spellings of the same command: `git push --force` matches `git -C . push -f`.
+
+Rule files are updated under a lock, so several pi processes can change rules at the same time without losing updates.
 
 ```json
 // .pi/guard.json
@@ -94,7 +98,7 @@ Precedence follows **strictness**, not scope: deny > ask > allow. A deny rule in
 
 When a session rule has been used three times, guard suggests promoting it to the project scope.
 
-After 3 blocks in a row, or 20 blocks in total, guard stops the agent and tells you.
+After 3 blocks in a row, or 20 blocks in total, guard stops the agent and tells you. The audit log is rotated at 5 MB.
 
 ## Configuration
 
@@ -106,11 +110,13 @@ Settings live in `~/.pi/agent/guard/config.json`. Every field is optional.
   "timeoutMs": 6000,
   "skipModelTools": ["read", "grep", "find", "ls"],
   "allowRuleTtlDays": 30,
+  "dialogTimeoutMs": 600000,
+  "verdictCacheMs": 600000,
   "thresholds": { "confirmScore": 1.5, "blockPHigh": 0.6, "blockPCatastrophic": 0.25, "confirmExfil": 0.3 }
 }
 ```
 
-The default thresholds are starting points. If guard asks too often or lets too much through, adjust them while checking real decisions with `/guard log`.
+Invalid values fall back to the default with a warning. The default thresholds are starting points. If guard asks too often or lets too much through, adjust them while checking real decisions with `/guard log`.
 
 Environment variables override the config file:
 
