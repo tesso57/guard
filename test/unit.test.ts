@@ -521,7 +521,47 @@ const O = { trusted: true, touched: new Set<string>() };
   for (const c of ["cd ~ && pushd /tmp && popd && rm -rf .p?", "cd ~ && pushd /tmp && popd && printf x >> .p?/agen?/guard/rules.jsonl", "pushd ~ && pushd /tmp && popd && rm -rf .p?", "cd ~ && pushd /tmp && pushd && rm -rf .p?"])
     ok(`r8: hard-denied after pushd/popd: ${c}`, !!hd(c));
   ok("r8: cd - returns to the previous directory (no false positive)", safe("cd /tmp && cd - && touch x.txt"));
-  ok("r8: pushd/popd inside the project stays safe", safe("pushd src && ls && popd && ls"));
+  ok("r8/r9: pushd/popd never get the safe-list shortcut", !safe("pushd src && ls && popd && ls"));
+}
+
+
+// ---------- review 9 ----------
+{
+  const PH = join(HOME, "proj");
+  const rootsH = protectedRoots(PH, join(AGENT, "sessions"));
+  const hd = (c: string, cwd = PROJ, r = roots) => hardDeny("bash", { command: c }, cwd, r, P(c));
+  const safeAt = (c: string, cwd: string) => safeAllow("bash", { command: c }, cwd, O, P(c));
+  // P0-1: pushd -n stacks a directory without moving; a bare pushd then moves there
+  ok("r9: pushd -n ../.aws; pushd; cat credentials is not safe", !safeAt("pushd -n ../.aws >/dev/null; pushd >/dev/null; cat credentials", PH));
+  ok("r9: pushd -n into extensions; pushd; touch is hard-denied", !!hd(`pushd -n ${AGENT}/extensions >/dev/null; pushd >/dev/null; touch zz.ts`));
+  // P0-2(a): location option values
+  ok("r9: git -C into extensions is hard-denied", !!hd(`git -C ${HOME}/.pi/./agent/extensions clone -q https://x/r helper`));
+  ok("r9: git --work-tree into ~/.pi/agent is hard-denied", !!hd(`git --work-tree=${HOME}/.pi/./agent checkout -f`));
+  ok("r9: npm --prefix into extensions is hard-denied", !!hd(`npm --prefix ${HOME}/.pi/./agent/extensions install evil`));
+  // P0-2(b): a placer name elsewhere does not hide the last argument
+  ok("r9: tar -xf cp -C ~/.p? is hard-denied", !!hd("tar -xf cp -C ~/.p?"));
+  // P0-2(d): other tools
+  ok("r9: MCP shell command writing rules is hard-denied", !!hardDeny("mcp__shell__exec", { command: `echo x >> ${AGENT}/guard/rules.jsonl` }, PROJ, roots));
+  ok("r9: powershell writing rules is hard-denied", !!hardDeny("powershell", { command: "Add-Content -Path ~/.pi/agent/guard/rules.jsonl x" }, PROJ, roots));
+  ok("r9: no 'any input' rule for tools with command-like text", derivePatterns("mcp__shell__exec", { command: "ls -la" }, PROJ) === undefined);
+  // P0-2(e): static brace / ANSI-C expansion and OLDPWD
+  ok("r9: brace expansion into rules is hard-denied", !!hd("tee -a ~/.{p,q}i/agent/guard/rules.jsonl"));
+  ok("r9: $'…' into rules is hard-denied", !!hd("tee -a ~/$'.pi'/agent/guard/rules.jsonl"));
+  ok("r9: OLDPWD= then cd - is followed", !!hd(`OLDPWD=${AGENT}/guard cd -; tee -a rules.jsonl`));
+  // P1: a project with its own .pi/ keeps everyday commands working
+  const P9 = mkdtempSync(join(tmpdir(), "guard-p9-"));
+  mkdirSync(join(P9, ".pi"));
+  writeFileSync(join(P9, ".pi", "guard.json"), "{}");
+  const r9 = protectedRoots(P9, join(AGENT, "sessions"));
+  for (const c of ["git add .", "prettier --write .", "eslint --fix .", "git checkout .", "tar czf ../b.tgz .", "code .", "docker build -t app .", "git rm -r --cached ."])
+    ok(`r9: not hard-denied with .pi/ present: ${c}`, !hd(c, P9, r9));
+  ok("r9: writing .pi/guard.json is still hard-denied", !!hd("echo '{}' > .pi/guard.json", P9, r9));
+  // P2: arguments are not commands
+  ok("r9: echo rm -rf / is not hard-denied", !hd("echo rm -rf /x"));
+  ok("r9: timeout 5 rm -rf ~ is still hard-denied", !!hd("timeout 5 rm -rf ~"));
+  const { redactString } = await import("../extensions/guard/redact.ts");
+  const red = redactString("curl -u admin:hunter2pass https://x --password s3cr3tpw --token abcdef123 sk_live_abcdefghijk hf_abcdefghijklmnopqrstuvwxyz aws_secret_access_key wJalrXUtnFEMI");
+  ok("r9: more secrets are redacted", !/hunter2pass|s3cr3tpw|abcdef123|sk_live_abc|hf_abcdef|wJalrXUtnFEMI/.test(red), red);
 }
 
 // ---------- evaluate ----------
@@ -895,6 +935,21 @@ const plain = [
 calls = [];
 await h.message_end({ type: "message_end", message: { role: "assistant", content: plain } }, ctx);
 ok("int: edit then read in one message needs no model call", calls.length === 0);
+
+// review 9 P0-2(c): writes after a call that may swap directories (checkout) ask the human
+responder = (b) => ({ answers: answersFor([0.95, 0.05, 0, 0, 0])(b) });
+const swap = [
+  { type: "toolCall", id: "w1", name: "bash", arguments: { command: "git checkout -q feature" } },
+  { type: "toolCall", id: "w2", name: "write", arguments: { path: "cfg/extensions/fmt.ts", content: "x" } },
+];
+await h.message_end({ type: "message_end", message: { role: "assistant", content: swap } }, ctx);
+branch.push({ type: "message", message: { role: "assistant", content: swap } });
+selectScript = [["this time only"]];
+await h.tool_call({ type: "tool_call", toolCallId: "w1", toolName: "bash", input: swap[0].arguments }, ctx);
+selectScript = [["Deny"]];
+inputs = [""];
+const w2 = await h.tool_call({ type: "tool_call", toolCallId: "w2", toolName: "write", input: swap[1].arguments }, ctx);
+ok("int: a write after git checkout in the same message asks first", w2?.block === true && selectScript.length === 0);
 
 // commands
 notes.length = 0;

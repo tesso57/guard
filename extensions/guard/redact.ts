@@ -11,6 +11,11 @@ const PATTERNS: [RegExp, string][] = [
   [/\b(npm_[A-Za-z0-9]{30,}|glpat-[A-Za-z0-9_-]{20,})/g, "[REDACTED token]"],
   [/((?:password|passwd|secret|token|api[_-]?key|access[_-]?key|auth)["']?\s*[:=]\s*["']?)[^\s"'&;|]{6,}/gi, "$1[REDACTED]"],
   [/(Authorization:\s*(?:Bearer|Basic|token)\s+)[^\s"']+/gi, "$1[REDACTED]"],
+  [/\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{8,}/g, "[REDACTED stripe key]"],
+  [/\bhf_[A-Za-z0-9]{20,}/g, "[REDACTED hf token]"],
+  [/(--(?:password|passwd|pass|token|secret|api-?key|access-?key|auth)[= ]+)[^\s"']+/gi, "$1[REDACTED]"],
+  [/(\s-u\s+[^\s:]+:)[^\s"']+/g, "$1[REDACTED]"],
+  [/(aws_secret_access_key\s*[=: ]\s*)[^\s"']+/gi, "$1[REDACTED]"],
   [/(:\/\/[^\s:/@]+:)[^\s@/]+@/g, "$1[REDACTED]@"],
 ];
 

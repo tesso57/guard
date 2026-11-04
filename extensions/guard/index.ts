@@ -62,10 +62,41 @@ function textOf(content: unknown): string {
 
 /** Applies an edit tool call to file contents (first occurrence of each oldText), to see what the file will contain. */
 function applyEdits(content: string, input: any): string {
-  const edits = Array.isArray(input?.edits) ? input.edits : input?.oldText !== undefined ? [input] : [];
+  // pi accepts `edits` as an array or a JSON string, plus a legacy top-level oldText/newText pair
+  let list: any = input?.edits;
+  if (typeof list === "string") {
+    try { list = JSON.parse(list); } catch { list = []; }
+  }
+  const edits = [...(Array.isArray(list) ? list : []), ...(input?.oldText !== undefined ? [input] : [])];
   let out = content;
   for (const e of edits) if (typeof e?.oldText === "string" && typeof e?.newText === "string") out = out.replace(e.oldText, () => e.newText);
   return out;
+}
+
+const TREE_GIT = new Set(["checkout", "switch", "merge", "pull", "reset", "stash", "apply", "am", "rebase", "cherry-pick", "clone", "worktree", "restore", "revert", "submodule", "read-tree"]);
+const TREE_TOOLS = new Set(["tar", "unzip", "7z", "bsdtar", "rsync", "cp", "mv", "ln", "patch", "curl", "wget", "git-lfs"]);
+/** Package-manager subcommands that replace dependency trees (and their bin links). */
+const PM_TREE = new Set(["install", "i", "ci", "add", "update", "upgrade", "up", "remove", "rm", "uninstall", "rebuild", "link", "sync", "dedupe", "prune"]);
+const PACKAGE_MANAGERS = new Set(["npm", "pnpm", "yarn", "bun", "pip", "pip3", "uv", "poetry", "cargo", "go", "gem", "bundle", "composer"]);
+
+/** Calls that may replace or add many files at once (and so create symlinks guard has not seen). */
+function changesTrees(c: ToolCallLike): boolean {
+  if (c.name !== "bash") return false;
+  const p = parseShell(String(c.arguments?.command ?? ""));
+  if (!p.ok || p.dynamic.length) return true;
+  return p.subcommands.some((raw) => {
+    const a = normalizeArgv(raw, "deny").argv;
+    const sub = a.find((t, i) => i > 0 && !t.startsWith("-")) ?? "";
+    return TREE_TOOLS.has(a[0]) || (a[0] === "git" && TREE_GIT.has(sub)) || (PACKAGE_MANAGERS.has(a[0]) && PM_TREE.has(sub));
+  });
+}
+
+/** Whether the call writes anything (tools that write, or bash that is not strictly read-only). */
+function callWrites(tool: string, input: any, cwd: string, parsed?: Parsed): boolean {
+  if (tool === "write" || tool === "edit") return true;
+  if (tool !== "bash") return !["read", "grep", "find", "ls"].includes(tool);
+  if (!parsed || !parsed.ok || parsed.dynamic.length) return true;
+  return parsed.writes.length > 0 || !parsed.subcommands.every(isReadOnlyArgv) || inputPaths(tool, input, cwd, parsed).writes.length > 0;
 }
 
 /** Plain edits of ordinary project files and mkdir/touch: they cannot create links or reach outside the project. */
@@ -117,6 +148,8 @@ export default function (pi: ExtensionAPI) {
   const verdictCache = new Map<string, { at: number; a: Assessment }>();
   /** Files written or edited in this session. */
   const touched = new Set<string>();
+  /** True once an allowed call changed files in ways guard cannot list (git checkout, tar x, rsync, ...). */
+  let opaqueChanges = false;
   const promoted = new Set<string>();
   let consecutiveBlocks = 0;
   let totalBlocks = 0;
@@ -197,7 +230,8 @@ export default function (pi: ExtensionAPI) {
         // (tests, conftest.py, package.json scripts, node_modules/.bin): attach every file changed in this session,
         // and recently changed project files (which may come from an earlier session or a git checkout)
         for (const p of [...touched, ...virtual.keys()]) if (isInside(p, ctx.cwd)) attach(p);
-        changedCount = Object.keys(attached).length;
+        // Changes guard could not follow (git checkout, extracting archives) also call for a full judgement
+        changedCount = Object.keys(attached).length + (opaqueChanges ? 1 : 0);
         // Context only: recently changed files do not by themselves force a full judgement
         for (const p of recentlyChangedFiles(ctx.cwd)) attach(p, true);
       }
@@ -256,6 +290,11 @@ export default function (pi: ExtensionAPI) {
     // pi judges every call of a message before running any of them, so a later call cannot rely on the file system
     // as it is now if an earlier sibling may change it (a checkout that adds a symlink, a write through one)
     const siblingMayChange = (opts.siblings ?? []).some((sb) => !isPureRead(sb, ctx.cwd) && !isPlainChange(sb, ctx.cwd));
+    // An earlier call in this message may swap whole directories (checkout, extract, copy, link) before this one runs:
+    // neither the deterministic checks nor the model can see the result, so writes after it ask the human
+    const treeChanger = (opts.siblings ?? []).find((sb) => changesTrees(sb));
+    if (treeChanger && callWrites(tool, input, ctx.cwd, parsed))
+      return { rememberAllow: false, globalAllow: false, action: "confirm", source: "model", reasons: [`runs after "${preview(treeChanger.name, treeChanger.arguments).split("\n")[0].slice(0, 80)}" in the same message, which may change what this call writes to`] };
     const sens = sensitive(tool, input, ctx.cwd, roots, parsed);
     // Running a file that an earlier call in the same message is about to change: the human should see it
     const siblingRun = cx.fromSiblings.length ? `runs ${cx.fromSiblings.map((p) => relative(ctx.cwd, p)).join(", ")}, changed earlier in this same message` : undefined;
@@ -349,6 +388,7 @@ export default function (pi: ExtensionAPI) {
     store.load(ctx.cwd, trusted);
     store.resetSession();
     modelMemo.clear(); siblingsById.clear(); judged.clear(); touched.clear(); promoted.clear(); verdictCache.clear();
+    opaqueChanges = false;
     consecutiveBlocks = totalBlocks = 0;
     for (const w of [...loaded.warnings, ...store.warnings]) ctx.ui.notify(`guard: ${w}`, "warning");
     restoreState(ctx);
@@ -412,6 +452,7 @@ export default function (pi: ExtensionAPI) {
       consecutiveBlocks = 0;
       // Files this call changes; running them later attaches their new contents
       try {
+        if (changesTrees({ id: "", name: tool, arguments: input })) opaqueChanges = true;
         const parsedNow = tool === "bash" ? parseShell(String(input?.command ?? "")) : undefined;
         if (tool === "edit" || tool === "write" || tool === "bash") for (const p of inputPaths(tool, input, ctx.cwd, parsedNow).writes) touched.add(p);
       } catch {
@@ -558,7 +599,12 @@ export default function (pi: ExtensionAPI) {
           const [id, to] = [rest[1], rest[2]];
           const r = store.all().find((x) => x.id === id);
           if (!r || (to !== "project" && to !== "global")) return say("usage: /guard rules promote <id> project|global", "warning");
-          const warn = to === "global" && r.decision === "allow" ? " Global allow rules apply in every trusted project; only promote commands that are safe everywhere." : "";
+          const globalAllow = to === "global" && r.decision === "allow";
+          // Global allows apply in every trusted project: only read-only commands, and only with the human confirming
+          if (globalAllow && !(r.tool === "bash" && r.match.kind !== "tool" && r.match.kind !== "path" && isReadOnlyArgv(r.match.kind === "argv" ? r.match.prefix : r.match.argv)))
+            return say("guard: only read-only commands can become global allow rules", "warning");
+          if (globalAllow && !ctx.hasUI) return say("guard: promoting to a global allow rule needs the interactive UI", "warning");
+          const warn = globalAllow ? " Global allow rules apply in every trusted project." : "";
           if (ctx.hasUI && !(await ctx.ui.confirm("Promote rule", `Save ${describeMatch(r.tool, r.match)} as a ${to} rule?${warn}`))) return;
           const nr = addRule(r.decision, to, r.tool, r.match, ctx.cwd, r.risk, r.note);
           if (r.scope === "session") store.remove(r.id, append);

@@ -83,7 +83,9 @@ function nonBashPattern(tool: string, input: any, cwd: string): Match[] | undefi
   const { reads, writes } = inputPaths(tool, input, cwd);
   const paths = [...new Set([...reads, ...writes])];
   if (paths.length === 1 && ["edit", "write", "read", "grep", "find", "ls"].includes(tool)) return [{ kind: "path", path: paths[0] }];
-  if (paths.length === 0 && !["bash", "edit", "write", "read"].includes(tool)) return [{ kind: "tool" }];
+  // "Any input" is only offered for tools whose arguments contain no command-like text
+  const commandLike = JSON.stringify(input ?? {}).match(/"[^"]*\s[^"]*"/g)?.length ?? 0;
+  if (paths.length === 0 && commandLike === 0 && !["bash", "edit", "write", "read", "powershell"].includes(tool)) return [{ kind: "tool" }];
   return undefined;
 }
 

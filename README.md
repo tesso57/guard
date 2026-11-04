@@ -47,7 +47,9 @@ All tool calls of an assistant message are sent to the model in parallel as soon
 
 Recursive content searches (`grep -r` in any spelling, `rg`, `git grep`, pi's `grep` tool) ask first when the searched tree contains `.env` files or keys, and are judged by the model when the tree is too large to check. Extracting archives where `.pi/` or `.agents/` could be created also asks first. Files that likely hold secrets are never sent to the judge; guard sends only their names.
 
-Commands that change things are blocked whenever they name a directory containing guard's state, whatever wrapper comes first (`time -p`, `setarch`, `fakeroot`), however `cd` gets there (wildcards, `CDPATH`), and including links (`ln`, `cp -l`) that would let a later plain write reach it. Options with glued path values (`-f/etc/x`) never count as safe. Strings that look like secrets are redacted before anything is sent.
+Commands that change things are blocked whenever they name guard's state or a directory containing it, whatever wrapper comes first (`time -p`, `setarch`, `fakeroot`), however the shell gets there (`cd` through wildcards or `CDPATH`, `pushd`/`popd`, `OLDPWD`, `git -C`, `npm --prefix`, brace expansion), and including links (`ln`, `cp -l`) that would let a later plain write reach it. Command-like arguments of other tools (powershell, MCP shells) get the same check. A project's own `.pi/` is protected from writes, but does not block commands such as `git add .` or `prettier --write .`. Options with glued path values (`-f/etc/x`) and the directory stack (`pushd`, `popd`) never count as safe.
+
+When an earlier call in the same message may swap whole directories (`git checkout`, `git pull`, extracting archives, `cp`, `rsync`, package installs), later calls that write ask you first, because neither guard nor the model can see what those directories will contain. Strings that look like secrets are redacted before anything is sent.
 
 Risk is scored on five levels, from 0 to 4. guard looks at the probability of the high-risk levels as well as the weighted average, so a split such as "45% catastrophic, 55% harmless" is still caught.
 

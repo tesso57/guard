@@ -7,7 +7,7 @@
 import { homedir } from "node:os";
 import { existsSync } from "node:fs";
 import { basename, join } from "node:path";
-import { hasGluedPathValue, isLongOption, isReadOnlyArgv, nonFlags, normalizeArgv, type Parsed } from "./shell.ts";
+import { hasGluedPathValue, isLongOption, isReadOnlyArgv, nonFlags, normalizeArgv, type Parsed, parseShell } from "./shell.ts";
 import { containsProtectedRoot, expandGlobFully, gitConfigIsSafe, isFreelyReadable, isHardLinked, isHomeOrAncestor, isInside, isRiskyProjectFile, memo, pathLikeTokens, pathVariants, protectedReason, realPath, resolvePath, secretFilesUnder, sensitiveReason } from "./paths.ts";
 
 const BUILTIN_TOOLS = new Set(["bash", "edit", "write", "read", "grep", "find", "ls"]);
@@ -125,7 +125,8 @@ function computeInputPaths(tool: string, input: any, cwd: string, parsed?: Parse
       // cd/pushd/popd only move; what runs in the new directory is accounted for by the following subcommands
       const moves = ["cd", "pushd", "popd"].includes(a[0]);
       for (const base of bases) {
-        if (!moves) reads.push(...pathLikeTokens(base, a.slice(1)));
+        // Both the normalized and the raw argv: normalization drops location values (git -C x, npm --prefix x)
+        if (!moves) reads.push(...pathLikeTokens(base, a.slice(1)), ...pathLikeTokens(base, s.argv.slice(1)));
         reads.push(...s.reads.flatMap((r) => pathVariants(base, r)));
         // Wildcards in write targets are expanded: `>> ~/.p?/a????/guard/rules.jsonl` writes to the real file
         writes.push(...[...s.writes, ...bashWriteTargets(s.argv)].flatMap((w) => [...pathVariants(base, w), ...(hasGlob(w) ? globTargets(base, w) : [])]));
@@ -136,7 +137,10 @@ function computeInputPaths(tool: string, input: any, cwd: string, parsed?: Parse
     return { reads, writes };
   }
   if (!BUILTIN_TOOLS.has(tool)) {
-    const ps = pathLikeTokens(cwd, allStrings(input).filter((s) => s.length < 4096 && !/\s/.test(s.trim())));
+    // Unknown tools: every path-like string counts, including words inside command-like strings
+    const strs = allStrings(input).filter((x) => x.length < 16 * 1024);
+    const words = strs.flatMap((x) => (/\s/.test(x.trim()) ? parseShell(x).subcommands.flat() : [x]));
+    const ps = pathLikeTokens(cwd, words);
     return { reads: ps, writes: ps };
   }
   const p: string[] = [];
@@ -173,18 +177,26 @@ function cdTargets(dirs: string[], target: string | undefined, assigns: string[]
 function subsWithBases(parsed: Parsed, cwd: string) {
   const out: { s: Parsed["subs"][number]; a: string[]; bases: string[]; dirs: string[] }[] = [];
   const union = (...xs: string[][]) => [...new Set(xs.flat())].slice(0, 16);
+  // Options that make a command act in another directory: their values are extra bases for that command
+  const locationDirs = (raw: string[], from: string[]) =>
+    LOCATION_VALUE_OPTIONS.flatMap((o) => optionValue(raw, [o])).flatMap((v) => from.map((d) => resolvePath(d, v)));
   let dirs = [cwd];
   let previous = [cwd]; // OLDPWD
   const stack: string[][] = []; // pushd/popd directory stack
   const visited = new Set([cwd]);
   for (const s of parsed.subs) {
     const { argv: a } = normalizeArgv(s.argv, "deny");
-    out.push({ s, a, bases: union(dirs, [cwd]), dirs });
+    const loc = locationDirs(s.argv, union(dirs, [cwd]));
+    out.push({ s, a, bases: union(dirs, [cwd], loc), dirs });
     // `cd -` names OLDPWD; a bare `-` is not an option here
     const arg = a[1] === "-" ? "-" : nonFlags(a)[0];
     const before = dirs;
-    if (a[0] === "cd") dirs = arg === "-" ? previous : cdTargets(dirs, arg, s.assigns);
-    else if (a[0] === "pushd") {
+    const oldpwd = s.assigns.find((x) => x.startsWith("OLDPWD="))?.slice(7);
+    if (a[0] === "cd") dirs = arg === "-" ? (oldpwd ? cdTargets(dirs, oldpwd, s.assigns) : previous) : cdTargets(dirs, arg, s.assigns);
+    else if (a[0] === "pushd" && s.argv.includes("-n")) {
+      // pushd -n adds to the stack without changing directory; a later `pushd` swaps it in
+      if (arg) stack.push(cdTargets(dirs, arg, s.assigns));
+    } else if (a[0] === "pushd") {
       if (arg && /^[+-]\d+$/.test(arg)) dirs = [...visited]; // rotating the stack: any directory seen so far
       else if (!arg) {
         // pushd without an argument swaps the top two entries
@@ -203,6 +215,46 @@ function subsWithBases(parsed: Parsed, cwd: string) {
     for (const d of dirs) visited.add(d);
   }
   return out;
+}
+
+const LOCATION_VALUE_OPTIONS = ["-C", "--git-dir", "--work-tree", "--prefix", "--dir", "--cwd", "--directory", "--manifest-path"];
+
+/** Shell keywords and wrappers that run the command after them. */
+const RUNS_NEXT = new Set([
+  "time", "nice", "nohup", "setsid", "timeout", "sudo", "doas", "env", "stdbuf", "ionice", "chrt", "taskset", "flock", "unbuffer",
+  "fakeroot", "setarch", "unshare", "strace", "ltrace", "busybox", "command", "builtin", "exec", "xargs", "parallel", "watch", "eval",
+  "nsenter", "chroot", "proot", "firejail", "systemd-run", "caffeinate", "arch",
+]);
+
+/**
+ * argv positions that may be the command actually run: 0, and the word after a wrapper and its options
+ * (plus one positional such as a duration or architecture). `echo rm -rf /` has no such position at `rm`.
+ */
+function commandPositions(a: string[]): number[] {
+  const out = [0];
+  for (let i = 0; i < a.length; i++) {
+    if (!RUNS_NEXT.has(basename(a[i]))) continue;
+    let j = i + 1;
+    while (j < a.length && (a[j].startsWith("-") || /^[A-Za-z_]\w*=/.test(a[j]))) j++;
+    out.push(j);
+    if (j + 1 < a.length) out.push(j + 1);
+  }
+  return [...new Set(out)].filter((i) => i < a.length);
+}
+
+/** Static expansions of brace lists and $'…' quoting, so hard-deny also sees `.{p,q}i` and `$'.pi'`. */
+function staticVariants(cmd: string): string[] {
+  let variants = [cmd.replace(/\$'((?:[^'\\]|\\.)*)'/g, (_m, s: string) => `'${s.replace(/\\x([0-9a-f]{2})/gi, (_x, h) => String.fromCharCode(parseInt(h, 16))).replace(/\\(.)/g, "$1")}'`)];
+  for (let round = 0; round < 3; round++) {
+    const next: string[] = [];
+    for (const v of variants) {
+      const m = /\{([^{}\s]*,[^{}\s]*)\}/.exec(v);
+      if (!m) next.push(v);
+      else for (const alt of m[1].split(",").slice(0, 8)) next.push(v.slice(0, m.index) + alt + v.slice(m.index + m[0].length));
+    }
+    variants = next.slice(0, 32);
+  }
+  return variants.filter((v) => v !== cmd);
 }
 
 const isLinking = (a: string[]) =>
@@ -229,16 +281,29 @@ export function hardDeny(tool: string, input: any, cwd: string, roots: string[],
     if (r) return `writes to a ${r}`;
     if (basename(w) === "authorized_keys" || basename(realPath(w)) === "authorized_keys") return "writes to authorized_keys";
   }
-  if (tool !== "bash") return undefined;
+  if (tool !== "bash") {
+    // Command-like strings in other tools (powershell, MCP shells) get the same hard-deny as bash
+    for (const x of allStrings(input)) {
+      if (x.length > 16 * 1024 || !/\s/.test(x.trim())) continue;
+      const r = hardDeny("bash", { command: x }, cwd, roots, parseShell(x));
+      if (r) return `${r} (in ${tool})`;
+    }
+    return undefined;
+  }
   const cmd = String(input?.command ?? "");
+  if (cmd.length <= 4096 && /[{]|\$'/.test(cmd))
+    for (const v of staticVariants(cmd)) {
+      const r = hardDeny("bash", { command: v }, cwd, roots, parseShell(v));
+      if (r) return r;
+    }
   const scan = parsed && parsed.ok && !parsed.dynamic.length ? stripQuoted(cmd) : cmd;
   // Very long commands are not scanned (bounded work); they cannot be parsed either and go to the model
   if (scan.length <= 16 * 1024) for (const [re, why] of HARD_DENY_BASH) if (re.test(scan)) return why;
   if (parsed) {
     const resolveAll = (b: string, t: string) => [...pathVariants(b, t), ...(hasGlob(t) ? globTargets(b, t) : [])];
     for (const { s, a: a0, bases } of subsWithBases(parsed, cwd)) {
-      // Check every position, so unknown wrappers in front (setarch, unshare, fakeroot) do not hide the command
-      for (let i = 0; i < a0.length; i++) {
+      // Check the command after every wrapper too (time -p, setarch x86_64, fakeroot), not just position 0
+      for (const i of commandPositions(a0)) {
         const a = [basename(a0[i]), ...a0.slice(i + 1)];
         const args = nonFlags(a);
         if (isRecursiveRm(a) && args.some((t) => bases.some((b) => isDangerousDeleteTarget(b, t)))) return "recursive deletion of /, ~ or a system directory";
@@ -268,9 +333,13 @@ export function hardDeny(tool: string, input: any, cwd: string, roots: string[],
       // chmod -R 000 ~/.p?, tar -xf x -C ~/.p?) is blocked; copy destinations and cd targets are handled above
       const a = a0;
       if (!isReadOnlyArgv(s.argv) && !["cd", "pushd", "popd"].includes(a[0])) {
-        const named = nonFlags(a).slice(0, a.some((t) => PLACERS.has(basename(t))) ? -1 : undefined);
-        if (named.some((t) => bases.some((b) => resolveAll(b, t).some((p) => containsProtectedRoot(p, roots)))))
-          return "changes a directory that contains guard's or pi's state";
+        // Raw argv too, so location values (git -C x, npm --prefix x) are seen; a copy's destination is checked above
+        const named = [...new Set([...nonFlags(a), ...nonFlags(s.argv)])].filter((t) => !(PLACERS.has(a[0]) && t === nonFlags(a).at(-1)));
+        // The project's own .pi/.agents are guarded by the explicit write checks; counting the project as their
+        // parent would block every `git add .` or `prettier --write .` in projects that have .pi/guard.json
+        const outerRoots = roots.filter((r) => !isInside(r, cwd));
+        if (named.some((t) => bases.some((b) => resolveAll(b, t).some((p) => containsProtectedRoot(p, outerRoots) || (protectedReason(p, roots) && !isInside(p, cwd))))))
+          return "changes guard's or pi's state, or a directory that contains it";
       }
     }
   }
@@ -356,7 +425,7 @@ export function sensitive(tool: string, input: any, cwd: string, roots: string[]
       const recursivePerms = ["chmod", "chown", "chattr", "chgrp"].includes(a[0]) && a.some((t) => /^-[A-Za-z]*R/.test(t) || t === "--recursive");
       if (extracts || recursivePerms) {
         const given = extracts ? optionValue(a, ["-C", "--directory", "-d"]) : nonFlags(a).slice(1);
-        const dests = bases.flatMap((b) => (given.length ? given.flatMap((t) => pathVariants(b, t)) : [b]));
+        const dests = bases.flatMap((b) => (given.length ? given.flatMap((t) => [...pathVariants(b, t), ...(hasGlob(t) ? globTargets(b, t) : [])]) : [b]));
         const parentOfRoot = (p: string) => roots.some((r) => isInside(r, p) || isInside(r, realPath(p)));
         if (dests.some((p) => (extracts ? parentOfRoot(p) : containsProtectedRoot(p, roots))))
           return extracts ? "extracts an archive where .pi/ or .agents/ could be created" : "changes permissions recursively where guard's or pi's state lives";
@@ -391,6 +460,8 @@ export function safeAllow(tool: string, input: any, cwd: string, opts: { trusted
     if (!parsed || !parsed.ok || parsed.dynamic.length || parsed.writes.length || !parsed.subcommands.length) return false;
     // Glued option values (-f/etc/x, -bf~/x) are easy to misread; such commands always get a judgement
     if (parsed.subcommands.some(hasGluedPathValue)) return false;
+    // The directory stack (pushd -n, rotations) is too easy to get wrong; never a shortcut
+    if (parsed.subcommands.some((a) => ["pushd", "popd", "dirs"].includes(normalizeArgv(a).argv[0]))) return false;
     if (searchExposure(tool, input, cwd, parsed).unknown) return false;
     let creates = false;
     for (const a of parsed.subcommands) {
