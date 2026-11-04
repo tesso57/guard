@@ -10,7 +10,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { DATA_DIR } from "./config.ts";
-import { normalizeArgv, type Parsed } from "./shell.ts";
+import { normalizeArgv, type Parsed, parseShell } from "./shell.ts";
 import { inputPaths } from "./policy.ts";
 
 export type Decision = "allow" | "deny" | "ask";
@@ -174,6 +174,29 @@ function strictMatchesArgv(m: Match, raw: string[]): boolean {
   return ruleTokens
     .filter((t, i) => i > 0 && t.startsWith("-"))
     .every((f) => present(f) || (FLAG_ALIASES[f] ?? []).some(present) || ((f === "--force" || f === "-f") && forcePush));
+}
+
+const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "ash"]);
+
+/**
+ * Subcommands plus the commands hidden inside `bash -c '…'` and `eval '…'` (up to 3 levels),
+ * so deny and ask rules also see them.
+ */
+function expandSubcommands(subs: string[][], depth = 0): string[][] {
+  const out: string[][] = [];
+  for (const raw of subs) {
+    out.push(raw);
+    if (depth >= 3) continue;
+    let inner: string | undefined;
+    if (basename(raw[0] ?? "") === "eval") inner = raw.slice(1).join(" ");
+    else {
+      const a = normalizeArgv(raw, "deny").argv;
+      const c = a.findIndex((t, i) => i > 0 && /^-[a-z]*c[a-z]*$/.test(t));
+      if (SHELLS.has(a[0]) && c > 0 && a[c + 1] !== undefined) inner = a[c + 1];
+    }
+    if (inner !== undefined) out.push(...expandSubcommands(parseShell(inner).subcommands, depth + 1));
+  }
+  return out;
 }
 
 function matchesNonBash(r: Rule, tool: string, input: any, cwd: string, mode: "any" | "all"): boolean {
@@ -348,8 +371,9 @@ export class RuleStore {
   /** The strictest decision that applies. A bash allow needs every subcommand to match an allow rule. */
   find(tool: string, input: any, cwd: string, parsed?: Parsed): { decision: Decision; rules: Rule[] } | undefined {
     const rules = this.all().filter((r) => r.tool === tool && (r.scope !== "session" || !r.cwd || r.cwd === cwd));
+    const expanded = parsed ? expandSubcommands(parsed.subcommands) : [];
     for (const d of ["deny", "ask"] as const) {
-      const hit = rules.filter((r) => r.decision === d && (tool === "bash" ? !!parsed && parsed.subcommands.some((a) => strictMatchesArgv(r.match, a)) : matchesNonBash(r, tool, input, cwd, "any")));
+      const hit = rules.filter((r) => r.decision === d && (tool === "bash" ? expanded.some((a) => strictMatchesArgv(r.match, a)) : matchesNonBash(r, tool, input, cwd, "any")));
       if (hit.length) return { decision: d, rules: hit };
     }
     const allows = rules.filter((r) => r.decision === "allow" && (r.scope !== "global" || this.trusted));
@@ -369,7 +393,7 @@ export class RuleStore {
 
   /** Past decisions on the same tool with a similar pattern, passed to the model as evidence (max 5). */
   related(tool: string, input: any, cwd: string, parsed?: Parsed): Rule[] {
-    const heads = new Set(parsed?.subcommands.map((a) => normalizeArgv(a).argv[0]) ?? []);
+    const heads = new Set(parsed ? expandSubcommands(parsed.subcommands).map((a) => normalizeArgv(a, "deny").argv[0]) : []);
     const { reads, writes } = inputPaths(tool, input, cwd, parsed);
     const dirs = new Set([...reads, ...writes].map((p) => dirname(p)));
     return this.all()

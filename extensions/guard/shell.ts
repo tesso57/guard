@@ -35,6 +35,7 @@ const INTERPRETERS = new Set([
   "python", "python2", "python3", "node", "deno", "bun", "ruby", "perl", "php", "lua", "awk", "gawk",
   "eval", "exec", "source", ".", "sudo", "su", "doas", "env", "xargs", "nohup", "time", "timeout",
   "nice", "watch", "command", "builtin", "osascript", "pwsh", "powershell", "parallel", "script", "stdbuf",
+  "npx", "bunx", "pnpx", "uvx", "busybox", "strace", "ltrace", "setsid", "ionice", "chrt", "taskset", "flock", "unbuffer",
 ]);
 /** Shell keywords that may lead a subcommand (`if x; then git push; fi`). */
 const RESERVED = new Set(["then", "do", "else", "elif", "if", "while", "until", "!", "{", "}", "fi", "done", "esac", "time"]);
@@ -244,6 +245,16 @@ const GLOBAL_OPTIONS: Record<string, { flags: string[]; withValue: string[]; loc
 
 /** Wrappers that run another command, and their options that take a value. */
 const WRAPPERS: Record<string, string[]> = {
+  eval: [],
+  setsid: [],
+  unbuffer: [],
+  ionice: ["-c", "-n", "-p", "-t"],
+  chrt: [],
+  taskset: [],
+  flock: ["-w", "--timeout", "-E", "--conflict-exit-code"],
+  strace: ["-o", "-e", "-p", "-s", "-u", "-E", "-P", "-I", "-b"],
+  ltrace: ["-o", "-e", "-p", "-s", "-u", "-n"],
+  busybox: [],
   timeout: ["-s", "--signal", "-k", "--kill-after"],
   env: ["-u", "--unset", "-C", "--chdir", "-S", "--split-string"],
   sudo: ["-u", "-g", "-h", "-p", "-U", "-C", "-D", "-r", "-t"],
@@ -277,7 +288,8 @@ export function normalizeArgv(a: string[], mode: "allow" | "deny" = "allow"): { 
         const t = rest.shift()!;
         if (w.includes(t)) rest.shift();
       }
-      if (head === "timeout" && rest.length) rest.shift(); // the duration
+      // Wrappers with a positional argument before the command (duration, priority, CPU mask, lock file)
+      if (["timeout", "chrt", "taskset", "flock"].includes(head) && rest.length) rest.shift();
     }
   }
   if (!rest.length) return { argv: [], unknownOption: false };
@@ -301,14 +313,38 @@ export function normalizeArgv(a: string[], mode: "allow" | "deny" = "allow"): { 
       break;
     }
   }
-  return { argv: [head, ...rest], unknownOption };
+  return { argv: canonicalScripts([head, ...rest]), unknownOption };
+}
+
+/** Builtin commands of package managers that also run package.json scripts by name (`yarn deploy`). */
+const PM_BUILTINS: Record<string, Set<string>> = {
+  yarn: new Set(["add", "audit", "autoclean", "bin", "cache", "check", "config", "create", "dedupe", "dlx", "exec", "explain", "generate-lock-entry", "global", "help", "import", "info", "init", "install", "licenses", "link", "list", "login", "logout", "node", "npm", "outdated", "owner", "pack", "patch", "plugin", "policies", "publish", "rebuild", "remove", "run", "set", "stage", "tag", "team", "test", "unlink", "unplug", "up", "upgrade", "upgrade-interactive", "version", "versions", "why", "workspace", "workspaces"]),
+  pnpm: new Set(["add", "audit", "bin", "config", "create", "dedupe", "deploy", "dlx", "env", "exec", "fetch", "i", "import", "init", "install", "licenses", "link", "list", "ls", "outdated", "pack", "patch", "prune", "publish", "rebuild", "recursive", "remove", "rm", "root", "run", "server", "setup", "start", "store", "test", "unlink", "up", "update", "why"]),
+  bun: new Set(["add", "build", "create", "init", "install", "link", "outdated", "patch", "pm", "publish", "remove", "run", "test", "update", "upgrade", "why", "x"]),
+};
+
+/** `npm run-script x`, `npm rum x` and `yarn x` all run the script x; they become `<pm> run x`. */
+function canonicalScripts(a: string[]): string[] {
+  const [head, sub] = a;
+  if (!sub) return a;
+  if (head === "npm" && ["run-script", "rum", "urn"].includes(sub)) return [head, "run", ...a.slice(2)];
+  if (PM_BUILTINS[head] && !sub.startsWith("-") && !PM_BUILTINS[head].has(sub) && !sub.includes("/") && !sub.includes(".")) return [head, "run", ...a.slice(1)];
+  return a;
 }
 
 export const nonFlags = (a: string[]) => a.slice(1).filter((t) => !t.startsWith("-"));
 const flags = (a: string[]) => a.slice(1).filter((t) => t.startsWith("-"));
 /** True if a short-option cluster such as `-uo` contains the letter. */
 const hasShort = (a: string[], letter: string) => flags(a).some((t) => !t.startsWith("--") && t.slice(1).includes(letter));
-const hasLong = (a: string[], ...names: string[]) => flags(a).some((t) => names.some((n) => t === n || t.startsWith(`${n}=`)));
+/**
+ * True if a long option is present. GNU getopt_long and git accept any unambiguous prefix (`--outp` for `--output`),
+ * so every prefix of at least three characters (`--o`) counts.
+ */
+export const isLongOption = (t: string, name: string) => {
+  const n = t.split("=")[0];
+  return n.startsWith("--") && n.length >= 3 && name.startsWith(n);
+};
+const hasLong = (a: string[], ...names: string[]) => flags(a).some((t) => names.some((n) => isLongOption(t, n)));
 const onlyFlagsFrom = (a: string[], allowed: string[]) => a.slice(2).every((t) => allowed.includes(t));
 
 const READ_ONLY = new Set([
@@ -317,7 +353,7 @@ const READ_ONLY = new Set([
   "true", "false", "test", "[", "nl", "column", "diff", "cmp", "comm", "id", "groups", "jq", "type", "file", "md5sum", "sha256sum", "shasum",
 ]);
 const GIT_READ_ONLY = new Set(["status", "diff", "log", "show", "blame", "ls-files", "rev-parse", "describe", "shortlog", "grep", "ls-tree", "cat-file", "reflog"]);
-const NPM_READ_ONLY = new Set(["ls", "list", "view", "outdated", "explain", "why", "config"]);
+const NPM_READ_ONLY = new Set(["ls", "list", "explain", "why"]);
 
 /**
  * True only if the command cannot write files, run other programs, or change system state,
@@ -338,7 +374,16 @@ export function isReadOnlyArgv(raw: string[]): boolean {
     case "find":
       return !a.some((t) => /^-(exec|execdir|ok|okdir|delete|fprint|fprint0|fprintf|fls)$/.test(t));
     case "rg":
-      return !hasLong(a, "--pre", "--pre-glob");
+      // --follow / -L walks symlinks out of the project
+      return !hasLong(a, "--pre", "--pre-glob", "--follow") && !hasShort(a, "L");
+    case "grep":
+    case "egrep":
+    case "fgrep":
+      // -R and --dereference-recursive follow symlinks out of the project
+      return !hasShort(a, "R") && !hasLong(a, "--dereference-recursive");
+    case "ps":
+      // BSD-style `e` (ps e, ps axeww) prints every process's environment, including API keys
+      return !nonFlags(a).some((t) => t.includes("e")) && !a.some((t) => /environ/i.test(t));
     case "fd":
     case "fdfind":
       return !hasShort(a, "x") && !hasShort(a, "X") && !hasLong(a, "--exec", "--exec-batch");
@@ -366,7 +411,7 @@ export function isReadOnlyArgv(raw: string[]): boolean {
     case "hostname":
       return nonFlags(a).length === 0 && !hasShort(a, "F") && !hasShort(a, "b") && !hasLong(a, "--file", "--boot");
     case "npm":
-      return !unknownOption && NPM_READ_ONLY.has(a[1] ?? "") && (a[1] !== "config" || ["get", "list", "ls"].includes(a[2] ?? ""));
+      return !unknownOption && NPM_READ_ONLY.has(a[1] ?? "") && !hasLong(a, "--registry");
     case "git": {
       if (unknownOption) return false;
       const sub = a[1];
@@ -374,7 +419,6 @@ export function isReadOnlyArgv(raw: string[]): boolean {
       if (sub === "remote") return onlyFlagsFrom(a, ["-v", "--verbose"]);
       if (sub === "tag") return onlyFlagsFrom(a, ["-l", "--list"]);
       if (sub === "stash") return a[2] === "list" && a.length <= 4;
-      if (sub === "config") return ["--get", "--get-all", "--list", "-l"].includes(a[2] ?? "") && !hasLong(a, "--global", "--system", "--file");
       if (!sub || !GIT_READ_ONLY.has(sub)) return false;
       // --output writes files; ext-diff, textconv and open-files-in-pager can run configured programs
       return !hasLong(a, "--output", "--ext-diff", "--textconv", "--open-files-in-pager", "--exec", "--upload-pack") && !(sub === "grep" && hasShort(a, "O"));

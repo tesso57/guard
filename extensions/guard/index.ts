@@ -12,7 +12,7 @@
  *   Failures confirm (or block without a UI). Without OPENAI_API_KEY guard runs in rules-only mode.
  */
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { basename, relative } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { audit, tail } from "./audit.ts";
@@ -68,6 +68,15 @@ function applyEdits(content: string, input: any): string {
   return out;
 }
 
+function isRegularSmallFile(p: string): boolean {
+  try {
+    const st = statSync(p);
+    return st.isFile() && st.size < 1_000_000;
+  } catch {
+    return false;
+  }
+}
+
 function readText(p: string): string | undefined {
   try {
     return existsSync(p) ? readFileSync(p, "utf8") : undefined;
@@ -81,7 +90,13 @@ export default function (pi: ExtensionAPI) {
   const store = new RuleStore();
   let enabled = true;
   let trusted = false;
-  const pending = new Map<string, { hash: string; version: number; siblings: ToolCallLike[]; p: Promise<Assessment> }>();
+  /**
+   * Model verdicts started at message_end, reused by tool_call. Only the model call is reused:
+   * every deterministic check runs again at tool_call, because earlier calls may have changed the file system.
+   */
+  const modelMemo = new Map<string, Promise<ModelVerdict>>();
+  /** Earlier calls of the same assistant message, recorded at message_end. */
+  const siblingsById = new Map<string, ToolCallLike[]>();
   const judged = new Map<string, string>();
   const verdictCache = new Map<string, { at: number; a: Assessment }>();
   /** Files written or edited in this session. */
@@ -132,14 +147,14 @@ export default function (pi: ExtensionAPI) {
 
     const attached: Record<string, string> = {};
     const fromSiblings: string[] = [];
-    const attach = (p: string) => {
+    const attach = (p: string, fromDisk = false) => {
       if (attached[p] !== undefined) return;
       if (virtual.has(p)) {
         attached[p] = virtual.get(p)!;
         fromSiblings.push(p);
         return;
       }
-      const text = touched.has(p) ? readText(p) : undefined;
+      const text = touched.has(p) || fromDisk ? readText(p) : undefined;
       if (text !== undefined) attached[p] = text;
       else if (writtenEarlier.has(p)) attached[p] = writtenEarlier.get(p)!;
     };
@@ -147,9 +162,16 @@ export default function (pi: ExtensionAPI) {
     if (tool === "bash" && parsed) {
       for (const tok of parsed.subcommands.flat()) attach(resolvePath(ctx.cwd, tok));
       runsScripts = parsed.subcommands.some((a) => SCRIPT_RUNNERS.has(normalizeArgv(a, "deny").argv[0]));
-      // Test runners, build tools and interpreters load project files that are not named in the command
-      // (tests, conftest.py, package.json scripts, node_modules/.bin), so every file changed this session is relevant
-      if (runsScripts) for (const p of [...touched, ...virtual.keys()]) if (isInside(p, ctx.cwd)) attach(p);
+      if (runsScripts) {
+        // The script an interpreter or runner is given is what will run, whoever wrote it
+        for (const tok of parsed.subcommands.flat()) {
+          const p = resolvePath(ctx.cwd, tok);
+          if (isRegularSmallFile(p)) attach(p, true);
+        }
+        // Test runners and build tools also load project files that are not named in the command
+        // (tests, conftest.py, package.json scripts, node_modules/.bin), so every file changed this session is relevant
+        for (const p of [...touched, ...virtual.keys()]) if (isInside(p, ctx.cwd)) attach(p);
+      }
     }
     return {
       userMessages: users.slice(-cfg.contextUserMessages),
@@ -160,9 +182,27 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
-  async function judgeWithModel(tool: string, input: any, ctx: ExtensionContext, callId: string, cx: ReturnType<typeof context>, past: Rule[], light: boolean, signal?: AbortSignal) {
-    const { body, truncated } = buildRequest(cfg, { tool, input, cwd: ctx.cwd, callId, past, light, ...cx, sessionId: ctx.sessionManager.getSessionId() });
-    return evaluate(cfg, await callDecisions(cfg, body, signal), { light, truncated });
+  async function judgeWithModel(tool: string, input: any, ctx: ExtensionContext, callId: string, cx: ReturnType<typeof context>, past: Rule[], light: boolean, signal?: AbortSignal): Promise<ModelVerdict> {
+    const key = stableHash([callId, tool, input, light, cx.attachedFiles, cx.userMessages.at(-1), past.map((r) => r.id)]);
+    const run = async () => {
+      const { body, truncated } = buildRequest(cfg, { tool, input, cwd: ctx.cwd, callId, past, light, ...cx, sessionId: ctx.sessionManager.getSessionId() });
+      return evaluate(cfg, await callDecisions(cfg, body, signal), { light, truncated });
+    };
+    const memo = modelMemo.get(key);
+    if (memo) {
+      modelMemo.delete(key);
+      try {
+        return await memo;
+      } catch {
+        if (signal?.aborted) throw new Error("aborted");
+        return run(); // the early call failed (e.g. aborted turn); judge again now
+      }
+    }
+    const p = run();
+    if (modelMemo.size >= MAX_CACHE) modelMemo.delete(modelMemo.keys().next().value!);
+    modelMemo.set(key, p);
+    p.catch(() => {});
+    return p;
   }
 
   async function assess(callId: string, tool: string, input: any, ctx: ExtensionContext, opts: { signal?: AbortSignal; siblings?: ToolCallLike[] } = {}): Promise<Assessment> {
@@ -268,7 +308,7 @@ export default function (pi: ExtensionAPI) {
     trusted = ctx.isProjectTrusted();
     store.load(ctx.cwd, trusted);
     store.resetSession();
-    pending.clear(); judged.clear(); touched.clear(); promoted.clear(); verdictCache.clear();
+    modelMemo.clear(); siblingsById.clear(); judged.clear(); touched.clear(); promoted.clear(); verdictCache.clear();
     consecutiveBlocks = totalBlocks = 0;
     for (const w of [...loaded.warnings, ...store.warnings]) ctx.ui.notify(`guard: ${w}`, "warning");
     restoreState(ctx);
@@ -278,7 +318,8 @@ export default function (pi: ExtensionAPI) {
 
   // Rewinding with /tree changes which session rules and on/off state apply
   pi.on("session_tree", async (_e, ctx) => {
-    pending.clear();
+    modelMemo.clear();
+    siblingsById.clear();
     restoreState(ctx);
   });
 
@@ -290,16 +331,17 @@ export default function (pi: ExtensionAPI) {
     if (m?.role !== "assistant" || !Array.isArray(m.content)) return;
     const calls: ToolCallLike[] = m.content.filter((c: any) => c?.type === "toolCall").map((c: any) => ({ id: c.id, name: c.name, arguments: c.arguments }));
     calls.forEach((c, i) => {
-      if (pending.has(c.id)) return;
+      if (siblingsById.has(c.id)) return;
       const siblings = calls.slice(0, i);
-      const p = assess(c.id, c.name, c.arguments, ctx, { signal: ctx.signal, siblings });
-      p.catch(() => {});
-      pending.set(c.id, { hash: stableHash([c.name, c.arguments]), version: store.version, siblings, p });
+      siblingsById.set(c.id, siblings);
+      // Warms modelMemo; the result itself is discarded and recomputed at tool_call
+      assess(c.id, c.name, c.arguments, ctx, { signal: ctx.signal, siblings }).catch(() => {});
     });
   });
 
   pi.on("agent_end", async () => {
-    pending.clear();
+    modelMemo.clear();
+    siblingsById.clear();
   });
 
   pi.on("tool_call", async (event, ctx) => {
@@ -307,16 +349,15 @@ export default function (pi: ExtensionAPI) {
     const tool = event.toolName;
     const input: any = event.input;
     const hash = stableHash([tool, input]);
-    const pre = pending.get(event.toolCallId);
-    pending.delete(event.toolCallId);
+    const siblings = siblingsById.get(event.toolCallId) ?? siblingsFromBranch(ctx, event.toolCallId);
+    siblingsById.delete(event.toolCallId);
 
     status(ctx, `guard: judging ${tool}…`);
     let a: Assessment;
     try {
-      // Re-judge when another extension changed the input, or a rule changed, after pre-judging
-      a = pre && pre.hash === hash && pre.version === store.version
-        ? await pre.p
-        : await assess(event.toolCallId, tool, input, ctx, { signal: ctx.signal, siblings: pre?.siblings ?? siblingsFromBranch(ctx, event.toolCallId) });
+      // Deterministic checks always run on the current state; a model verdict started at message_end is reused
+      // only if the input, attachments and past decisions it was based on are unchanged
+      a = await assess(event.toolCallId, tool, input, ctx, { signal: ctx.signal, siblings });
     } catch (e: any) {
       a = { action: "confirm", source: "error", reasons: [`could not judge: ${e.message}`], rememberAllow: false, globalAllow: false };
     }
@@ -329,7 +370,9 @@ export default function (pi: ExtensionAPI) {
 
     const onAllowed = () => {
       consecutiveBlocks = 0;
-      if (tool === "edit" || tool === "write") for (const p of inputPaths(tool, input, ctx.cwd).writes) touched.add(p);
+      // Files this call changes; running them later attaches their new contents
+      const parsedNow = tool === "bash" ? parseShell(String(input?.command ?? "")) : undefined;
+      if (tool === "edit" || tool === "write" || tool === "bash") for (const p of inputPaths(tool, input, ctx.cwd, parsedNow).writes) touched.add(p);
       if (a.rules && a.source === "rule-allow") {
         store.hit(a.rules);
         for (const r of a.rules) {

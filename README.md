@@ -27,7 +27,7 @@ Without a key, guard runs in **rules-only mode**: the deterministic checks and y
 | 2 | Deny and ask rules, in any scope | Block / confirm |
 | 3 | Allow rules. For bash, every subcommand must match and the command must have no dynamic parts such as `$()` or variable expansion | Allow, after a light check for exfiltration, actions outside your request, and text aimed at the judge |
 | 4 | Sensitive paths (`~/.ssh`, `.env`, key files, `/proc/*/environ`, …, after resolving symlinks and globs), printing the environment, and content searches across `~` | Confirm |
-| 5 | Safe list: read-only bash commands (judged by command **and options**, so `git log --output=…` or `sort -o` are not read-only; read-only `git` only in trusted repositories whose `.git/config` runs no commands), and edits to ordinary files inside the project | Allow, without calling the API |
+| 5 | Safe list: read-only bash commands (judged by command **and options**, so `git log --output=…` or `sort -o` are not read-only; read-only `git` only in trusted repositories whose `.git/config` runs no commands, and never after `cd`), `mkdir`/`touch` of ordinary project paths, and edits to ordinary files inside the project | Allow, without calling the API |
 | 6 | Decisions API | Allow / confirm / block |
 
 If the API call fails, the model refuses to answer, or the input had to be truncated, guard takes the safe side: it asks you to confirm, or blocks the call when there is no UI.
@@ -39,7 +39,9 @@ guard sends the Decisions API:
 - your past decisions
 - the call being judged
 
-It never sends the assistant's own text or tool outputs. This limits prompt injection. File contents guard attaches are passed as an untrusted tool output, never as your words. When bash runs a script that was written or edited earlier, guard attaches what the script will contain, including changes made by earlier calls in the same assistant message that have not run yet; running such a file always asks you first. When a test runner, build tool or interpreter (`npm`, `pytest`, `make`, `python`, …) runs after files in the project were changed in this session, guard does a full judgement with those files attached, even if an allow rule matches. Strings that look like secrets are redacted before anything is sent.
+It never sends the assistant's own text or tool outputs. This limits prompt injection. File contents guard attaches are passed as an untrusted tool output, never as your words. When bash runs a script that was written or edited earlier, guard attaches what the script will contain, including changes made by earlier calls in the same assistant message that have not run yet; running such a file always asks you first. When a test runner, build tool or interpreter (`npm`, `pytest`, `make`, `python`, `sh`, …) runs, guard attaches the script it is given and every project file changed in this session (by any tool, including bash), and does a full judgement, even if an allow rule matches.
+
+All tool calls of an assistant message are sent to the model in parallel as soon as the message ends. When each call is about to run, guard repeats every deterministic check against the current state (earlier calls may have created symlinks or changed files) and reuses the model's verdict only if the input and attachments are unchanged. Strings that look like secrets are redacted before anything is sent.
 
 Risk is scored on five levels, from 0 to 4. guard looks at the probability of the high-risk levels as well as the weighted average, so a split such as "45% catastrophic, 55% harmless" is still caught.
 

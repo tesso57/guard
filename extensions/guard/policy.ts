@@ -6,8 +6,8 @@
  */
 import { homedir } from "node:os";
 import { basename } from "node:path";
-import { isReadOnlyArgv, nonFlags, normalizeArgv, type Parsed } from "./shell.ts";
-import { gitConfigIsSafe, isHomeOrAncestor, isInside, isRiskyProjectFile, pathLikeTokens, protectedReason, realPath, resolvePath, sensitiveReason } from "./paths.ts";
+import { isLongOption, isReadOnlyArgv, nonFlags, normalizeArgv, type Parsed } from "./shell.ts";
+import { gitConfigIsSafe, isHomeOrAncestor, isInside, isRiskyProjectFile, pathLikeTokens, pathVariants, protectedReason, realPath, resolvePath, sensitiveReason } from "./paths.ts";
 
 const BUILTIN_TOOLS = new Set(["bash", "edit", "write", "read", "grep", "find", "ls"]);
 
@@ -42,7 +42,12 @@ const optionValue = (a: string[], names: string[]) => {
   a.forEach((t, i) => {
     for (const n of names) {
       if (t === n && a[i + 1]) out.push(a[i + 1]);
-      else if (n.startsWith("--") && t.startsWith(`${n}=`)) out.push(t.slice(n.length + 1));
+      else if (n.startsWith("--") && isLongOption(t, n)) {
+        // --output=x, and the abbreviations GNU tools accept (--outp=x, --outp x)
+        const eq = t.indexOf("=");
+        if (eq > 0) out.push(t.slice(eq + 1));
+        else if (a[i + 1]) out.push(a[i + 1]);
+      }
     }
   });
   return out;
@@ -107,8 +112,8 @@ export function inputPaths(tool: string, input: any, cwd: string, parsed?: Parse
     let dir = cwd;
     for (const s of parsed.subs) {
       const { argv: a } = normalizeArgv(s.argv, "deny");
-      reads.push(...pathLikeTokens(dir, a.slice(1)), ...s.reads.map((r) => resolvePath(dir, r)));
-      writes.push(...s.writes.map((w) => resolvePath(dir, w)), ...bashWriteTargets(s.argv).map((w) => resolvePath(dir, w)));
+      reads.push(...pathLikeTokens(dir, a.slice(1)), ...s.reads.flatMap((r) => pathVariants(dir, r)));
+      writes.push(...[...s.writes, ...bashWriteTargets(s.argv)].flatMap((w) => pathVariants(dir, w)));
       if (a[0] === "cd" || a[0] === "pushd") {
         const target = nonFlags(a)[0];
         dir = target && target !== "-" ? resolvePath(dir, target) : homedir();
@@ -122,7 +127,7 @@ export function inputPaths(tool: string, input: any, cwd: string, parsed?: Parse
     return { reads: ps, writes: ps };
   }
   const p: string[] = [];
-  for (const k of ["path", "file_path", "filePath", "file", "dir", "directory"]) if (typeof input?.[k] === "string") p.push(resolvePath(cwd, input[k]));
+  for (const k of ["path", "file_path", "filePath", "file", "dir", "directory"]) if (typeof input?.[k] === "string") p.push(...pathVariants(cwd, input[k]));
   if (tool === "edit" || tool === "write") return { reads: [], writes: p };
   return { reads: p, writes: [] };
 }
@@ -204,13 +209,25 @@ export function sensitive(tool: string, input: any, cwd: string, roots: string[]
   return undefined;
 }
 
+/** Commands that only create empty files or directories; safe when every target is a plain project path. */
+const PLAIN_CREATORS = new Set(["mkdir", "touch"]);
+
 export function safeAllow(tool: string, input: any, cwd: string, opts: { trusted: boolean; touched: Set<string> }, parsed?: Parsed): boolean {
   if (tool === "bash") {
     if (!parsed || !parsed.ok || parsed.dynamic.length || parsed.writes.length || !parsed.subcommands.length) return false;
-    if (parsed.subcommands.some((a) => bashWriteTargets(a).length)) return false;
-    if (!parsed.subcommands.every(isReadOnlyArgv)) return false;
-    // Read-only git still runs commands configured in .git/config, so it needs a trusted repo with a clean config
-    if (parsed.subcommands.some((a) => normalizeArgv(a).argv[0] === "git")) {
+    let creates = false;
+    for (const a of parsed.subcommands) {
+      const head = normalizeArgv(a).argv[0];
+      if (PLAIN_CREATORS.has(head)) creates = true;
+      else if (bashWriteTargets(a).length || !isReadOnlyArgv(a)) return false;
+    }
+    if (creates && !writesStayPlain(tool, input, cwd, parsed)) return false;
+    const heads = parsed.subcommands.map((a) => normalizeArgv(a).argv[0]);
+    // Read-only git still runs commands configured in .git/config, so it needs a trusted repo with a clean config,
+    // and it must run in the project itself (not after `cd` into another repository)
+    const gitAt = heads.indexOf("git");
+    if (gitAt >= 0) {
+      if (heads.slice(0, gitAt).some((h) => h === "cd" || h === "pushd" || h === "popd")) return false;
       if (!opts.trusted || !gitConfigIsSafe(cwd) || [...opts.touched].some((p) => /(^|\/)\.git(\/|$)/i.test(p))) return false;
     }
     return true;
