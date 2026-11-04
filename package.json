@@ -9,12 +9,12 @@
     "extensions": ["./extensions/guard/index.ts"]
   },
   "engines": {
-    "node": ">=22.6"
+    "node": ">=22.19.0"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "knip": "knip",
-    "test": "node --experimental-strip-types --no-warnings test/unit.test.ts",
+    "test": "node --no-warnings test/unit.test.ts",
     "test:e2e": "node test/e2e.mjs",
     "check": "npm run typecheck && npm run knip && npm test && npm run test:e2e"
   },
