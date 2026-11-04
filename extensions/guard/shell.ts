@@ -8,6 +8,8 @@ import { basename } from "node:path";
 
 type Sub = {
   argv: string[];
+  /** Leading VAR=value assignments (removed from argv). */
+  assigns: string[];
   /** Targets of output redirects (>, >>, >|, &>, >&file, <>). */
   writes: string[];
   /** Targets of input redirects (<). */
@@ -53,7 +55,7 @@ export function parseShell(cmd: string): Parsed {
   const dynamic: string[] = [];
   const globs: string[] = [];
   const subs: Sub[] = [];
-  let cur: Sub = { argv: [], writes: [], reads: [] };
+  let cur: Sub = { argv: [], assigns: [], writes: [], reads: [] };
   let tok = "";
   let inTok = false;
   let globbed = false;
@@ -78,7 +80,7 @@ export function parseShell(cmd: string): Parsed {
   const endCmd = () => {
     endTok();
     if (cur.argv.length || cur.writes.length || cur.reads.length) subs.push(cur);
-    cur = { argv: [], writes: [], reads: [] };
+    cur = { argv: [], assigns: [], writes: [], reads: [] };
   };
   const dyn = (why: string) => {
     if (!dynamic.includes(why)) dynamic.push(why);
@@ -226,10 +228,13 @@ export function parseShell(cmd: string): Parsed {
     for (;;) {
       // A leading VAR=value can change what the command does (PATH=..., GIT_SSH_COMMAND=..., ...)
       if (a.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(a[0])) {
-        a.shift();
+        s.assigns.push(a.shift()!);
         dyn("environment assignment prefix");
-      } else if (a.length && RESERVED.has(a[0])) a.shift();
-      else break;
+      } else if (a.length && RESERVED.has(a[0])) {
+        // `time -p cmd` and `time -- cmd`: the options belong to the keyword
+        const kw = a.shift();
+        while (kw === "time" && (a[0] === "-p" || a[0] === "--")) a.shift();
+      } else break;
     }
     const head = a[0];
     if (!head) continue;
@@ -329,7 +334,20 @@ export function normalizeArgv(a: string[], mode: "allow" | "deny" = "allow"): { 
     }
   }
   // A location option anywhere (`npm test --prefix /tmp/x`, `make test -C ../x`) makes the call act on another project
-  if (mode === "allow" && Object.hasOwn(LOCATION_ANYWHERE, head) && rest.some((t) => LOCATION_ANYWHERE[head].some((o) => t === o || t.startsWith(`${o}=`) || (o.startsWith("--") && isLongOption(t, o)) || (o.length === 2 && t.startsWith(o)))))
+  if (
+    mode === "allow" &&
+    Object.hasOwn(LOCATION_ANYWHERE, head) &&
+    rest.some((t) =>
+      LOCATION_ANYWHERE[head].some(
+        (o) =>
+          t === o ||
+          t.startsWith(`${o}=`) ||
+          (o.startsWith("--") && isLongOption(t, o)) ||
+          // -C inside a cluster of short options (make -sC ../x)
+          (o.length === 2 && !t.startsWith("--") && t.startsWith("-") && t.slice(1).includes(o[1])),
+      ),
+    )
+  )
     unknownOption = true;
   // make VAR=value overrides variables used in recipes (SHELL=./x, .SHELLFLAGS=...)
   if (mode === "allow" && (head === "make" || head === "gmake") && rest.some((t) => /^[A-Za-z_.][\w.]*=/.test(t))) unknownOption = true;
@@ -369,6 +387,12 @@ function canonicalScripts(a: string[]): string[] {
 }
 
 export const nonFlags = (a: string[]) => a.slice(1).filter((t) => !t.startsWith("-"));
+
+/**
+ * True if a short option carries a glued value that looks like a path (`-f/etc/x`, `-bf~/.aws/x`, `-L$HOME`).
+ * Such values are easy to misparse, so commands using them are never treated as safe.
+ */
+export const hasGluedPathValue = (a: string[]) => a.slice(1).some((t) => t.startsWith("-") && !t.startsWith("--") && /[/~$]|\.\./.test(t.slice(2)));
 const flags = (a: string[]) => a.slice(1).filter((t) => t.startsWith("-"));
 /** True if a short-option cluster such as `-uo` contains the letter. */
 const hasShort = (a: string[], letter: string) => flags(a).some((t) => !t.startsWith("--") && t.slice(1).includes(letter));
@@ -388,7 +412,7 @@ const READ_ONLY = new Set([
   "du", "df", "grep", "egrep", "fgrep", "cut", "tr", "basename", "dirname", "realpath", "readlink", "ps", "less", "more",
   "true", "false", "test", "[", "nl", "column", "diff", "cmp", "comm", "id", "groups", "jq", "type", "file", "md5sum", "sha256sum", "shasum",
 ]);
-const GIT_READ_ONLY = new Set(["status", "diff", "log", "show", "blame", "ls-files", "rev-parse", "describe", "shortlog", "grep", "ls-tree", "cat-file", "reflog"]);
+const GIT_READ_ONLY = new Set(["status", "diff", "log", "show", "blame", "ls-files", "rev-parse", "describe", "shortlog", "grep", "ls-tree", "cat-file"]);
 const NPM_READ_ONLY = new Set(["ls", "list", "explain", "why"]);
 
 /**
@@ -458,6 +482,8 @@ export function isReadOnlyArgv(raw: string[]): boolean {
       if (sub === "remote") return onlyFlagsFrom(a, ["-v", "--verbose"]);
       if (sub === "tag") return onlyFlagsFrom(a, ["-l", "--list"]);
       if (sub === "stash") return a[2] === "list" && a.length <= 4;
+      // `reflog expire` and `reflog delete` rewrite history; only showing it is read-only
+      if (sub === "reflog") return (a[2] === undefined || a[2] === "show" || a[2].startsWith("-")) && !["expire", "delete"].some((x) => a.includes(x));
       if (!sub || !GIT_READ_ONLY.has(sub)) return false;
       // --output writes files; ext-diff, textconv and open-files-in-pager can run configured programs
       return !hasLong(a, "--output", "--ext-diff", "--textconv", "--open-files-in-pager", "--exec", "--upload-pack") && !(sub === "grep" && hasShort(a, "O"));

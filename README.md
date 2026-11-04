@@ -45,7 +45,9 @@ It never sends the assistant's own text or tool outputs. This limits prompt inje
 
 All tool calls of an assistant message are sent to the model in parallel as soon as the message ends. pi judges every call of a message before it runs any of them, so when an earlier call in the same message may change files (anything but a pure read), later calls get no shortcuts: no safe list, no skipped model, no allow rule without a full judgement. guard repeats every deterministic check at `tool_call` and reuses the model's verdict only if the input and attachments are unchanged.
 
-Recursive content searches (`grep -r`, `rg -uu`/`--hidden`, pi's `grep` tool) ask first when the searched tree contains `.env` files or keys. Extracting archives or changing permissions recursively where guard's state lives also asks first. Strings that look like secrets are redacted before anything is sent.
+Recursive content searches (`grep -r` in any spelling, `rg`, `git grep`, pi's `grep` tool) ask first when the searched tree contains `.env` files or keys, and are judged by the model when the tree is too large to check. Extracting archives where `.pi/` or `.agents/` could be created also asks first. Files that likely hold secrets are never sent to the judge; guard sends only their names.
+
+Commands that change things are blocked whenever they name a directory containing guard's state, whatever wrapper comes first (`time -p`, `setarch`, `fakeroot`), however `cd` gets there (wildcards, `CDPATH`), and including links (`ln`, `cp -l`) that would let a later plain write reach it. Options with glued path values (`-f/etc/x`) never count as safe. Strings that look like secrets are redacted before anything is sent.
 
 Risk is scored on five levels, from 0 to 4. guard looks at the probability of the high-risk levels as well as the weighted average, so a split such as "45% catastrophic, 55% harmless" is still caught.
 

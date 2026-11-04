@@ -41,12 +41,20 @@ export function resolvePath(cwd: string, p: string): string {
 const realCache = new Map<string, string>();
 const memoCache = new Map<string, unknown>();
 let globBudget = 8;
+let globDeadline = Date.now() + 300;
 
 /** Clears per-judgement caches, so every judgement sees the current file system. */
 export function clearPathCache() {
   realCache.clear();
   memoCache.clear();
   globBudget = 8;
+  globDeadline = Date.now() + 300;
+}
+
+/** Patterns node's glob may take super-linear time on, or that the per-judgement time budget no longer allows. */
+function globTooCostly(p: string, maxWildSegments: number): boolean {
+  const wild = p.split("/").filter((s) => /[*?[]/.test(s)).length;
+  return p.length > 256 || (p.match(/\[/g)?.length ?? 0) > 16 || wild > maxWildSegments || Date.now() > globDeadline;
 }
 
 /** Memoizes work within one judgement (cleared by clearPathCache). */
@@ -130,7 +138,7 @@ const PUBLIC_DIRS = [
 ];
 
 /** A regular file with more than one hard link may be the same file as something outside the project. */
-function isHardLinked(p: string): boolean {
+export function isHardLinked(p: string): boolean {
   try {
     const st = lstatSync(p);
     return st.isFile() && st.nlink > 1;
@@ -223,6 +231,9 @@ const RISKY_FILES = new Set([
   ".cursorrules", "rakefile", "gemfile", ".bashrc", ".zshrc", ".profile", ".bash_profile", ".zprofile", "mise.toml", ".mise.toml",
   ".tool-versions", "deno.json", "deno.jsonc", "turbo.json", "cargo.toml", "composer.json", "cmakelists.txt", "lefthook.yml", "lefthook.yaml",
   ".lefthook.yml", "go.mod", "nx.json", "project.json", "vitest.workspace.ts", "jest.setup.js", "jest.setup.ts", "babel.config.json",
+  "gulpfile.js", "gruntfile.js", "karma.conf.js", "bunfig.toml", ".pnpmfile.cjs", ".gitlab-ci.yml", "jenkinsfile", "taskfile.yml",
+  "taskfile.yaml", "flake.nix", "shell.nix", "default.nix", "vagrantfile", "workspace", "workspace.bazel", ".bazelrc", "meson.build",
+  "build.ninja", "procfile", ".npmignore", "tsconfig.json",
 ]);
 
 export function isRiskyProjectFile(rel: string): boolean {
@@ -247,9 +258,10 @@ export function pathLikeTokens(cwd: string, tokens: string[], globs: string[] = 
     let v: string;
     if (t.startsWith("--")) v = t.includes("=") ? t.slice(t.indexOf("=") + 1) : "";
     else if (t.startsWith("-")) {
-      // A value glued to a short option (-m/path, -f~/x, -L$HOME): any path-looking tail counts
-      const tail = t.slice(2);
-      v = /^(~|\/|\.|\$HOME|file:)/i.test(tail) || tail.includes("/") ? tail : t.includes("=") ? t.slice(t.indexOf("=") + 1) : "";
+      // A value glued to a cluster of short options (-m/path, -bf/etc/x, -f~/x): the tail from the first
+      // path-like character counts, however many option letters come before it
+      const m = /[/~.$]/.exec(t.slice(1));
+      v = m ? t.slice(1 + m.index) : "";
     } else v = t.includes("=") ? t.slice(t.indexOf("=") + 1) : t;
     if (!v) continue;
     // Bare names count when they look secret (id_rsa, cert.p12) or name an existing file in cwd
@@ -279,7 +291,7 @@ function expandGlob(cwd: string, pattern: string): string[] {
   const segs = p.split("/");
   const out = [globBase(cwd, pattern)];
   const wild = segs.filter((s) => /[*?[]/.test(s));
-  if (wild.length > 3 || globBudget-- <= 0) return [...out, UNKNOWN_PATH];
+  if (globTooCostly(p, 3) || globBudget-- <= 0) return [...out, UNKNOWN_PATH];
   // bash 3.2 lets `.*` match `..` and node's glob does not, so hidden-file patterns may reach more than we see
   if (wild.some((s) => s.startsWith("."))) out.push(UNKNOWN_PATH);
   try {
@@ -290,22 +302,32 @@ function expandGlob(cwd: string, pattern: string): string[] {
   return out;
 }
 
-/** Every existing match of a write or delete target pattern, without the read-side limits (bounded to 500). */
-export function expandGlobFully(cwd: string, pattern: string): string[] {
+/**
+ * Existing matches of a write or delete target pattern, plus its static base directory.
+ * `complete` is false when the pattern was too costly to expand; callers then treat the base as the target.
+ */
+export function expandGlobFully(cwd: string, pattern: string): { matches: string[]; base: string; complete: boolean } {
+  const p = normalizeInput(pattern).replace(/\*\*+/g, "*");
+  const base = globBase(cwd, pattern);
+  if (globTooCostly(p, 6)) return { matches: [], base, complete: false };
   try {
-    return globSync(normalizeInput(pattern).replace(/\*\*+/g, "*"), { cwd }).slice(0, 500).map((m) => resolvePath(cwd, String(m)));
+    return { matches: globSync(p, { cwd }).slice(0, 500).map((m) => resolvePath(cwd, String(m))), base, complete: true };
   } catch {
-    return [];
+    return { matches: [], base, complete: false };
   }
 }
 
 const SKIP_WALK = new Set(["node_modules", ".git", ".hg", ".svn", "dist", "build", "target", ".venv", "venv", "__pycache__"]);
 
-/** Walks a directory tree with bounded depth and entry count, calling fn for each file. */
-function walk(root: string, fn: (path: string, name: string) => void, maxDepth = 6, maxEntries = 5000) {
+/** Walks a directory tree with bounded depth and entry count, calling fn for each file. Returns false if cut short. */
+function walk(root: string, fn: (path: string, name: string) => void, maxDepth = 6, maxEntries = 5000, skip = SKIP_WALK): boolean {
   let seen = 0;
+  let complete = true;
   const visit = (dir: string, depth: number) => {
-    if (depth > maxDepth || seen > maxEntries) return;
+    if (depth > maxDepth || seen > maxEntries) {
+      complete = false;
+      return;
+    }
     let entries: import("node:fs").Dirent[];
     try {
       entries = readdirSync(dir, { withFileTypes: true });
@@ -313,25 +335,33 @@ function walk(root: string, fn: (path: string, name: string) => void, maxDepth =
       return;
     }
     for (const e of entries) {
-      if (++seen > maxEntries) return;
+      if (++seen > maxEntries) {
+        complete = false;
+        return;
+      }
       const p = join(dir, e.name);
       if (e.isDirectory()) {
-        if (!SKIP_WALK.has(e.name)) visit(p, depth + 1);
+        if (!skip.has(e.name)) visit(p, depth + 1);
       } else fn(p, e.name);
     }
   };
   visit(root, 0);
+  return complete;
 }
 
-/** Files under root that likely hold secrets (.env, keys), for recursive content searches. */
-export function secretFilesUnder(root: string): string[] {
+/**
+ * Files under root that likely hold secrets (.env, keys), for recursive content searches.
+ * `complete` is false when the tree was too large or deep to check; build and dependency directories are included,
+ * because `grep -r` reads them too.
+ */
+export function secretFilesUnder(root: string): { files: string[]; complete: boolean } {
   return memo(`secrets:${root}`, () => {
-    const out: string[] = [];
-    if (isHomeOrAncestor(root)) return [root];
-    walk(root, (p) => {
-      if (out.length < 20 && sensitiveOne(p)) out.push(p);
-    });
-    return out;
+    const files: string[] = [];
+    if (isHomeOrAncestor(root)) return { files: [root], complete: true };
+    const complete = walk(root, (p) => {
+      if (files.length < 20 && sensitiveOne(p)) files.push(p);
+    }, 12, 20_000, new Set([".git"]));
+    return { files, complete };
   });
 }
 
@@ -426,6 +456,10 @@ export function gitConfigIsSafe(cwd: string): boolean {
         const common = existsSync(join(gitdir, "commondir")) ? resolve(gitdir, readFileSync(join(gitdir, "commondir"), "utf8").trim()) : gitdir;
         // Submodules have their own configs, which `git status` in the parent also honors
         if (existsSync(join(common, "modules")) || existsSync(join(d, ".gitmodules"))) return false;
+        // Some hooks run on read-only commands (post-index-change on `git status`); any real hook makes git unsafe
+        try {
+          if (readdirSync(join(common, "hooks")).some((h) => !h.endsWith(".sample"))) return false;
+        } catch { /* no hooks directory */ }
         return configIsClean(join(common, "config")) && configIsClean(join(gitdir, "config.worktree")) && configIsClean(join(common, "config.worktree"));
       } catch {
         return false;

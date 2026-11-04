@@ -18,8 +18,8 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { audit, tail } from "./audit.ts";
 import { type Config, loadConfig } from "./config.ts";
 import { buildRequest, callDecisions, evaluate, type ModelVerdict } from "./judge.ts";
-import { clearPathCache, isFreelyReadable, isInside, protectedRoots, recentlyChangedFiles, resolvePath } from "./paths.ts";
-import { hardDeny, inputPaths, safeAllow, sensitive, writesStayPlain } from "./policy.ts";
+import { clearPathCache, isFreelyReadable, isInside, protectedReason, protectedRoots, recentlyChangedFiles, resolvePath, sensitiveReason } from "./paths.ts";
+import { hardDeny, inputPaths, pathsStayInProject, safeAllow, sensitive, writesStayPlain } from "./policy.ts";
 import { type Decision, deriveDenyPatterns, derivePatterns, describeMatch, type Match, newId, type Rule, RuleStore, type Scope } from "./rules.ts";
 import { isReadOnlyArgv, normalizeArgv, type Parsed, parseShell } from "./shell.ts";
 import { confirmDialog, preview } from "./ui.ts";
@@ -66,6 +66,14 @@ function applyEdits(content: string, input: any): string {
   let out = content;
   for (const e of edits) if (typeof e?.oldText === "string" && typeof e?.newText === "string") out = out.replace(e.oldText, () => e.newText);
   return out;
+}
+
+/** Plain edits of ordinary project files and mkdir/touch: they cannot create links or reach outside the project. */
+function isPlainChange(c: ToolCallLike, cwd: string): boolean {
+  if (c.name === "write" || c.name === "edit") return safeAllow(c.name, c.arguments, cwd, { trusted: false, touched: new Set() });
+  if (c.name !== "bash") return false;
+  const p = parseShell(String(c.arguments?.command ?? ""));
+  return p.subcommands.every((a) => ["mkdir", "touch"].includes(normalizeArgv(a).argv[0])) && safeAllow("bash", c.arguments, cwd, { trusted: false, touched: new Set() }, p);
 }
 
 /** True for calls that cannot change the file system: read tools and strictly read-only bash. */
@@ -155,8 +163,14 @@ export default function (pi: ExtensionAPI) {
 
     const attached: Record<string, string> = {};
     const fromSiblings: string[] = [];
+    const roots = protectedRoots(ctx.cwd, ctx.sessionManager.getSessionDir());
     const attach = (p: string, fromDisk = false) => {
       if (attached[p] !== undefined) return;
+      // Never send secrets (or guard's own state) to the judge; the name is enough for it to know the file is involved
+      if (sensitiveReason(p) || protectedReason(p, roots)) {
+        attached[p] = "[contents withheld by guard: file likely holds secrets]";
+        return;
+      }
       if (virtual.has(p)) {
         attached[p] = virtual.get(p)!;
         fromSiblings.push(p);
@@ -171,7 +185,8 @@ export default function (pi: ExtensionAPI) {
     if (tool === "bash" && parsed) {
       for (const tok of parsed.subcommands.flat()) attach(resolvePath(ctx.cwd, tok));
       // Interpreters, runners, and scripts run by path (./run.sh) execute file contents
-      runsScripts = parsed.subcommands.some((a) => SCRIPT_RUNNERS.has(normalizeArgv(a, "deny").argv[0]) || normalizeArgv(a, "deny").argv.length > 0 && (a[0] ?? "").includes("/"));
+      const versionQuery = (a: string[]) => a.length === 2 && /^(--version|-V|-v|--help|-h)$/.test(a[1]);
+      runsScripts = parsed.subcommands.some((a) => !versionQuery(a) && (SCRIPT_RUNNERS.has(normalizeArgv(a, "deny").argv[0]) || (a[0] ?? "").includes("/")));
       if (runsScripts) {
         // The script an interpreter or runner is given is what will run, whoever wrote it
         for (const tok of parsed.subcommands.flat()) {
@@ -230,8 +245,8 @@ export default function (pi: ExtensionAPI) {
 
     store.syncSession(ctx.sessionManager.getBranch() as any[]);
     const found = store.find(tool, input, ctx.cwd, parsed);
-    // An allow rule only covers writes that stay inside the project and away from files tools run later
-    const rule = found?.decision === "allow" && !writesStayPlain(tool, input, ctx.cwd, parsed) ? undefined : found;
+    // An allow rule only covers calls whose paths stay inside the project, writing only plain files
+    const rule = found?.decision === "allow" && (!writesStayPlain(tool, input, ctx.cwd, parsed) || !pathsStayInProject(tool, input, ctx.cwd, parsed)) ? undefined : found;
     const patterns = derivePatterns(tool, input, ctx.cwd, parsed);
     const denyPatterns = deriveDenyPatterns(tool, input, ctx.cwd, parsed);
     if (rule?.decision === "deny") return { ...base, action: "block", source: "rule-deny", reasons: rule.rules.map((r) => `${r.scope} deny rule: ${describeMatch(r.tool, r.match)}`), rules: rule.rules };
@@ -240,7 +255,7 @@ export default function (pi: ExtensionAPI) {
     const cx = context(ctx, callId, tool, parsed, opts.siblings ?? []);
     // pi judges every call of a message before running any of them, so a later call cannot rely on the file system
     // as it is now if an earlier sibling may change it (a checkout that adds a symlink, a write through one)
-    const siblingMayChange = (opts.siblings ?? []).some((sb) => !isPureRead(sb, ctx.cwd));
+    const siblingMayChange = (opts.siblings ?? []).some((sb) => !isPureRead(sb, ctx.cwd) && !isPlainChange(sb, ctx.cwd));
     const sens = sensitive(tool, input, ctx.cwd, roots, parsed);
     // Running a file that an earlier call in the same message is about to change: the human should see it
     const siblingRun = cx.fromSiblings.length ? `runs ${cx.fromSiblings.map((p) => relative(ctx.cwd, p)).join(", ")}, changed earlier in this same message` : undefined;
@@ -262,9 +277,11 @@ export default function (pi: ExtensionAPI) {
     const shortcutsOk = !siblingRun && !siblingMayChange;
     if (shortcutsOk && !cx.changedFilesRun && safeAllow(tool, input, ctx.cwd, { trusted, touched }, parsed)) return { ...base, action: "allow", source: "safe", reasons: [] };
     if (shortcutsOk && cfg.skipModelTools.includes(tool)) {
-      // read/grep/find/ls skip the model only inside the project (or public system directories)
+      // read/grep/find/ls skip the model only inside the project (or public system directories). pi's read tries
+      // other spellings (curly quotes, NFD, AM/PM) when a path does not exist, so a read must name an existing file.
       const reads = inputPaths(tool, input, ctx.cwd).reads;
-      if ((reads.length ? reads : [ctx.cwd]).every((p) => isFreelyReadable(p, ctx.cwd))) return { ...base, action: "allow", source: "skip", reasons: [] };
+      const exists = tool !== "read" || reads.every((p) => existsSync(p));
+      if (exists && (reads.length ? reads : [ctx.cwd]).every((p) => isFreelyReadable(p, ctx.cwd))) return { ...base, action: "allow", source: "skip", reasons: [] };
     }
 
     const cacheKey = stableHash([tool, input, ctx.cwd, cx.attachedFiles, cx.userMessages.at(-1), store.version]);

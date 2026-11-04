@@ -66,7 +66,7 @@ export function preview(tool: string, input: any): string {
   const cut = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
   if (tool === "bash" || tool === "powershell") return cut(String(input?.command ?? ""), 1500);
   if (tool === "edit" && Array.isArray(input?.edits)) {
-    const parts = input.edits.slice(0, 3).map((e: any) => `- ${cut(String(e.oldText ?? ""), 200)}\n+ ${cut(String(e.newText ?? ""), 200)}`);
+    const parts = input.edits.slice(0, 3).map((e: any) => `- ${cut(String(e?.oldText ?? ""), 200)}\n+ ${cut(String(e?.newText ?? ""), 200)}`);
     return `edit ${input.path}\n${parts.join("\n")}${input.edits.length > 3 ? `\n… (${input.edits.length - 3} more)` : ""}`;
   }
   if (tool === "write" && typeof input?.content === "string") {

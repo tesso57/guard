@@ -10,7 +10,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { DATA_DIR } from "./config.ts";
-import { normalizeArgv, type Parsed, parseShell } from "./shell.ts";
+import { isLongOption, normalizeArgv, type Parsed, parseShell } from "./shell.ts";
 import { inputPaths } from "./policy.ts";
 
 export type Decision = "allow" | "deny" | "ask";
@@ -119,7 +119,7 @@ export function deriveDenyPatterns(tool: string, input: any, cwd: string, parsed
       .map((a): Match => {
         const words = a.filter((t) => !t.startsWith("-"));
         const n = SUBCOMMAND_TOOLS.has(a[0]) ? (SCRIPT_SUBCOMMANDS.has(words[1]) ? 3 : 2) : 1;
-        return { kind: "argv", prefix: [...words.slice(0, n), ...a.filter((t) => /^-/.test(t) && !t.includes("="))] };
+        return { kind: "argv", prefix: [...words.slice(0, n), ...splitFlags(a.filter((t) => /^-/.test(t) && !t.includes("=")))] };
       }),
   );
 }
@@ -143,12 +143,18 @@ function allowMatchesArgv(m: Match, raw: string[]): boolean {
   return false;
 }
 
+/** `-rf` → `-r`, `-f`, so remembered flags match in any order or grouping. */
+function splitFlags(flags: string[]): string[] {
+  return [...new Set(flags.flatMap((f) => (/^-[A-Za-z0-9]{2,}$/.test(f) ? [...f.slice(1)].map((c) => `-${c}`) : [f])))];
+}
+
 const FLAG_ALIASES: Record<string, string[]> = {
   "--force": ["-f", "--force-with-lease", "--force-if-includes"],
   "-f": ["--force", "--force-with-lease", "--force-if-includes"],
   "--recursive": ["-r", "-R"],
   "-r": ["-R", "--recursive"],
   "-R": ["-r", "--recursive"],
+  "--force-with-lease": ["--force", "-f"],
   "--delete": ["-d", "-D"],
   "-d": ["--delete", "-D"],
   "-D": ["-d", "--delete"],
@@ -169,10 +175,17 @@ function strictMatchesArgv(m: Match, raw: string[]): boolean {
   const ruleWords = ruleTokens.filter((t, i) => i === 0 || !t.startsWith("-"));
   if (!ruleWords.every((t, i) => words[i] === t)) return false;
   const present = (f: string) =>
-    a.some((t) => t === f || t.startsWith(`${f}=`) || (f.length === 2 && /^-[A-Za-z]+$/.test(t) && t.includes(f[1])));
+    a.some(
+      (t) =>
+        t === f ||
+        t.startsWith(`${f}=`) ||
+        // abbreviations of long options (--force-w for --force-with-lease)
+        (f.startsWith("--") && isLongOption(t, f)) ||
+        // a letter inside a cluster of short options (-fr, -Rf)
+        (f.length === 2 && /^-[A-Za-z0-9]+$/.test(t) && t.includes(f[1])),
+    );
   const forcePush = a[0] === "git" && words[1] === "push" && words.slice(2).some((w) => w.startsWith("+"));
-  return ruleTokens
-    .filter((t, i) => i > 0 && t.startsWith("-"))
+  return splitFlags(ruleTokens.filter((t, i) => i > 0 && t.startsWith("-")))
     .every((f) => present(f) || (Object.hasOwn(FLAG_ALIASES, f) ? FLAG_ALIASES[f] : []).some(present) || ((f === "--force" || f === "-f") && forcePush));
 }
 
@@ -187,14 +200,23 @@ function expandSubcommands(subs: string[][], depth = 0): string[][] {
   for (const raw of subs) {
     out.push(raw);
     if (depth >= 3) continue;
-    let inner: string | undefined;
-    if (basename(raw[0] ?? "") === "eval") inner = raw.slice(1).join(" ");
-    else {
-      const a = normalizeArgv(raw, "deny").argv;
-      const c = a.findIndex((t, i) => i > 0 && /^-[a-z]*c[a-z]*$/.test(t));
-      if (SHELLS.has(a[0]) && c > 0 && a[c + 1] !== undefined) inner = a[c + 1];
+    const inner: string[] = [];
+    const head = basename(raw[0] ?? "");
+    const a = normalizeArgv(raw, "deny").argv;
+    if (head === "eval" || head === "watch" || head === "parallel") inner.push(raw.slice(1).filter((t) => !t.startsWith("-")).join(" "));
+    // sh -c 'cmd', bash -c -- 'cmd', su -c 'cmd', script -qc 'cmd'
+    const c = a.findIndex((t, i) => i > 0 && /^-[a-z]*c[a-z]*$/.test(t));
+    if ((SHELLS.has(a[0]) || a[0] === "su" || a[0] === "runuser" || a[0] === "script") && c > 0) {
+      const next = a[c + 1] === "--" ? a[c + 2] : a[c + 1];
+      if (next !== undefined) inner.push(next);
     }
-    if (inner !== undefined) out.push(...expandSubcommands(parseShell(inner).subcommands, depth + 1));
+    // env -S 'cmd args'
+    if (head === "env") raw.forEach((t, i) => (t === "-S" || t === "--split-string") && raw[i + 1] && inner.push(raw[i + 1]));
+    // find … -exec cmd {} ;
+    raw.forEach((t, i) => {
+      if (/^-(exec|execdir|ok|okdir)$/.test(t)) inner.push(raw.slice(i + 1, raw.findIndex((x, j) => j > i && (x === ";" || x === "+")) >>> 0).join(" "));
+    });
+    for (const x of inner) if (x) out.push(...expandSubcommands(parseShell(x).subcommands, depth + 1));
   }
   return out;
 }
