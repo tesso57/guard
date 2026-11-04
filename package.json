@@ -1,0 +1,30 @@
+{
+  "name": "guard",
+  "version": "0.1.0",
+  "description": "pi coding agent extension that judges the risk of every tool call with the OpenAI Decisions API before it runs",
+  "type": "module",
+  "private": true,
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": ["./extensions/guard/index.ts"]
+  },
+  "engines": {
+    "node": ">=22.6"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "knip": "knip",
+    "test": "node --experimental-strip-types --no-warnings test/unit.test.ts",
+    "test:e2e": "node test/e2e.mjs",
+    "check": "npm run typecheck && npm run knip && npm test && npm run test:e2e"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^1.5.0",
+    "@types/node": "^22.10.0",
+    "knip": "^6.44.1",
+    "typescript": "^5.7.0"
+  }
+}
