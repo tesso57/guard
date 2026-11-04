@@ -84,6 +84,8 @@ export function parseShell(cmd: string, depth = 0): Parsed {
   let tildeStart = false;
   /** The token contains quotes, so an empty token is a real (empty) word. */
   let tokQuoted = false;
+  /** The token contains quoted or escaped characters (they change what a wildcard in it matches). */
+  let tokEscaped = false;
   let quote: "'" | '"' | null = null;
   let pendingRedirect: "write" | "read" | "data" | null = null;
 
@@ -96,7 +98,11 @@ export function parseShell(cmd: string, depth = 0): Parsed {
     }
     // An empty word that was never quoted is not a word at all (bash drops it)
     else if (tok !== "" || tokQuoted) cur.argv.push(tok);
-    if (globbed && tok !== "[" && tok !== "]") globs.push(tok);
+    if (globbed && tok !== "[" && tok !== "]") {
+      globs.push(tok);
+      // Quoting inside a wildcard word makes its characters literal; guard's copy has lost that information
+      if (tokEscaped) dyn("quoted characters in a wildcard");
+    }
     // ~user, ~+ and ~- are expanded by the shell to other directories
     if (tildeStart && !/^~(\/|$)/.test(tok)) dyn("tilde expansion");
     pendingRedirect = null;
@@ -105,6 +111,7 @@ export function parseShell(cmd: string, depth = 0): Parsed {
     globbed = false;
     tildeStart = false;
     tokQuoted = false;
+    tokEscaped = false;
   };
   const endCmd = () => {
     endTok();
@@ -130,6 +137,7 @@ export function parseShell(cmd: string, depth = 0): Parsed {
       if (n === "\n") continue;
       tok += n;
       inTok = true;
+      tokEscaped = true;
       continue;
     }
     if (c === "$") {
@@ -168,6 +176,7 @@ export function parseShell(cmd: string, depth = 0): Parsed {
       quote = c;
       inTok = true;
       tokQuoted = true;
+      tokEscaped = true;
       continue;
     }
     if (c === "#" && !inTok) {

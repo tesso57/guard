@@ -105,8 +105,21 @@ function callWrites(tool: string, input: any, cwd: string, parsed?: Parsed): boo
   return parsed.writes.length > 0 || !parsed.subcommands.every(isReadOnlyArgv) || inputPaths(tool, input, cwd, parsed).writes.length > 0;
 }
 
+function siblingWrites(c: ToolCallLike, cwd: string): string[] {
+  try {
+    const p = c.name === "bash" ? parseShell(String(c.arguments?.command ?? "")) : undefined;
+    return inputPaths(c.name, c.arguments, cwd, p).writes;
+  } catch {
+    return [];
+  }
+}
+
+/** Ignore files change what later searches (rg, fd, git grep) read. */
+const IGNORE_FILES = new Set([".ignore", ".rgignore", ".gitignore", ".fdignore"]);
+
 /** Plain edits of ordinary project files and mkdir/touch: they cannot create links or reach outside the project. */
 function isPlainChange(c: ToolCallLike, cwd: string): boolean {
+  if (siblingWrites(c, cwd).some((p) => IGNORE_FILES.has(basename(p)))) return false;
   if (c.name === "write" || c.name === "edit") return safeAllow(c.name, c.arguments, cwd, { trusted: false, touched: new Set() });
   if (c.name !== "bash") return false;
   const p = parseShell(String(c.arguments?.command ?? ""));
@@ -320,7 +333,9 @@ export default function (pi: ExtensionAPI) {
 
     if (sens) return { ...base, action: "confirm", source: "sensitive", reasons: [`may expose secrets: ${sens}`], patterns, denyPatterns, rememberAllow: !!patterns };
     const shortcutsOk = !siblingRun && !siblingMayChange;
-    if (shortcutsOk && !cx.changedFilesRun && safeAllow(tool, input, ctx.cwd, { trusted, touched }, parsed)) return { ...base, action: "allow", source: "safe", reasons: [] };
+    // Files earlier calls of this message will write count as touched for this judgement (git dirs, ignore files)
+    const touchedNow = new Set([...touched, ...(opts.siblings ?? []).flatMap((sb) => siblingWrites(sb, ctx.cwd))]);
+    if (shortcutsOk && !cx.changedFilesRun && safeAllow(tool, input, ctx.cwd, { trusted, touched: touchedNow }, parsed)) return { ...base, action: "allow", source: "safe", reasons: [] };
     if (shortcutsOk && cfg.skipModelTools.includes(tool)) {
       // read/grep/find/ls skip the model only inside the project (or public system directories). pi's read tries
       // other spellings (curly quotes, NFD, AM/PM) when a path does not exist, so a read must name an existing file.

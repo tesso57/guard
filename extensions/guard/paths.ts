@@ -113,9 +113,16 @@ function timedGlob(p: string, cwd: string): { list: string[]; truncated: boolean
   }
 }
 
-/** Files whose names could be taken for options when a wildcard expands to them (`--pre=sh`). */
+/**
+ * Whether a wildcard can hand the command a word starting with `-` (an option): the expanded word is checked as
+ * bash passes it (a pattern like dir-star/star.md can expand to --pre=./hit.md), and anything guard cannot
+ * enumerate counts as such a word.
+ */
 export function globHitsOptionLikeName(cwd: string, pattern: string): boolean {
-  return expandGlob(cwd, pattern).some((m) => m === UNKNOWN_PATH || basename(m).startsWith("-"));
+  const p = normalizeInput(pattern).replace(/\*\*+/g, "*");
+  if (globTooCostly(p, 3)) return true;
+  const g = timedGlob(p, cwd);
+  return g.truncated || g.list.some((w) => w.startsWith("-"));
 }
 
 /**
@@ -349,7 +356,7 @@ const RISKY_FILES = new Set([
   ".lefthook.yml", "go.mod", "nx.json", "project.json", "vitest.workspace.ts", "jest.setup.js", "jest.setup.ts", "babel.config.json",
   "gulpfile.js", "gruntfile.js", "karma.conf.js", "bunfig.toml", ".pnpmfile.cjs", ".gitlab-ci.yml", "jenkinsfile", "taskfile.yml",
   "taskfile.yaml", "flake.nix", "shell.nix", "default.nix", "vagrantfile", "workspace", "workspace.bazel", ".bazelrc", "meson.build",
-  "build.ninja", "procfile", ".npmignore", "tsconfig.json",
+  "build.ninja", "procfile", ".npmignore", "tsconfig.json", ".git",
 ]);
 
 export function isRiskyProjectFile(rel: string): boolean {

@@ -803,6 +803,26 @@ const O = { trusted: true, touched: new Set<string>() };
   ok("r19: MCP shell commands are still scanned", !!hardDeny("mcp__shell__exec", { command: `echo x >> ${AGENT}/guard/rules.jsonl` }, P19, r19));
 }
 
+
+// ---------- review 20 ----------
+{
+  const { clearPathCache } = await import("../extensions/guard/paths.ts");
+  const P20 = mkdtempSync(join(tmpdir(), "guard-p20-"));
+  const safe = (c: string) => (clearPathCache(), safeAllow("bash", { command: c }, P20, O, P(c)));
+  mkdirSync(join(P20, "--pre=."));
+  writeFileSync(join(P20, "--pre=.", "hit.md"), "TODO");
+  writeFileSync(join(P20, "hit.md"), "#!/bin/sh\n");
+  ok("r20: */*.md expanding to --pre=./hit.md is not safe", !safe("rg TODO */*.md") && !safe("rg x -- */hit.md"));
+  mkdirSync(join(P20, "sub"));
+  writeFileSync(join(P20, "sub", "--pre=sh"), "");
+  for (const c of ["cd sub && rg PWNED *", "cd sub; rg -n PWNED *", "cd sub && sort *", "cd sub && find * -name x"]) ok(`r20: not safe: ${c}`, !safe(c));
+  for (const c of ["rg x [-\\]]*", "rg x [\\!-]*", 'rg x ["!"-]*', "rg x ['^'-]*"]) ok(`r20: quoted characters in a wildcard are dynamic: ${c}`, P(c).dynamic.length > 0 && !safe(c));
+  const P20b = mkdtempSync(join(tmpdir(), "guard-p20b-"));
+  writeFileSync(join(P20b, "a.md"), "x");
+  ok("r20: plain wildcards still work", (clearPathCache(), safeAllow("bash", { command: "cat *.md" }, P20b, O, P("cat *.md"))));
+  ok("r20: writing a .git file is not a plain edit", !safeAllow("write", { path: ".git", content: "gitdir: .g" }, P20b, O) && !safeAllow("write", { path: "pkg/.git", content: "gitdir: .g" }, P20b, O));
+}
+
 // ---------- evaluate ----------
 {
   const score = (probs: number[], conf = 0.9) => ({ type: "score", name: "risk", score: probs.reduce((s, p, i) => s + p * i, 0), confidence: conf, probabilities: probs.map((p, i) => ({ value: i, probability: p })) });
@@ -1202,6 +1222,30 @@ await h.tool_call({ type: "tool_call", toolCallId: "v1", toolName: "bash", input
 calls = [];
 const v2 = await h.tool_call({ type: "tool_call", toolCallId: "v2", toolName: "edit", input: br[1].arguments }, ctx);
 ok("int: an edit after git checkout -b does not ask", v2 === undefined);
+
+// review 20: an ignore file written earlier in the same message takes away later shortcuts
+responder = (b) => ({ answers: answersFor([0.95, 0.05, 0, 0, 0])(b) });
+const ign = [
+  { type: "toolCall", id: "i1", name: "write", arguments: { path: ".ignore", content: "!.env\n" } },
+  { type: "toolCall", id: "i2", name: "bash", arguments: { command: "rg API_KEY" } },
+];
+calls = [];
+hasUI = false;
+await h.message_end({ type: "message_end", message: { role: "assistant", content: ign } }, ctx);
+branch.push({ type: "message", message: { role: "assistant", content: ign } });
+const i2 = await h.tool_call({ type: "tool_call", toolCallId: "i2", toolName: "bash", input: ign[1].arguments }, ctx);
+ok("int: rg after writing .ignore in the same message is not a silent allow", i2?.block === true || calls.some((c) => cmdOf(c.body) === "rg API_KEY"));
+// review 20: a .git file planted earlier in the same message stops safe git
+const plant = [
+  { type: "toolCall", id: "g1", name: "write", arguments: { path: ".git", content: "gitdir: .g\n" } },
+  { type: "toolCall", id: "g2", name: "bash", arguments: { command: "git status" } },
+];
+calls = [];
+await h.message_end({ type: "message_end", message: { role: "assistant", content: plant } }, ctx);
+branch.push({ type: "message", message: { role: "assistant", content: plant } });
+const g2 = await h.tool_call({ type: "tool_call", toolCallId: "g2", toolName: "bash", input: plant[1].arguments }, ctx);
+ok("int: git status after planting .git in the same message is not a silent allow", g2?.block === true || calls.some((c) => cmdOf(c.body) === "git status"), JSON.stringify(g2));
+hasUI = true;
 
 // commands
 notes.length = 0;
