@@ -28,11 +28,14 @@ const HARD_DENY_BASH: [RegExp, string][] = [
 const PROTECTED_MARKERS = ["~/.pi", "$home/.pi", "${home}/.pi", ".pi/agent"];
 
 /**
- * Here-document bodies (commit messages, docs), also inside $(…), are left out of the name scan. Bodies fed to a
+ * The command text to scan for protected names: here-document bodies the parser recognized (also inside $(…)) are
+ * data such as commit messages or docs, and quoted text is left out when the command is static. Bodies fed to a
  * shell are hard-denied separately as scripts, and bodies fed to other interpreters are scanned on their own.
  */
-function dropCatHeredocs(cmd: string): string {
-  return cmd.replace(/<<-?\s*(['"]?)([A-Za-z_][\w-]*)\1([^\n]*)\n[\s\S]*?\n[ \t]*\2(?=\s|$|\)|;)/g, "<<$1$2$1$3");
+function nameScanText(cmd: string, parsed: Parsed | undefined): string {
+  let text = cmd;
+  for (const body of parsed?.heredocBodies ?? []) if (body) text = text.replace(body, "");
+  return parsed && parsed.ok && !parsed.dynamic.length ? stripQuoted(text) : text;
 }
 
 /** Commands that delete their arguments. */
@@ -454,6 +457,12 @@ export function hardDeny(tool: string, input: any, cwd: string, roots: string[],
   // Very long commands are not scanned (bounded work); they cannot be parsed either and go to the model
   if (scan.length <= 16 * 1024) for (const [re, why] of HARD_DENY_BASH) if (re.test(scan)) return why;
   if (parsed) {
+    // Commands inside $(…) run too
+    if (depth < 3)
+      for (const x of parsed.substitutions) {
+        const r = hardDeny("bash", { command: x }, cwd, roots, parseShell(x), depth + 1);
+        if (r) return r;
+      }
     const resolveAll = (b: string, t: string) => [...pathVariants(b, t), ...(hasGlob(t) ? globTargets(b, t) : [])];
     const outerRoots = roots.filter((r) => !isInside(r, cwd));
     // Wildcards are checked against guard's state by pattern, so a skipped or truncated expansion cannot hide them
@@ -515,7 +524,10 @@ export function hardDeny(tool: string, input: any, cwd: string, roots: string[],
       // Any other command that changes things and names a directory containing guard's state (find ~/.p? -delete,
       // chmod -R 000 ~/.p?, tar -xf x -C ~/.p?) is blocked; copy destinations and cd targets are handled above
       const a = a0;
-      if (changing) {
+      // Staging or unstaging (git add .pi/x, git rm --cached) does not change files
+      const gitSub = a[0] === "git" ? a.find((t, k) => k > 0 && !t.startsWith("-")) : undefined;
+      const indexOnly = gitSub === "add" || gitSub === "stage" || (gitSub === "rm" && a.includes("--cached"));
+      if (changing && !indexOnly) {
         // Raw argv too, so location values (git -C x, npm --prefix x) are seen; a copy's destination is checked above
         const named = [...new Set([...nonFlags(a), ...nonFlags(s.argv)])].filter((t) => !(PLACERS.has(a[0]) && t === nonFlags(a).at(-1)));
         // The project's own .pi/.agents are guarded by the explicit write checks; counting the project as their
@@ -532,9 +544,11 @@ export function hardDeny(tool: string, input: any, cwd: string, roots: string[],
   // Reading guard's or pi's state with a strictly read-only command only needs confirmation (see sensitive);
   // anything else that touches it, by path or by name (interpreters, cd + relative paths), is blocked.
   // Names in quoted text and in here-documents fed to cat (commit messages, docs) are not paths
-  const lower = (parsed && parsed.ok && !parsed.dynamic.length ? stripQuoted(dropCatHeredocs(cmd)) : dropCatHeredocs(cmd)).toLowerCase();
+  const lower = nameScanText(cmd, parsed).toLowerCase();
+  // The project's own .pi/ is covered by the write checks above; naming it (git add .pi/x) is not a change to it
+  const outer = roots.filter((r) => !isInside(r, cwd));
   const touchesProtected =
-    reads.some((p) => protectedReason(p, roots)) || roots.some((r) => lower.includes(r.toLowerCase())) || PROTECTED_MARKERS.some((m) => lower.includes(m));
+    reads.some((p) => protectedReason(p, outer)) || outer.some((r) => lower.includes(r.toLowerCase())) || PROTECTED_MARKERS.some((m) => lower.includes(m));
   if (touchesProtected && !strictlyReadOnly(parsed, writes)) return "may modify a protected path (guard rules, pi state, extensions or settings)";
   return undefined;
 }
@@ -628,7 +642,7 @@ export function sensitive(tool: string, input: any, cwd: string, roots: string[]
           return extracts ? "extracts an archive where .pi/ or .agents/ could be created" : "changes permissions recursively where guard's or pi's state lives";
       }
     }
-    const lower = (parsed.ok && !parsed.dynamic.length ? stripQuoted(dropCatHeredocs(cmd)) : dropCatHeredocs(cmd)).toLowerCase();
+    const lower = nameScanText(cmd, parsed).toLowerCase();
     if (PROTECTED_MARKERS.some((m) => lower.includes(m))) return "reads guard or pi internal state";
     for (const raw of parsed.subcommands) {
       // `env` alone prints the environment; it is only a wrapper when a command follows

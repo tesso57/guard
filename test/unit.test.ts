@@ -657,6 +657,52 @@ const O = { trusted: true, touched: new Set<string>() };
   ok("r12: a trailing comment without newline still works", JSON.stringify(P("ls -la # all").subcommands) === JSON.stringify([["ls", "-la"]]));
 }
 
+
+// ---------- review 13 ----------
+{
+  const PH = join(HOME, "proj");
+  const rootsH = protectedRoots(PH, join(AGENT, "sessions"));
+  const safe = (c: string) => safeAllow("bash", { command: c }, PH, O, P(c));
+  const hd = (c: string) => hardDeny("bash", { command: c }, PH, rootsH, P(c));
+  // P0-1: line continuations never create an empty command name
+  for (const c of ["\\\n c2 hello", "ls && \\\n c2", "\\\n python3 -c 'print(1)'", "l\\\ns -la"]) {
+    const p = P(c);
+    ok(`r13: no empty words: ${JSON.stringify(c)}`, p.subcommands.every((a) => a.every((t) => t !== "")));
+  }
+  ok("r13: a command after a leading continuation is not safe", !safe("\\\n c2 hello") && !safe("ls && \\\n c2"));
+  ok("r13: an interpreter after a continuation is dynamic", P("\\\n python3 -c 'print(1)'").dynamic.some((d) => d.includes("python3")));
+  ok("r13: l\\<nl>s is ls", JSON.stringify(P("l\\\ns -la").subcommands) === JSON.stringify([["ls", "-la"]]));
+  ok("r13: quoted empty word is kept", JSON.stringify(P("echo ''").subcommands) === JSON.stringify([["echo", ""]]));
+  // line-continuation positions in many places: the parsed commands must not change
+  const base = "git status && ls -la src";
+  for (let k = 1; k < base.length; k++) {
+    if (base[k] === " ") continue;
+    const withCont = base.slice(0, k) + "\\\n" + base.slice(k);
+    if (JSON.stringify(P(withCont).subcommands) !== JSON.stringify(P(base).subcommands)) {
+      ok(`r13: continuation at ${k} keeps the commands`, false, withCont);
+      break;
+    }
+  }
+  // P0-2: here-document delimiters read like bash
+  const d1 = P("cat <<E\\\nX\nEX\nc2\nE");
+  ok("r13: delimiter with a continuation is EX, so c2 runs", d1.subcommands.some((a) => a[0] === "c2"));
+  ok("r13: <<\"E\\\\\" has delimiter E\\", P('cat <<"E\\\\"\nE\nE\\\nc3').subcommands.some((a) => a[0] === "c3"));
+  ok("r13: <<true\\ x is unusual and dynamic", P("cat <<true\\ x\nhello\ntrue x\necho hi\ntrue\n").dynamic.length > 0);
+  ok("r13: <<'E F' is dynamic", P("cat <<'E F'\nx\nE F\n").dynamic.length > 0);
+  ok("r13: the e2e attack is not safe", !safe("cat <<true\\ x\nhello\ntrue x\necho '{}' >> /tmp/x/guard/rules.jsonl\ntrue\n"));
+  // P1: only real here-document bodies leave the name scan
+  ok("r13: a fake <<EOF in a comment does not hide a protected name", !!hd(`# <<EOF\npython3 -c 'open("${AGENT}/guard/rules.jsonl","a")'\nEOF`));
+  ok("r13: a fake <<EOF in quotes does not hide a protected name", !!hd(`echo "<<EOF"\npython3 -c 'open("${AGENT}/guard/rules.jsonl","a")'\nEOF`));
+  ok("r13: commit message here-document in $(…) is still fine", !hd(`git commit -m "$(cat <<'EOF'\nfix: resolve ~/.pi/agent path\nEOF\n)"`));
+  ok("r13: commands inside $(…) are hard-denied", !!hd(`echo "$(rm -rf ~/.pi)"`));
+  // P2
+  const P13 = mkdtempSync(join(tmpdir(), "guard-p13-"));
+  mkdirSync(join(P13, ".pi"));
+  const r13 = protectedRoots(P13, join(AGENT, "sessions"));
+  ok("r13: git add .pi/guard.json is not hard-denied", !hardDeny("bash", { command: "git add .pi/guard.json" }, P13, r13, P("git add .pi/guard.json")));
+  ok("r13: rm -rf .pi/cache is still hard-denied", !!hardDeny("bash", { command: "rm -rf .pi/cache" }, P13, r13, P("rm -rf .pi/cache")));
+}
+
 // ---------- evaluate ----------
 {
   const score = (probs: number[], conf = 0.9) => ({ type: "score", name: "risk", score: probs.reduce((s, p, i) => s + p * i, 0), confidence: conf, probabilities: probs.map((p, i) => ({ value: i, probability: p })) });

@@ -31,6 +31,10 @@ export type Parsed = {
   globs: string[];
   /** Why the command is dynamic. Empty means static. */
   dynamic: string[];
+  /** Commands inside $(…), parsed separately (they run too). */
+  substitutions: string[];
+  /** Every here-document body, including those inside $(…): data, not words. */
+  heredocBodies: string[];
 };
 
 /** If argv[0] is one of these, the arguments can be arbitrary code, so rules are never applied. */
@@ -53,8 +57,10 @@ const MAX_COMMAND = 16 * 1024;
 const FD_DUP = /(\d+|-)(?=$|[\s;&|<>()])/y;
 const FD_DIGITS = /(\d+|-)/y;
 
-export function parseShell(cmd: string): Parsed {
-  if (cmd.length > MAX_COMMAND) return { ok: false, subs: [], subcommands: [], writes: [], globs: [], dynamic: ["command too long to analyze"] };
+export function parseShell(cmd: string, depth = 0): Parsed {
+  if (cmd.length > MAX_COMMAND) return { ok: false, subs: [], subcommands: [], writes: [], globs: [], dynamic: ["command too long to analyze"], substitutions: [], heredocBodies: [] };
+  const substitutions: string[] = [];
+  const nestedBodies: string[] = [];
   const dynamic: string[] = [];
   const globs: string[] = [];
   const subs: Sub[] = [];
@@ -65,6 +71,8 @@ export function parseShell(cmd: string): Parsed {
   let inTok = false;
   let globbed = false;
   let tildeStart = false;
+  /** The token contains quotes, so an empty token is a real (empty) word. */
+  let tokQuoted = false;
   let quote: "'" | '"' | null = null;
   let pendingRedirect: "write" | "read" | "data" | null = null;
 
@@ -75,7 +83,8 @@ export function parseShell(cmd: string): Parsed {
     else if (pendingRedirect === "data") {
       /* here-string word: data, not a path */
     }
-    else cur.argv.push(tok);
+    // An empty word that was never quoted is not a word at all (bash drops it)
+    else if (tok !== "" || tokQuoted) cur.argv.push(tok);
     if (globbed && tok !== "[" && tok !== "]") globs.push(tok);
     // ~user, ~+ and ~- are expanded by the shell to other directories
     if (tildeStart && !/^~(\/|$)/.test(tok)) dyn("tilde expansion");
@@ -84,6 +93,7 @@ export function parseShell(cmd: string): Parsed {
     inTok = false;
     globbed = false;
     tildeStart = false;
+    tokQuoted = false;
   };
   const endCmd = () => {
     endTok();
@@ -104,13 +114,27 @@ export function parseShell(cmd: string): Parsed {
     }
     if (c === "\\") {
       if (n === undefined) break;
-      if (n !== "\n") tok += n;
-      inTok = true;
       i++;
+      // A line continuation disappears entirely: it neither starts nor ends a word
+      if (n === "\n") continue;
+      tok += n;
+      inTok = true;
       continue;
     }
     if (c === "$") {
-      if (n === "(") dyn("command substitution $()");
+      if (n === "(") {
+        dyn("command substitution $()");
+        // Parse the inner command too: its commands run, and its here-documents are data
+        if (depth < 3 && cmd[i + 2] !== "(") {
+          for (let close = cmd.indexOf(")", i + 2), tries = 0; close !== -1 && tries < 64; close = cmd.indexOf(")", close + 1), tries++) {
+            const inner = parseShell(cmd.slice(i + 2, close), depth + 1);
+            if (!inner.ok || inner.dynamic.includes("unterminated here-document")) continue;
+            substitutions.push(cmd.slice(i + 2, close));
+            nestedBodies.push(...inner.heredocBodies);
+            break;
+          }
+        }
+      }
       else if (n === "{" || (n && /[A-Za-z_0-9@*#?!$-]/.test(n))) dyn("variable expansion");
       else if (n === "'" || n === '"') dyn("ANSI-C / locale quoting");
       tok += c;
@@ -131,6 +155,7 @@ export function parseShell(cmd: string): Parsed {
     if (c === "'" || c === '"') {
       quote = c;
       inTok = true;
+      tokQuoted = true;
       continue;
     }
     if (c === "#" && !inTok) {
@@ -207,14 +232,48 @@ export function parseShell(cmd: string): Parsed {
           i++;
         }
         while (cmd[i + 1] === " " || cmd[i + 1] === "\t") i++;
+        // The delimiter is read like any word: quotes, backslashes and line continuations, ended by an unquoted
+        // metacharacter; any quoting makes the body literal
         let delim = "";
         let quoted = false;
         while (i + 1 < cmd.length && !/[\s;&|<>()]/.test(cmd[i + 1])) {
           const ch = cmd[++i];
-          if (ch === "'" || ch === '"' || ch === "\\") quoted = true;
-          else delim += ch;
+          if (ch === "\\") {
+            const nx = cmd[i + 1];
+            if (nx === undefined) break;
+            i++;
+            if (nx === "\n") continue;
+            quoted = true;
+            delim += nx;
+          } else if (ch === "'") {
+            quoted = true;
+            const end = cmd.indexOf("'", i + 1);
+            if (end === -1) {
+              dyn("malformed here-document");
+              i = cmd.length;
+              break;
+            }
+            delim += cmd.slice(i + 1, end);
+            i = end;
+          } else if (ch === '"') {
+            quoted = true;
+            let j = i + 1;
+            for (; j < cmd.length && cmd[j] !== '"'; j++) {
+              if (cmd[j] === "\\" && /[$`"\\\n]/.test(cmd[j + 1] ?? "")) {
+                if (cmd[j + 1] !== "\n") delim += cmd[j + 1];
+                j++;
+              } else delim += cmd[j];
+            }
+            if (j >= cmd.length) dyn("malformed here-document");
+            i = j;
+          } else if (ch === "$" || ch === "`") {
+            dyn("expansion in a here-document delimiter");
+            delim += ch;
+          } else delim += ch;
         }
         if (!delim) dyn("malformed here-document");
+        // Delimiters with whitespace or backslashes are legal but easy to misread
+        if (/[\s\\]/.test(delim)) dyn("unusual here-document delimiter");
         pendingDocs.push({ sub: cur, delim, stripTabs, quoted });
         continue;
       }
@@ -304,7 +363,16 @@ export function parseShell(cmd: string): Parsed {
   const kept = subs.filter((s) => s.argv.length || s.assigns.length || s.writes.length || s.reads.length);
   if (kept.length > 128) dyn("too many subcommands to analyze");
   for (const s of kept) s.writes = s.writes.filter((w) => !HARMLESS_DEVICES.test(w));
-  return { ok, subs: kept, subcommands: kept.map((s) => s.argv), writes: kept.flatMap((s) => s.writes), globs, dynamic };
+  return {
+    ok,
+    subs: kept,
+    subcommands: kept.map((s) => s.argv),
+    writes: kept.flatMap((s) => s.writes),
+    globs,
+    dynamic,
+    substitutions,
+    heredocBodies: [...kept.flatMap((s) => s.heredocs), ...nestedBodies],
+  };
 }
 
 /** Options of multi-command tools. `location` options change which project the command acts on. */
@@ -501,9 +569,11 @@ const NPM_READ_ONLY = new Set(["ls", "list", "explain", "why"]);
  * judging by its name AND its options. Path sensitivity and git config safety are checked separately.
  */
 export function isReadOnlyArgv(raw: string[]): boolean {
+  if (raw.length === 0) return true;
   const { argv: a, unknownOption } = normalizeArgv(raw);
   const head = a[0];
-  if (!head) return true;
+  // An empty command name is never read-only (it may hide the real command)
+  if (!head) return false;
   if (a.length === 2 && /^(--version|-V|--help)$/.test(a[1])) return true;
   switch (head) {
     case "printf":
