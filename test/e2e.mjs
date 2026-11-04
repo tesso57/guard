@@ -1,7 +1,7 @@
 // End-to-end test: runs the real pi (print mode, no UI) with guard loaded, a mock model and a mock Decisions API.
 // Every command is harmless even if guard failed to block it (writes stay in temp dirs, scripts only echo).
 import http from "node:http";
-import { mkdtempSync, cpSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, cpSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
@@ -11,6 +11,9 @@ const AGENT = mkdtempSync(join(tmpdir(), "e2e-agent-"));
 const PROJ = mkdtempSync(join(tmpdir(), "e2e-proj-"));
 cpSync(fileURLToPath(new URL("../extensions/guard", import.meta.url)), join(AGENT, "extensions/guard"), { recursive: true });
 const RULES = join(AGENT, "guard/rules.jsonl");
+// Several calls in this scenario are blocked on purpose; keep the agent running to the last step
+mkdirSync(join(AGENT, "guard"), { recursive: true });
+writeFileSync(join(AGENT, "guard/config.json"), JSON.stringify({ escalateConsecutive: 10 }));
 
 const decisions = [];
 const steps = [

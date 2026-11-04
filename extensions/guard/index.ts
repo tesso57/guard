@@ -18,10 +18,10 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { audit, tail } from "./audit.ts";
 import { type Config, loadConfig } from "./config.ts";
 import { buildRequest, callDecisions, evaluate, type ModelVerdict } from "./judge.ts";
-import { clearPathCache, isFreelyReadable, isInside, protectedRoots, resolvePath } from "./paths.ts";
+import { clearPathCache, isFreelyReadable, isInside, protectedRoots, recentlyChangedFiles, resolvePath } from "./paths.ts";
 import { hardDeny, inputPaths, safeAllow, sensitive, writesStayPlain } from "./policy.ts";
 import { type Decision, deriveDenyPatterns, derivePatterns, describeMatch, type Match, newId, type Rule, RuleStore, type Scope } from "./rules.ts";
-import { normalizeArgv, type Parsed, parseShell } from "./shell.ts";
+import { isReadOnlyArgv, normalizeArgv, type Parsed, parseShell } from "./shell.ts";
 import { confirmDialog, preview } from "./ui.ts";
 
 const STATE_ENTRY = "guard-state";
@@ -66,6 +66,14 @@ function applyEdits(content: string, input: any): string {
   let out = content;
   for (const e of edits) if (typeof e?.oldText === "string" && typeof e?.newText === "string") out = out.replace(e.oldText, () => e.newText);
   return out;
+}
+
+/** True for calls that cannot change the file system: read tools and strictly read-only bash. */
+function isPureRead(c: ToolCallLike, cwd: string): boolean {
+  if (["read", "grep", "find", "ls"].includes(c.name)) return true;
+  if (c.name !== "bash") return false;
+  const p = parseShell(String(c.arguments?.command ?? ""));
+  return p.ok && !p.dynamic.length && !p.writes.length && p.subcommands.every(isReadOnlyArgv) && writesStayPlain("bash", c.arguments, cwd, p) && inputPaths("bash", c.arguments, cwd, p).writes.length === 0;
 }
 
 function isRegularSmallFile(p: string): boolean {
@@ -159,6 +167,7 @@ export default function (pi: ExtensionAPI) {
       else if (writtenEarlier.has(p)) attached[p] = writtenEarlier.get(p)!;
     };
     let runsScripts = false;
+    let changedCount = 0;
     if (tool === "bash" && parsed) {
       for (const tok of parsed.subcommands.flat()) attach(resolvePath(ctx.cwd, tok));
       // Interpreters, runners, and scripts run by path (./run.sh) execute file contents
@@ -170,8 +179,12 @@ export default function (pi: ExtensionAPI) {
           if (isRegularSmallFile(p)) attach(p, true);
         }
         // Test runners and build tools also load project files that are not named in the command
-        // (tests, conftest.py, package.json scripts, node_modules/.bin), so every file changed this session is relevant
+        // (tests, conftest.py, package.json scripts, node_modules/.bin): attach every file changed in this session,
+        // and recently changed project files (which may come from an earlier session or a git checkout)
         for (const p of [...touched, ...virtual.keys()]) if (isInside(p, ctx.cwd)) attach(p);
+        changedCount = Object.keys(attached).length;
+        // Context only: recently changed files do not by themselves force a full judgement
+        for (const p of recentlyChangedFiles(ctx.cwd)) attach(p, true);
       }
     }
     return {
@@ -179,7 +192,7 @@ export default function (pi: ExtensionAPI) {
       history: calls.slice(-cfg.contextToolCalls),
       attachedFiles: attached,
       fromSiblings,
-      changedFilesRun: runsScripts && Object.keys(attached).length > 0,
+      changedFilesRun: runsScripts && changedCount > 0,
     };
   }
 
@@ -225,11 +238,14 @@ export default function (pi: ExtensionAPI) {
     if (rule?.decision === "ask") return { ...base, action: "confirm", source: "rule-ask", reasons: rule.rules.map((r) => `${r.scope} ask rule: ${describeMatch(r.tool, r.match)}`), rules: rule.rules, denyPatterns };
 
     const cx = context(ctx, callId, tool, parsed, opts.siblings ?? []);
+    // pi judges every call of a message before running any of them, so a later call cannot rely on the file system
+    // as it is now if an earlier sibling may change it (a checkout that adds a symlink, a write through one)
+    const siblingMayChange = (opts.siblings ?? []).some((sb) => !isPureRead(sb, ctx.cwd));
     const sens = sensitive(tool, input, ctx.cwd, roots, parsed);
     // Running a file that an earlier call in the same message is about to change: the human should see it
     const siblingRun = cx.fromSiblings.length ? `runs ${cx.fromSiblings.map((p) => relative(ctx.cwd, p)).join(", ")}, changed earlier in this same message` : undefined;
 
-    if (rule?.decision === "allow" && !sens && !siblingRun && !cx.changedFilesRun) {
+    if (rule?.decision === "allow" && !sens && !siblingRun && !cx.changedFilesRun && !siblingMayChange) {
       const reasons = rule.rules.map((r) => `${r.scope} allow rule: ${describeMatch(r.tool, r.match)}`);
       if (!process.env.OPENAI_API_KEY) return { ...base, action: "allow", source: "rule-allow", reasons: [...reasons, "rules-only mode (no API key)"], rules: rule.rules };
       try {
@@ -243,8 +259,9 @@ export default function (pi: ExtensionAPI) {
     }
 
     if (sens) return { ...base, action: "confirm", source: "sensitive", reasons: [`may expose secrets: ${sens}`], patterns, denyPatterns, rememberAllow: !!patterns };
-    if (!siblingRun && !cx.changedFilesRun && safeAllow(tool, input, ctx.cwd, { trusted, touched }, parsed)) return { ...base, action: "allow", source: "safe", reasons: [] };
-    if (!siblingRun && cfg.skipModelTools.includes(tool)) {
+    const shortcutsOk = !siblingRun && !siblingMayChange;
+    if (shortcutsOk && !cx.changedFilesRun && safeAllow(tool, input, ctx.cwd, { trusted, touched }, parsed)) return { ...base, action: "allow", source: "safe", reasons: [] };
+    if (shortcutsOk && cfg.skipModelTools.includes(tool)) {
       // read/grep/find/ls skip the model only inside the project (or public system directories)
       const reads = inputPaths(tool, input, ctx.cwd).reads;
       if ((reads.length ? reads : [ctx.cwd]).every((p) => isFreelyReadable(p, ctx.cwd))) return { ...base, action: "allow", source: "skip", reasons: [] };

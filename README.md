@@ -43,7 +43,9 @@ guard sends the Decisions API:
 
 It never sends the assistant's own text or tool outputs. This limits prompt injection. File contents guard attaches are passed as an untrusted tool output, never as your words. When bash runs a script that was written or edited earlier, guard attaches what the script will contain, including changes made by earlier calls in the same assistant message that have not run yet; running such a file always asks you first. When a test runner, build tool or interpreter (`npm`, `pytest`, `make`, `python`, `sh`, …) runs, guard attaches the script it is given and every project file changed in this session (by any tool, including bash), and does a full judgement, even if an allow rule matches.
 
-All tool calls of an assistant message are sent to the model in parallel as soon as the message ends. When each call is about to run, guard repeats every deterministic check against the current state (earlier calls may have created symlinks or changed files) and reuses the model's verdict only if the input and attachments are unchanged. Strings that look like secrets are redacted before anything is sent.
+All tool calls of an assistant message are sent to the model in parallel as soon as the message ends. pi judges every call of a message before it runs any of them, so when an earlier call in the same message may change files (anything but a pure read), later calls get no shortcuts: no safe list, no skipped model, no allow rule without a full judgement. guard repeats every deterministic check at `tool_call` and reuses the model's verdict only if the input and attachments are unchanged.
+
+Recursive content searches (`grep -r`, `rg -uu`/`--hidden`, pi's `grep` tool) ask first when the searched tree contains `.env` files or keys. Extracting archives or changing permissions recursively where guard's state lives also asks first. Strings that look like secrets are redacted before anything is sent.
 
 Risk is scored on five levels, from 0 to 4. guard looks at the probability of the high-risk levels as well as the weighted average, so a split such as "45% catastrophic, 55% harmless" is still caught.
 

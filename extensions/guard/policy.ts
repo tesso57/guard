@@ -5,9 +5,9 @@
  *   safeAllow : obviously safe → allow without calling the model
  */
 import { homedir } from "node:os";
-import { basename } from "node:path";
+import { basename, join } from "node:path";
 import { isLongOption, isReadOnlyArgv, nonFlags, normalizeArgv, type Parsed } from "./shell.ts";
-import { containsProtectedRoot, gitConfigIsSafe, isFreelyReadable, isHomeOrAncestor, isInside, isRiskyProjectFile, pathLikeTokens, pathVariants, protectedReason, realPath, resolvePath, sensitiveReason } from "./paths.ts";
+import { containsProtectedRoot, expandGlobFully, gitConfigIsSafe, isFreelyReadable, isHomeOrAncestor, isInside, isRiskyProjectFile, memo, pathLikeTokens, pathVariants, protectedReason, realPath, resolvePath, secretFilesUnder, sensitiveReason } from "./paths.ts";
 
 const BUILTIN_TOOLS = new Set(["bash", "edit", "write", "read", "grep", "find", "ls"]);
 
@@ -26,8 +26,12 @@ const HARD_DENY_BASH: [RegExp, string][] = [
 /** Spellings of guard's and pi's state that can appear in commands without resolving to a known path. */
 const PROTECTED_MARKERS = ["~/.pi", "$home/.pi", "${home}/.pi", ".pi/agent"];
 
-/** Commands that move, delete, copy over or extract into whole directory trees. */
-const TREE_CHANGERS = new Set(["rm", "rmdir", "mv", "cp", "rsync", "tar", "unzip", "ln", "install", "chmod", "chown", "chattr", "shred"]);
+/** Commands that delete their arguments. */
+const DELETERS = new Set(["rm", "rmdir", "shred", "unlink"]);
+/** Commands that put their sources into a destination (the last argument). */
+const PLACERS = new Set(["mv", "cp", "rsync", "ln", "install", "scp"]);
+const isRecursiveCopy = (a: string[]) => a[0] === "rsync" || a[0] === "mv" || a.some((t) => t === "--recursive" || t === "--archive" || (/^-[A-Za-z]+$/.test(t) && /[rRa]/.test(t)));
+const hasGlob = (t: string) => /[*?[]/.test(t);
 
 /** Top-level system directories; deleting them recursively is never intended. */
 const SYSTEM_DIRS = ["/bin", "/boot", "/dev", "/etc", "/lib", "/lib64", "/opt", "/proc", "/sbin", "/sys", "/usr", "/var", "/System", "/Library", "/Applications", "/Users", "/home"];
@@ -109,6 +113,10 @@ function allStrings(v: unknown, out: string[] = []): string[] {
  * For tools other than the built-ins, every path-like string counts as both read and written.
  */
 export function inputPaths(tool: string, input: any, cwd: string, parsed?: Parsed): { reads: string[]; writes: string[] } {
+  return memo(`inputPaths:${tool}:${cwd}:${JSON.stringify(input)}`, () => computeInputPaths(tool, input, cwd, parsed));
+}
+
+function computeInputPaths(tool: string, input: any, cwd: string, parsed?: Parsed): { reads: string[]; writes: string[] } {
   if (tool === "bash" && parsed) {
     const reads: string[] = [];
     const writes: string[] = [];
@@ -119,7 +127,8 @@ export function inputPaths(tool: string, input: any, cwd: string, parsed?: Parse
       // against both the tracked directory and the original cwd, and the tracked directory itself counts as read.
       for (const base of dir === cwd ? [cwd] : [dir, cwd]) {
         reads.push(...pathLikeTokens(base, a.slice(1)), ...s.reads.flatMap((r) => pathVariants(base, r)));
-        writes.push(...[...s.writes, ...bashWriteTargets(s.argv)].flatMap((w) => pathVariants(base, w)));
+        // Wildcards in write targets are expanded: `>> ~/.p?/a????/guard/rules.jsonl` writes to the real file
+        writes.push(...[...s.writes, ...bashWriteTargets(s.argv)].flatMap((w) => [...pathVariants(base, w), ...(hasGlob(w) ? expandGlobFully(base, w) : [])]));
       }
       if (a[0] === "cd" || a[0] === "pushd") {
         const target = nonFlags(a)[0];
@@ -172,11 +181,22 @@ export function hardDeny(tool: string, input: any, cwd: string, roots: string[],
       const { argv: a } = normalizeArgv(s.argv, "deny");
       const bases = dir === cwd ? [cwd] : [dir, cwd];
       if (isRecursiveRm(a) && nonFlags(a).some((t) => bases.some((b) => isDangerousDeleteTarget(b, t)))) return "recursive deletion of /, ~ or a system directory";
-      // Moving, deleting or overwriting a parent of guard's state (`mv ~/.pi x`, `cp -r payload/.pi ~/`) affects it too
-      if (TREE_CHANGERS.has(a[0])) {
-        const targets = [...nonFlags(a), ...optionValue(a, ["-C", "--directory", "-d", "-t", "--target-directory"])];
-        if (targets.some((t) => bases.some((b) => pathVariants(b, t).some((p) => containsProtectedRoot(p, roots)))))
-          return "moves, deletes or overwrites a directory that contains guard's or pi's state";
+      // Deleting or moving away a directory that contains guard's state (`rm -rf ~/.p*`, `mv ~/.pi x`)
+      const args = nonFlags(a);
+      const resolveAll = (b: string, t: string) => [...pathVariants(b, t), ...(hasGlob(t) ? expandGlobFully(b, t) : [])];
+      const removes = DELETERS.has(a[0]) ? args : a[0] === "mv" ? args.slice(0, -1) : [];
+      if (removes.some((t) => bases.some((b) => resolveAll(b, t).some((p) => containsProtectedRoot(p, roots)))))
+        return "deletes or moves a directory that contains guard's or pi's state";
+      // Placing something where guard's state lives (`cp -r payload/.pi ~/`, `rsync -a payload/ ~/`, `ln -sf x ~/.pi/agent`)
+      if (PLACERS.has(a[0]) && args.length >= 2) {
+        const dest = args[args.length - 1];
+        for (const b of bases)
+          for (const src of args.slice(0, -1))
+            for (const d of resolveAll(b, dest)) {
+              const into = [join(d, basename(src)), ...(a[0] === "rsync" && src.endsWith("/") ? [d] : [])];
+              if (into.some((p) => protectedReason(p, roots) || (isRecursiveCopy(a) && containsProtectedRoot(p, roots))))
+                return "copies, moves or links into guard's or pi's state";
+            }
       }
       if (a[0] === "cd" || a[0] === "pushd") dir = nonFlags(a)[0] ? resolvePath(dir, nonFlags(a)[0]) : homedir();
       else if (a[0] === "popd") dir = cwd;
@@ -204,9 +224,35 @@ export function sensitive(tool: string, input: any, cwd: string, roots: string[]
   }
   // pi's grep tool searches hidden files recursively
   if (tool === "grep" && reads.concat(reads.length ? [] : [cwd]).some((p) => isHomeOrAncestor(p) || isHomeOrAncestor(realPath(p)))) return "searches file contents across the home directory";
+  // Recursive content searches print matching lines of every file they reach, including .env files and keys
+  if (tool === "grep") {
+    const roots0 = reads.length ? reads : [cwd];
+    const hit = roots0.flatMap((r) => secretFilesUnder(realPath(r)))[0];
+    if (hit) return `the search would include ${hit}`;
+  }
   if (tool === "bash" && parsed) {
     const cmd = String(input?.command ?? "");
     if (/(?:^|[\s"'/])\.env(?:\.[\w.-]+)?(?=$|[\s"';|&])/.test(cmd) && !/\.env\.(?:example|sample|template)/.test(cmd)) return ".env file";
+    for (const raw of parsed.subcommands) {
+      const { argv: a } = normalizeArgv(raw, "deny");
+      const recursiveSearch =
+        (isGrepFamily(a[0]) && recursiveGrep(a.slice(1))) ||
+        (a[0] === "rg" && a.slice(1).some((t) => /^-[A-Za-z]*u/.test(t) || ["--hidden", "--no-ignore", "--glob", "-g", "--iglob"].some((o) => t === o || t.startsWith(`${o}=`))));
+      if (recursiveSearch) {
+        const given = pathLikeTokens(cwd, nonFlags(a).slice(1));
+        const targets = given.length ? given : [cwd];
+        const hit = targets.flatMap((r) => secretFilesUnder(realPath(r)))[0];
+        if (hit) return `the search would include ${hit}`;
+      }
+      // Extracting archives or changing permissions recursively where guard's state lives
+      const extracts = (a[0] === "tar" && /^-?[A-Za-z]*x/.test(a[1] ?? "")) || a[0] === "unzip" || a[0] === "7z" || a[0] === "bsdtar";
+      const recursivePerms = ["chmod", "chown", "chattr", "chgrp"].includes(a[0]) && a.some((t) => /^-[A-Za-z]*R/.test(t) || t === "--recursive");
+      if (extracts || recursivePerms) {
+        const dests = extracts ? [...optionValue(a, ["-C", "--directory", "-d"]), ...(optionValue(a, ["-C", "--directory", "-d"]).length ? [] : ["."])] : nonFlags(a).slice(1);
+        if (dests.some((t) => pathVariants(cwd, t).some((p) => containsProtectedRoot(p, roots))))
+          return extracts ? "extracts an archive where guard's or pi's state lives" : "changes permissions recursively where guard's or pi's state lives";
+      }
+    }
     const lower = cmd.toLowerCase();
     if (PROTECTED_MARKERS.some((m) => lower.includes(m))) return "reads guard or pi internal state";
     for (const raw of parsed.subcommands) {

@@ -242,6 +242,7 @@ export function parseShell(cmd: string): Parsed {
     if (base === "git" && a.some((t, i) => i > 0 && (t === "-c" || t.startsWith("--config") || t === "--exec-path" || t.startsWith("--exec-path=")))) dyn("git config override");
   }
   const kept = subs.filter((s) => s.argv.length || s.writes.length || s.reads.length);
+  if (kept.length > 128) dyn("too many subcommands to analyze");
   for (const s of kept) s.writes = s.writes.filter((w) => !HARMLESS_DEVICES.test(w));
   return { ok, subs: kept, subcommands: kept.map((s) => s.argv), writes: kept.flatMap((s) => s.writes), globs, dynamic };
 }
@@ -330,12 +331,14 @@ export function normalizeArgv(a: string[], mode: "allow" | "deny" = "allow"): { 
   // A location option anywhere (`npm test --prefix /tmp/x`, `make test -C ../x`) makes the call act on another project
   if (mode === "allow" && Object.hasOwn(LOCATION_ANYWHERE, head) && rest.some((t) => LOCATION_ANYWHERE[head].some((o) => t === o || t.startsWith(`${o}=`) || (o.startsWith("--") && isLongOption(t, o)) || (o.length === 2 && t.startsWith(o)))))
     unknownOption = true;
+  // make VAR=value overrides variables used in recipes (SHELL=./x, .SHELLFLAGS=...)
+  if (mode === "allow" && (head === "make" || head === "gmake") && rest.some((t) => /^[A-Za-z_.][\w.]*=/.test(t))) unknownOption = true;
   return { argv: canonicalScripts([head, ...rest]), unknownOption };
 }
 
 /** Options that point a tool at another project, wherever they appear in argv. */
 const LOCATION_ANYWHERE: Record<string, string[]> = {
-  npm: ["--prefix", "--userconfig", "--globalconfig"],
+  npm: ["--prefix", "-C", "--userconfig", "--globalconfig", "--script-shell", "--node-options", "--shell"],
   pnpm: ["-C", "--dir"],
   yarn: ["--cwd"],
   bun: ["--cwd", "--config"],
@@ -343,7 +346,7 @@ const LOCATION_ANYWHERE: Record<string, string[]> = {
   make: ["-C", "--directory", "-f", "--file", "--makefile", "--eval", "-I", "--include-dir"],
   gmake: ["-C", "--directory", "-f", "--file", "--makefile", "--eval", "-I", "--include-dir"],
   go: ["-C", "-modfile", "-exec", "-toolexec"],
-  just: ["-f", "--justfile", "-d", "--working-directory"],
+  just: ["-f", "--justfile", "-d", "--working-directory", "--shell", "--shell-arg"],
   deno: ["--config", "-c"],
   uv: ["--directory", "--project", "--config-file"],
   poetry: ["-C", "--directory", "-P", "--project"],
@@ -422,6 +425,9 @@ export function isReadOnlyArgv(raw: string[]): boolean {
       return !hasShort(a, "x") && !hasShort(a, "X") && !hasLong(a, "--exec", "--exec-batch");
     case "file":
       return !hasShort(a, "C") && !hasLong(a, "--compile");
+    case "jq":
+      // import/include and -L load modules from arbitrary paths
+      return !a.some((t) => /\b(import|include)\b/.test(t)) && !hasShort(a, "L") && !hasLong(a, "--rawfile", "--slurpfile");
     case "sed": {
       // Only printing line ranges (`sed -n 1,80p f`); other scripts can write files (w) or run commands (e)
       if (!a.slice(1).every((t) => !t.startsWith("-") || t === "-n" || t === "-E" || t === "-r")) return false;

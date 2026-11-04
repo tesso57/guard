@@ -1,4 +1,4 @@
-import { existsSync, globSync, lstatSync, readFileSync, readlinkSync, statSync } from "node:fs";
+import { existsSync, globSync, lstatSync, readdirSync, readFileSync, readlinkSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -39,11 +39,27 @@ export function resolvePath(cwd: string, p: string): string {
 }
 
 const realCache = new Map<string, string>();
+const memoCache = new Map<string, unknown>();
+let globBudget = 8;
 
-/** Clears the symlink cache; called once per judgement so results reflect the current file system. */
+/** Clears per-judgement caches, so every judgement sees the current file system. */
 export function clearPathCache() {
   realCache.clear();
+  memoCache.clear();
+  globBudget = 8;
 }
+
+/** Memoizes work within one judgement (cleared by clearPathCache). */
+export function memo<T>(key: string, fn: () => T): T {
+  if (memoCache.has(key)) return memoCache.get(key) as T;
+  const v = fn();
+  if (memoCache.size > 1000) memoCache.clear();
+  memoCache.set(key, v);
+  return v;
+}
+
+/** Stands for paths guard did not enumerate (glob limits); never freely readable, never sensitive. */
+const UNKNOWN_PATH = "/__guard_unexpanded__";
 
 /**
  * Resolves a path the way the kernel would open it: component by component, following symlinks (also dangling
@@ -108,20 +124,35 @@ export function isHomeOrAncestor(p: string): boolean {
 }
 
 /** System locations whose contents are public on a normal machine. */
-const PUBLIC_DIRS = ["/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/opt/homebrew", "/System", "/Library/Developer", "/dev/null"];
+const PUBLIC_DIRS = [
+  "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/opt/homebrew", "/System", "/Library/Developer", "/dev/null",
+  "/etc/os-release", "/etc/lsb-release", "/etc/hosts", "/etc/timezone", "/etc/debian_version", "/etc/alpine-release",
+];
+
+/** A regular file with more than one hard link may be the same file as something outside the project. */
+function isHardLinked(p: string): boolean {
+  try {
+    const st = lstatSync(p);
+    return st.isFile() && st.nlink > 1;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Where guard may let a read happen without asking: inside the project (unless the project is the home directory
  * itself or one of its ancestors) or in public system directories. Checked on both the literal and the real path.
  */
 export function isFreelyReadable(p: string, cwd: string): boolean {
+  if (p === UNKNOWN_PATH) return false;
   const ok = (x: string) =>
     (!isHomeOrAncestor(cwd) && isInside(x, cwd) && isInside(x, realPath(cwd))) || PUBLIC_DIRS.some((d) => isInside(x, d));
-  return ok(p) && ok(realPath(p));
+  return ok(p) && ok(realPath(p)) && !isHardLinked(p);
 }
 
 function sensitiveOne(abs: string): string | undefined {
   if (abs.startsWith("/__guard_unparseable_file_url__/")) return "unparseable file:// URL";
+  if (abs === UNKNOWN_PATH) return undefined;
   const rel = isInside(abs, HOME) ? relative(HOME, abs) : undefined;
   const first = rel?.split(sep)[0];
   if (rel !== undefined && first) {
@@ -170,7 +201,8 @@ export function protectedReason(abs: string, roots: string[]): string | undefine
 /** True if moving, deleting or overwriting p would also affect a protected root (p is the root or one of its parents). */
 export function containsProtectedRoot(p: string, roots: string[]): boolean {
   const real = realPath(p);
-  return roots.some((r) => isInside(r, p) || isInside(realPath(r), real));
+  // Only roots that exist can be moved or deleted along with a parent; this keeps `mv build ..` usable
+  return roots.some((r) => existsSync(r) && (isInside(r, p) || isInside(realPath(r), real)));
 }
 
 /**
@@ -211,8 +243,14 @@ export function isRiskyProjectFile(rel: string): boolean {
 export function pathLikeTokens(cwd: string, tokens: string[], globs: string[] = []): string[] {
   const out: string[] = [];
   for (const t of tokens) {
-    if (!t || t.length > 4096 || (t.startsWith("-") && !t.includes("="))) continue;
-    const v = t.includes("=") ? t.slice(t.indexOf("=") + 1) : t;
+    if (!t || t.length > 4096) continue;
+    let v: string;
+    if (t.startsWith("--")) v = t.includes("=") ? t.slice(t.indexOf("=") + 1) : "";
+    else if (t.startsWith("-")) {
+      // A value glued to a short option (-m/path, -f~/x, -L$HOME): any path-looking tail counts
+      const tail = t.slice(2);
+      v = /^(~|\/|\.|\$HOME|file:)/i.test(tail) || tail.includes("/") ? tail : t.includes("=") ? t.slice(t.indexOf("=") + 1) : "";
+    } else v = t.includes("=") ? t.slice(t.indexOf("=") + 1) : t;
     if (!v) continue;
     // Bare names count when they look secret (id_rsa, cert.p12) or name an existing file in cwd
     if (/^(~|\/|\.|\$HOME|file:)/i.test(v) || v.includes("/") || /\.(env|pem|key|p12|pfx)$/i.test(v) || /^id_[a-z0-9]+/.test(v) || existsSync(resolve(cwd, v)))
@@ -222,23 +260,94 @@ export function pathLikeTokens(cwd: string, tokens: string[], globs: string[] = 
   return out;
 }
 
+/** The directory a glob starts from (the part before the first wildcard). */
+function globBase(cwd: string, pattern: string): string {
+  const p = normalizeInput(pattern);
+  const segs = p.split("/");
+  const firstGlob = segs.findIndex((s) => /[*?[]/.test(s));
+  return resolvePath(cwd, segs.slice(0, Math.max(firstGlob, 0)).join("/") || (isAbsolute(p) ? "/" : "."));
+}
+
 /**
- * The static directory a glob starts from, plus its matches when expansion is cheap.
- * `**` is not recursive in bash without globstar, so it is treated as `*`; deep patterns are not expanded at all.
+ * The static directory a glob starts from, plus its matches.
+ * Returns UNKNOWN_PATH as well when the shell might match more than guard can enumerate: hidden-file patterns
+ * (bash 3.2 lets `.*` match `..`), more than three wildcard segments, or the per-judgement expansion budget.
+ * `**` is not recursive in bash without globstar, so it is treated as `*`.
  */
 function expandGlob(cwd: string, pattern: string): string[] {
   const p = normalizeInput(pattern).replace(/\*\*+/g, "*");
   const segs = p.split("/");
-  const firstGlob = segs.findIndex((s) => /[*?[]/.test(s));
-  const base = resolvePath(cwd, segs.slice(0, Math.max(firstGlob, 0)).join("/") || (isAbsolute(p) ? "/" : "."));
-  const out = [base];
-  if (segs.filter((s) => /[*?[]/.test(s)).length > 3) return out;
+  const out = [globBase(cwd, pattern)];
+  const wild = segs.filter((s) => /[*?[]/.test(s));
+  if (wild.length > 3 || globBudget-- <= 0) return [...out, UNKNOWN_PATH];
+  // bash 3.2 lets `.*` match `..` and node's glob does not, so hidden-file patterns may reach more than we see
+  if (wild.some((s) => s.startsWith("."))) out.push(UNKNOWN_PATH);
   try {
     out.push(...globSync(p, { cwd }).slice(0, 500).map((m) => resolvePath(cwd, String(m))));
   } catch {
-    /* nothing to add */
+    out.push(UNKNOWN_PATH);
   }
   return out;
+}
+
+/** Every existing match of a write or delete target pattern, without the read-side limits (bounded to 500). */
+export function expandGlobFully(cwd: string, pattern: string): string[] {
+  try {
+    return globSync(normalizeInput(pattern).replace(/\*\*+/g, "*"), { cwd }).slice(0, 500).map((m) => resolvePath(cwd, String(m)));
+  } catch {
+    return [];
+  }
+}
+
+const SKIP_WALK = new Set(["node_modules", ".git", ".hg", ".svn", "dist", "build", "target", ".venv", "venv", "__pycache__"]);
+
+/** Walks a directory tree with bounded depth and entry count, calling fn for each file. */
+function walk(root: string, fn: (path: string, name: string) => void, maxDepth = 6, maxEntries = 5000) {
+  let seen = 0;
+  const visit = (dir: string, depth: number) => {
+    if (depth > maxDepth || seen > maxEntries) return;
+    let entries: import("node:fs").Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      if (++seen > maxEntries) return;
+      const p = join(dir, e.name);
+      if (e.isDirectory()) {
+        if (!SKIP_WALK.has(e.name)) visit(p, depth + 1);
+      } else fn(p, e.name);
+    }
+  };
+  visit(root, 0);
+}
+
+/** Files under root that likely hold secrets (.env, keys), for recursive content searches. */
+export function secretFilesUnder(root: string): string[] {
+  return memo(`secrets:${root}`, () => {
+    const out: string[] = [];
+    if (isHomeOrAncestor(root)) return [root];
+    walk(root, (p) => {
+      if (out.length < 20 && sensitiveOne(p)) out.push(p);
+    });
+    return out;
+  });
+}
+
+/** Project files changed in the last day, which a test runner may load (also from earlier sessions). */
+export function recentlyChangedFiles(root: string, limit = 20): string[] {
+  return memo(`recent:${root}`, () => {
+    const out: { p: string; m: number }[] = [];
+    const since = Date.now() - 24 * 3600_000;
+    walk(root, (p) => {
+      try {
+        const st = statSync(p);
+        if (st.mtimeMs > since && st.size < 200_000) out.push({ p, m: st.mtimeMs });
+      } catch { /* vanished */ }
+    });
+    return out.sort((a, b) => b.m - a.m).slice(0, limit).map((x) => x.p);
+  });
 }
 
 /**
@@ -248,7 +357,7 @@ function expandGlob(cwd: string, pattern: string): string[] {
  * merely contain such words do not count; anything the parser cannot read counts as unsafe.
  */
 const DANGEROUS_GIT_KEY = [
-  /^core\.(fsmonitor|hookspath|sshcommand|askpass|gitproxy|alternaterefscommand)$/,
+  /^core\.(fsmonitor|hookspath|sshcommand|askpass|gitproxy|alternaterefscommand|worktree)$/,
   /^diff\.external$/,
   /^(filter|diff|merge|gpg|credential|uploadpack|receive|remote|url)\..*\.(clean|smudge|process|command|textconv|program|driver|uploadpack|receivepack|helper)$/,
   /^gpg\.program$/,
@@ -260,8 +369,9 @@ const DANGEROUS_GIT_KEY = [
 
 /** Parsed keys, or undefined when a line cannot be understood. */
 function gitConfigKeys(text: string): string[] | undefined {
-  // A trailing backslash continues the value on the next line
-  const lines = text.replace(/\\\r?\n/g, " ").split(/\r?\n/);
+  // git's continuation and escaping rules (even inside comments) are subtle; any line ending in a backslash is unsafe
+  if (/\\\r?$/m.test(text)) return undefined;
+  const lines = text.split(/\r?\n/);
   const keys: string[] = [];
   let section = "";
   for (const raw of lines) {
@@ -314,6 +424,8 @@ export function gitConfigIsSafe(cwd: string): boolean {
           gitdir = resolve(d, m[1].trim());
         }
         const common = existsSync(join(gitdir, "commondir")) ? resolve(gitdir, readFileSync(join(gitdir, "commondir"), "utf8").trim()) : gitdir;
+        // Submodules have their own configs, which `git status` in the parent also honors
+        if (existsSync(join(common, "modules")) || existsSync(join(d, ".gitmodules"))) return false;
         return configIsClean(join(common, "config")) && configIsClean(join(gitdir, "config.worktree")) && configIsClean(join(common, "config.worktree"));
       } catch {
         return false;
