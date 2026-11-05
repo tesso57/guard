@@ -358,10 +358,8 @@ export default function (pi: ExtensionAPI) {
       // Global allow rules apply in every trusted project, so only read-only calls may become one
       const globalAllow = rememberAllow && trusted && v.category === "read_only" && (v.risk ?? 9) < t.confirmScore;
       const a: Assessment = { action: v.action, source: "model", reasons: v.reasons, verdict: v, patterns, denyPatterns, rememberAllow, globalAllow };
-      if (siblingRun && a.action === "allow") {
-        a.action = "confirm";
-        a.reasons = [...a.reasons, siblingRun];
-      }
+      // A file an earlier sibling writes is attached with its new contents (write/edit), so the model judges what
+      // will run; only the cache is skipped, since the same command may run different contents next time
       if (a.action === "allow" && !siblingRun) {
         if (verdictCache.size >= MAX_CACHE) {
           for (const [k, e] of verdictCache) if (Date.now() - e.at >= cfg.verdictCacheMs) verdictCache.delete(k);
