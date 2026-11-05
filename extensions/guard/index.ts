@@ -9,7 +9,7 @@
  *   5. safe list (read-only bash, plain edits inside the project) → allow without the model
  *   6. skipModelTools (read/grep/find/ls)                         → allow
  *   7. Decisions API with intent, history and past decisions      → allow / confirm / block
- *   Failures confirm (or block without a UI). Without OPENAI_API_KEY guard runs in rules-only mode.
+ *   Failures confirm (or block without a UI). Without GUARD_OPENAI_API_KEY guard runs in rules-only mode.
  */
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
@@ -320,7 +320,7 @@ export default function (pi: ExtensionAPI) {
 
     if (rule?.decision === "allow" && !sens && !siblingRun && !cx.changedFilesRun && !siblingMayChange) {
       const reasons = rule.rules.map((r) => `${r.scope} allow rule: ${describeMatch(r.tool, r.match)}`);
-      if (!process.env.OPENAI_API_KEY) return { ...base, action: "allow", source: "rule-allow", reasons: [...reasons, "rules-only mode (no API key)"], rules: rule.rules };
+      if (!process.env.GUARD_OPENAI_API_KEY) return { ...base, action: "allow", source: "rule-allow", reasons: [...reasons, "rules-only mode (no API key)"], rules: rule.rules };
       try {
         const v = await judgeWithModel(tool, input, ctx, callId, cx, [], true, opts.signal);
         if (v.action === "allow") return { ...base, action: "allow", source: "rule-allow", reasons, rules: rule.rules, verdict: v };
@@ -399,7 +399,7 @@ export default function (pi: ExtensionAPI) {
     store.syncSession(ctx.sessionManager.getBranch() as any[]);
     enabled = true;
     for (const e of ctx.sessionManager.getBranch() as any[]) if (e.type === "custom" && e.customType === STATE_ENTRY) enabled = e.data?.enabled !== false;
-    status(ctx, cfg.disabled ? "guard: disabled" : !enabled ? "guard: off" : process.env.OPENAI_API_KEY ? `guard: ${cfg.model}` : "guard: rules only");
+    status(ctx, cfg.disabled ? "guard: disabled" : !enabled ? "guard: off" : process.env.GUARD_OPENAI_API_KEY ? `guard: ${cfg.model}` : "guard: rules only");
   }
 
   pi.on("session_start", async (_e, ctx) => {
@@ -413,8 +413,8 @@ export default function (pi: ExtensionAPI) {
     consecutiveBlocks = totalBlocks = 0;
     for (const w of [...loaded.warnings, ...store.warnings]) ctx.ui.notify(`guard: ${w}`, "warning");
     restoreState(ctx);
-    if (!cfg.disabled && !process.env.OPENAI_API_KEY)
-      ctx.ui.notify("guard: OPENAI_API_KEY is not set. Running in rules-only mode: calls that need a model judgement will ask you first.", "warning");
+    if (!cfg.disabled && !process.env.GUARD_OPENAI_API_KEY)
+      ctx.ui.notify("guard: GUARD_OPENAI_API_KEY is not set. Running in rules-only mode: calls that need a model judgement will ask you first.", "warning");
   });
 
   // Rewinding with /tree changes which session rules and on/off state apply
@@ -571,7 +571,7 @@ export default function (pi: ExtensionAPI) {
         const all = store.all();
         const count = (s: Scope) => all.filter((r) => r.scope === s).length;
         return say(
-          `guard: ${cfg.disabled ? "disabled" : enabled ? "on" : "off"} | model=${cfg.model} key=${process.env.OPENAI_API_KEY ? "set" : "unset"} trusted=${trusted} | ` +
+          `guard: ${cfg.disabled ? "disabled" : enabled ? "on" : "off"} | model=${cfg.model} key=${process.env.GUARD_OPENAI_API_KEY ? "set" : "unset"} trusted=${trusted} | ` +
             `rules: session ${count("session")} / project ${count("project")} / global ${count("global")} / repo ${count("repo")} | blocks ${totalBlocks}`,
         );
       }

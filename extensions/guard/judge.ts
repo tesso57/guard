@@ -144,8 +144,8 @@ export function buildRequest(cfg: Config, req: JudgeRequest) {
 }
 
 export async function callDecisions(cfg: Config, body: unknown, signal?: AbortSignal): Promise<Answer[]> {
-  const key = process.env.OPENAI_API_KEY;
-  if (!key) throw new Error("OPENAI_API_KEY is not set");
+  const key = process.env.GUARD_OPENAI_API_KEY;
+  if (!key) throw new Error("GUARD_OPENAI_API_KEY is not set");
   let lastErr: Error | undefined;
   for (let attempt = 0; attempt < 2; attempt++) {
     const timeout = AbortSignal.timeout(cfg.timeoutMs);

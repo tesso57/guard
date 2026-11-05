@@ -11,11 +11,13 @@ It uses the [OpenAI Decisions API](https://platform.openai.com/docs/guides/decis
 pi install git:github.com/tesso57/guard
 ```
 
-Set `OPENAI_API_KEY`, then start pi:
+Set `GUARD_OPENAI_API_KEY`, then start pi:
 
 ```bash
-export OPENAI_API_KEY=sk-...
+export GUARD_OPENAI_API_KEY=sk-...
 ```
+
+This key is used only by guard, independently of pi's `OPENAI_API_KEY`. guard does not fall back to `OPENAI_API_KEY`.
 
 Without a key, guard runs in **rules-only mode**: the deterministic checks and your remembered rules still apply, and every call that would need a model judgement asks you first (or is blocked in modes without a UI).
 
@@ -136,6 +138,7 @@ Environment variables override the config file:
 
 | Variable | What it sets |
 |---|---|
+| `GUARD_OPENAI_API_KEY` | The API key used only by guard |
 | `RISK_MODEL` | The model used for judgement |
 | `RISK_TIMEOUT_MS` | The judgement timeout, in milliseconds |
 | `RISK_CONFIRM_AT` | The score at which a call needs confirmation |

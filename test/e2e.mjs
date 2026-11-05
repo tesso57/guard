@@ -75,7 +75,7 @@ writeFileSync(join(AGENT, "models.json"), JSON.stringify({ providers: { mock: { 
 const child = spawn(
   process.execPath,
   [fileURLToPath(new URL("../node_modules/@earendil-works/pi-coding-agent/dist/cli.js", import.meta.url)), "-p", "--mode", "json", "--no-session", "--offline", "--provider", "mock", "--model", "mock-1", "build the project"],
-  { cwd: PROJ, env: { ...process.env, PI_CODING_AGENT_DIR: AGENT, OPENAI_BASE_URL: url, OPENAI_API_KEY: "sk-test-e2e" } },
+  { cwd: PROJ, env: { ...process.env, PI_CODING_AGENT_DIR: AGENT, OPENAI_BASE_URL: url, GUARD_OPENAI_API_KEY: "sk-test-e2e" } },
 );
 let out = "", err = "";
 child.stdout.on("data", (d) => (out += d));

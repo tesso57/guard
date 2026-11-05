@@ -957,7 +957,8 @@ const srv = http.createServer((req, res) => {
 }).listen(0);
 await new Promise((r) => srv.on("listening", r));
 process.env.OPENAI_BASE_URL = `http://127.0.0.1:${(srv.address() as any).port}/v1`;
-process.env.OPENAI_API_KEY = "sk-test-0123456789abcdef0123";
+process.env.GUARD_OPENAI_API_KEY = "sk-test-0123456789abcdef0123";
+process.env.OPENAI_API_KEY = "sk-test-pi-only";
 
 const lastCall = (body: any) => body.input[body.input.length - 1];
 const guardContext = (body: any) => JSON.parse(body.input[body.input.length - 2].output);
@@ -1027,7 +1028,7 @@ ok("int: session rule recorded in branch", branch.some((e) => e.customType === "
 const req1 = calls[0].body;
 ok("int: request has developer + user intent + guard context + function_call", req1.input[0].role === "developer" && req1.input.some((i: any) => i.role === "user" && JSON.stringify(i).includes("run the tests")) && guardContext(req1).cwd === PROJ && lastCall(req1).type === "function_call");
 ok("int: cwd is not inside the agent-controlled arguments", !("__cwd" in JSON.parse(lastCall(req1).arguments)));
-ok("int: auth header + model + cache key", calls[0].auth.startsWith("Bearer sk-") && req1.model === "gpt-6-luna" && req1.prompt_cache_key === "guard:sess-1");
+ok("int: auth header + model + cache key", calls[0].auth === `Bearer ${process.env.GUARD_OPENAI_API_KEY}` && req1.model === "gpt-6-luna" && req1.prompt_cache_key === "guard:sess-1");
 calls = [];
 responder = (b) => ({ answers: answersFor([1, 0, 0, 0, 0])(b) });
 ok("int: npm run lint -- --fix → rule-allow with light check", (await run("bash", { command: "npm run lint -- --fix" })) === undefined && calls.length === 1 && calls[0].body.questions.length === 4);
@@ -1057,14 +1058,16 @@ calls = [];
 ok("int: same push via git -C → rule-deny without API", (await run("bash", { command: "git -C . push origin main" }))?.block === true && calls.length === 0);
 
 // no key / no UI
-const key = process.env.OPENAI_API_KEY;
-delete process.env.OPENAI_API_KEY;
+const key = process.env.GUARD_OPENAI_API_KEY;
+delete process.env.GUARD_OPENAI_API_KEY;
+calls = [];
 hasUI = false;
 ok("int: no key + no UI → block (fail closed)", (await run("bash", { command: "make deploy" }))?.block === true);
 hasUI = true;
 selectScript = [["this time only"]];
 ok("int: no key + UI → confirm", (await run("bash", { command: "make deploy" })) === undefined);
-process.env.OPENAI_API_KEY = key;
+ok("int: pi's OPENAI_API_KEY is not used as a fallback", calls.length === 0);
+process.env.GUARD_OPENAI_API_KEY = key;
 
 // API error → confirm
 responder = () => ({ status: 500 });
