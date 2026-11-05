@@ -32,7 +32,7 @@ Without a key, guard runs in **rules-only mode**: the deterministic checks and y
 | 5 | Safe list, which only covers reads **inside the project** (or public system directories such as `/usr`): read-only bash commands (judged by command **and options**, so `git log --output=…` or `sort -o` are not read-only; read-only `git` only in trusted repositories whose `.git/config` runs no commands, and never after `cd`), `mkdir`/`touch` of ordinary project paths, and edits to ordinary files inside the project | Allow, without calling the API |
 | 6 | Decisions API | Allow / confirm / block |
 
-The built-in read tools (`read`, `grep`, `find`, `ls`) skip the model only for paths inside the project; anywhere else they are judged like any other call. Paths are resolved exactly as pi resolves them (`file://` URLs, `~`, unicode spaces), symlinks are followed even when their target does not exist yet, and `..` is applied after symlinks as the kernel does. When pi runs in your home directory (or above), nothing counts as a plain project read or edit.
+By default, the built-in read tools (`read`, `grep`, `find`, `ls`) skip the model only for paths inside the project or public system directories such as `/usr`; elsewhere they are judged like any other call. `read` must name an existing file to use this shortcut. Paths are resolved using pi's path conventions (`file://` URLs, `~`, unicode spaces). Project and home directory aliases such as macOS's `/var` → `/private/var` are recognized, symlinks are followed even when their target does not exist yet, and `..` is applied after symlinks as the kernel does. When pi runs in your home directory (or above), nothing counts as a plain project read or edit.
 
 If the API call fails, the model refuses to answer, or the input had to be truncated, guard takes the safe side: it asks you to confirm, or blocks the call when there is no UI.
 
@@ -43,9 +43,9 @@ guard sends the Decisions API:
 - your past decisions
 - the call being judged
 
-It never sends the assistant's own text or tool outputs. This limits prompt injection. File contents guard attaches are passed as an untrusted tool output, never as your words. When bash runs a script that was written or edited earlier, guard attaches what the script will contain, including changes made by earlier calls in the same assistant message that have not run yet; running such a file always asks you first. When a test runner, build tool or interpreter (`npm`, `pytest`, `make`, `python`, `sh`, …) runs, guard attaches the script it is given and every project file changed in this session (by any tool, including bash), and does a full judgement, even if an allow rule matches.
+It never sends the assistant's own text or tool outputs. This limits prompt injection. File contents guard attaches are passed as an untrusted tool output, never as your words. When bash runs a script that was written or edited earlier, guard attaches what the script will contain, including changes made by earlier calls in the same assistant message that have not run yet. Running a file changed earlier in the same message requires confirmation even if the model would otherwise allow it; changes from earlier messages force a full judgement but do not always require confirmation. When a test runner, build tool or interpreter (`npm`, `pytest`, `make`, `python`, `sh`, …) runs, guard collects the script it is given, known project files changed in this session, and up to 20 project files changed in the last day. Known session changes or changes guard cannot enumerate (such as a checkout) force a full judgement, even if an allow rule matches. Attachments are limited to 20 files and a 200,000-character budget; if collected attachments exceed those limits, guard asks for confirmation. Files larger than the per-field limit are truncated, which also requires confirmation.
 
-All tool calls of an assistant message are sent to the model in parallel as soon as the message ends. pi judges every call of a message before it runs any of them, so when an earlier call in the same message may change files (anything but a pure read), later calls get no shortcuts: no safe list, no skipped model, no allow rule without a full judgement. guard repeats every deterministic check at `tool_call` and reuses the model's verdict only if the input and attachments are unchanged.
+As soon as an assistant message ends, guard starts assessing its tool calls in parallel, calling the model only where needed. pi judges every call of a message before it runs any of them, so when an earlier call in the same message may change files in ways guard cannot safely predict, later calls get no shortcuts: no safe list, no skipped model, no allow rule without a full judgement. Plain edits to ordinary project files and safe `mkdir`/`touch` calls do not disable these shortcuts, except when they change search ignore files. guard repeats every deterministic check at `tool_call` and reuses the model's verdict only if the input and attachments are unchanged.
 
 Recursive content searches (`grep -r` in any spelling, `rg`, `git grep`, pi's `grep` tool) ask first when the searched tree contains `.env` files or keys, and are judged by the model when the tree is too large to check. Extracting archives where `.pi/` or `.agents/` could be created also asks first. Files that likely hold secrets are never sent to the judge; guard sends only their names.
 
@@ -114,7 +114,7 @@ Rule files are updated under a lock, so several pi processes can change rules at
 
 When a session rule has been used three times, guard suggests promoting it to the project scope.
 
-After 3 blocks in a row, or 20 blocks in total, guard stops the agent and tells you. The audit log is rotated at 5 MB.
+After 3 automatic blocks in a row, or 20 automatic blocks in total, guard stops the agent and tells you. Your own denials in the approval dialog do not count toward these limits. The audit log is rotated at 5 MB.
 
 ## Configuration
 
@@ -143,7 +143,7 @@ Environment variables override the config file:
 | `RISK_TIMEOUT_MS` | The judgement timeout, in milliseconds |
 | `RISK_CONFIRM_AT` | The score at which a call needs confirmation |
 | `RISK_SKIP_TOOLS` | Tools that skip the model judgement |
-| `OPENAI_BASE_URL` | The API endpoint, for example a gateway |
+| `OPENAI_BASE_URL` | The API endpoint, for example a gateway (not guard-specific) |
 | `RISK_DISABLE=1` | Turns guard off completely |
 
 Load guard last. If another extension rewrites a tool call's input after guard has judged it, guard detects the change and warns you.
@@ -168,3 +168,7 @@ npm run check
 - an end-to-end test that runs the real pi against a mock model and a mock Decisions API
 
 GitHub Actions (`.github/workflows/ci.yml`) runs the same checks on the current LTS.
+
+## License
+
+[MIT](LICENSE) © 2026 tesso57

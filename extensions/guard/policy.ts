@@ -6,7 +6,7 @@
  */
 import { homedir, userInfo } from "node:os";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 import { hasGluedPathValue, innerCommands, INTERPRETER_NAMES, isLongOption, isReadOnlyArgv, isShell, nonFlags, normalizeArgv, type Parsed, parseShell } from "./shell.ts";
 import { containsProtectedRoot, expandGlobFully, gitConfigIsSafe, globHitsOptionLikeName, globMayReach, ignoreFilesReinclude, isFreelyReadable, isHardLinked, isHomeOrAncestor, isInside, isRiskyProjectFile, memo, pathLikeTokens, pathVariants, protectedReason, protectedRoots, realPath, resolvePath, secretFilesUnder, sensitiveReason } from "./paths.ts";
 
@@ -490,7 +490,7 @@ export function hardDeny(tool: string, input: any, cwd: string, roots: string[],
         if (r) return r;
       }
     const resolveAll = (b: string, t: string) => [...pathVariants(b, t), ...(hasGlob(t) ? globTargets(b, t) : [])];
-    const outerRoots = roots.filter((r) => !isInside(r, cwd));
+    const outerRoots = roots.filter((r) => !isInside(realPath(r), realPath(cwd)));
     // Wildcards are checked against guard's state by pattern, so a skipped or truncated expansion cannot hide them
     const globInto = (b: string, t: string, rs: string[]) => hasGlob(t) && globMayReach(b, t, rs).into;
     const globAround = (b: string, t: string, rs: string[]) => hasGlob(t) && globMayReach(b, t, rs).around;
@@ -562,7 +562,7 @@ export function hardDeny(tool: string, input: any, cwd: string, roots: string[],
         const named = [...new Set([...nonFlags(a), ...nonFlags(s.argv)])].filter((t) => !(PLACERS.has(a[0]) && t === nonFlags(a).at(-1)));
         // The project's own .pi/.agents are guarded by the explicit write checks; counting the project as their
         // parent would block every `git add .` or `prettier --write .` in projects that have .pi/guard.json
-        const hits = (p: string) => containsProtectedRoot(p, outerRoots) || (protectedReason(p, roots) && !isInside(p, cwd));
+        const hits = (p: string) => containsProtectedRoot(p, outerRoots) || (protectedReason(p, roots) && !isInside(realPath(p), realPath(cwd)));
         if (named.some((t) => bases.some((b) => globInto(b, t, outerRoots) || globAround(b, t, outerRoots) || resolveAll(b, t).some(hits))))
           return "changes guard's or pi's state, or a directory that contains it";
         // Values glued to options (-C../../.pi, -t../x, --directory=../x)
@@ -572,7 +572,7 @@ export function hardDeny(tool: string, input: any, cwd: string, roots: string[],
         // (git mv x .pi/extensions/, git checkout -- .pi/x, npm i --prefix .pi/extensions). Directories that merely
         // contain them (`.`, `src/..`) stay allowed.
         // Read-only commands that change files only through redirects are covered by the redirect-target checks
-        const innerRoots = isReadOnlyArgv(s.argv) ? [] : roots.filter((r) => isInside(r, cwd));
+        const innerRoots = isReadOnlyArgv(s.argv) ? [] : roots.filter((r) => isInside(realPath(r), realPath(cwd)));
         const inInner = (p: string) => !!protectedReason(p, innerRoots);
         if (named.some((t) => bases.some((b) => globInto(b, t, innerRoots) || resolveAll(b, t).some(inInner))) || optionPaths.some(inInner))
           return "changes the project's .pi/ or .agents/ (code and settings pi loads)";
@@ -587,7 +587,7 @@ export function hardDeny(tool: string, input: any, cwd: string, roots: string[],
   // Names in quoted text and in here-documents fed to cat (commit messages, docs) are not paths
   const lower = nameScanText(cmd, parsed).toLowerCase();
   // The project's own .pi/ is covered by the write checks above; naming it (git add .pi/x) is not a change to it
-  const outer = roots.filter((r) => !isInside(r, cwd));
+  const outer = roots.filter((r) => !isInside(realPath(r), realPath(cwd)));
   const touchesProtected =
     reads.some((p) => protectedReason(p, outer)) || outer.some((r) => lower.includes(r.toLowerCase())) || PROTECTED_MARKERS.some((m) => lower.includes(m));
   if (touchesProtected && !strictlyReadOnly(parsed, writes)) return "may modify a protected path (guard rules, pi state, extensions or settings)";
@@ -656,7 +656,7 @@ function relativeHasHidden(root: string, file: string): boolean {
 export function sensitive(tool: string, input: any, cwd: string, roots: string[], parsed?: Parsed): string | undefined {
   const { reads, writes } = inputPaths(tool, input, cwd, parsed);
   // The project's own .pi/ holds project files (prompts, guard.json); reading them is fine
-  const outerRoots = roots.filter((r) => !isInside(r, cwd));
+  const outerRoots = roots.filter((r) => !isInside(realPath(r), realPath(cwd)));
   for (const p of [...reads, ...writes]) {
     const r = sensitiveReason(p);
     if (r) return r;
@@ -768,7 +768,8 @@ export function safeAllow(tool: string, input: any, cwd: string, opts: { trusted
       if (isHardLinked(w)) return false;
       // Symlinks that leave the project (docs/notes.md -> ~/.bashrc) are not plain project edits
       if (!isInside(r, realCwd) || r.toLowerCase() === realCwd.toLowerCase()) return false;
-      return !isRiskyProjectFile(r.slice(realCwd.length + 1)) && !isRiskyProjectFile(w.slice(cwd.length + 1));
+      const lexicalBase = isInside(w, cwd) ? cwd : realCwd;
+      return !isRiskyProjectFile(relative(realCwd, r)) && !isRiskyProjectFile(relative(lexicalBase, w));
     });
   }
   return false;

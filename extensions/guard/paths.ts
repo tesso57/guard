@@ -282,7 +282,7 @@ export function isInside(child: string, parent: string): boolean {
 
 /** True for `/`, the home directory and every directory between them. */
 export function isHomeOrAncestor(p: string): boolean {
-  return isInside(HOME, p);
+  return isInside(HOME, p) || isInside(realPath(HOME), realPath(p));
 }
 
 /** System locations whose contents are public on a normal machine. */
@@ -307,15 +307,18 @@ export function isHardLinked(p: string): boolean {
  */
 export function isFreelyReadable(p: string, cwd: string): boolean {
   if (p === UNKNOWN_PATH) return false;
-  const ok = (x: string) =>
-    (!isHomeOrAncestor(cwd) && isInside(x, cwd) && isInside(x, realPath(cwd))) || PUBLIC_DIRS.some((d) => isInside(x, d));
-  return ok(p) && ok(realPath(p)) && !isHardLinked(p);
+  const real = realPath(p);
+  const project = !isHomeOrAncestor(cwd) &&
+    (isInside(p, cwd) || isInside(p, realPath(cwd))) && isInside(real, realPath(cwd));
+  const publicPath = PUBLIC_DIRS.some((d) => isInside(p, d) && isInside(real, realPath(d)));
+  return (project || publicPath) && !isHardLinked(p);
 }
 
 function sensitiveOne(abs: string): string | undefined {
   if (abs.startsWith("/__guard_unparseable_file_url__/")) return "unparseable file:// URL";
   if (abs === UNKNOWN_PATH) return undefined;
-  const rel = isInside(abs, HOME) ? relative(HOME, abs) : undefined;
+  const home = isInside(abs, HOME) ? HOME : realPath(HOME);
+  const rel = isInside(abs, home) ? relative(home, abs) : undefined;
   const first = rel?.split(sep)[0];
   if (rel !== undefined && first) {
     if ([".ssh", ".aws", ".gnupg", ".gpg", ".kube", ".docker", ".azure", ".password-store", ".terraform.d", ".m2", ".gradle"].includes(first)) return `~/${first}`;

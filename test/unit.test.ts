@@ -111,6 +111,32 @@ const O = { trusted: true, touched: new Set<string>() };
   ok("sensitive: .env.example ok", !sensitive("read", { path: ".env.example" }, PROJ, roots));
 }
 
+// ---------- symlinked project roots (including macOS /var -> /private/var) ----------
+{
+  const { clearPathCache, isFreelyReadable, isHomeOrAncestor, realPath, sensitiveReason } = await import("../extensions/guard/paths.ts");
+  const aliases = mkdtempSync(join(tmpdir(), "guard-alias-"));
+  const alias = join(aliases, "project-link-with-a-different-length");
+  symlinkSync(PROJ, alias);
+  const aliasRoots = protectedRoots(alias, join(AGENT, "sessions"));
+  const safe = (command: string) => safeAllow("bash", { command }, alias, O, P(command));
+  const hd = (command: string) => hardDeny("bash", { command }, alias, aliasRoots, P(command));
+  clearPathCache();
+  ok("alias: lexical and physical project reads are freely readable",
+    isFreelyReadable(join(alias, "src/a.ts"), alias) && isFreelyReadable(join(realPath(PROJ), "src/a.ts"), alias));
+  ok("alias: ordinary edits stay safe", safeAllow("edit", { path: "src/a.ts" }, alias, O));
+  ok("alias: ordinary mkdir stays safe", safe("mkdir -p src/generated"));
+  ok("alias: wildcard reads stay safe", safe("cat *.md"));
+  ok("alias: risky project edits remain unsafe", !safeAllow("edit", { path: "package.json" }, alias, O));
+  ok("alias: symlinks out of the project remain unsafe", !isFreelyReadable(join(alias, "keys/config"), alias));
+  ok("alias: symlinks to SSH config remain sensitive", !!sensitiveReason(join(alias, "keys/config")));
+  ok("alias: physical home remains a home ancestor", isHomeOrAncestor(realPath(HOME)));
+  ok("alias: project config reads with plain redirects are not hard-denied", !hd("ls .pi > out.txt"));
+  ok("alias: writes to project config remain blocked", !!hd("echo x > .pi/settings.json"));
+  ok("alias: writes to physical project config remain blocked", !!hd(`echo x > ${realPath(PROJ)}/.pi/settings.json`));
+  ok("alias: writes to external guard state remain blocked", !!hd(`echo x > ${AGENT}/guard/rules.jsonl`));
+  clearPathCache();
+}
+
 // ---------- review 2, item 3: rule normalization ----------
 {
   const pat = (cmd: string) => derivePatterns("bash", { command: cmd }, PROJ, P(cmd));
@@ -410,6 +436,8 @@ const O = { trusted: true, touched: new Set<string>() };
   ok("r6: grep -r over the project is sensitive (.env)", !!sens("grep -r sk- ."));
   ok("r6: rg -uu is sensitive (.env)", !!sens("rg -uu sk-live ."));
   ok("r6: pi grep tool over the project is sensitive (.env)", !!sensitive("grep", { pattern: "sk-", glob: ".env" }, PROJ, roots));
+  // Name an existing, secret-free directory; otherwise guard conservatively checks the project root.
+  mkdirSync(join(PROJ, "src"), { recursive: true });
   ok("r6: rg without hidden/no-ignore stays safe", safe("rg foo src") && !sens("rg foo src"));
   ok("r6: grep -r in a subdirectory without secrets stays fine", !sens("grep -rn TODO docs"));
   // P1-2: git config edge cases
