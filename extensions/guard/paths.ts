@@ -396,6 +396,8 @@ export function isRiskyProjectFile(rel: string): boolean {
   return (
     // Names that look like options (--pre=sh) turn into options when a wildcard expands to them
     parts.some((x) => x.startsWith("-")) ||
+    // Names carrying shell syntax become code when a wildcard hands them to something that evaluates them
+    /\$\(|`|[\n\r]/.test(rel) ||
     parts.slice(0, -1).some((d) => RISKY_DIRS.has(d)) ||
     RISKY_FILES.has(b) ||
     /^\.env(\..+)?$/.test(b) ||
@@ -548,6 +550,10 @@ export function recentlyChangedFiles(root: string, limit = 20): string[] {
 const DANGEROUS_GIT_KEY = [
   /^core\.(fsmonitor|hookspath|sshcommand|askpass|gitproxy|alternaterefscommand|worktree)$/,
   /^diff\.external$/,
+  // Credential helpers and lazy fetches (partial clones) can run programs during read-only git commands
+  /^credential\.(.*\.)?helper$/,
+  /^extensions\.partialclone$/,
+  /^remote\..*\.(promisor|partialclonefilter)$/,
   /^(filter|diff|merge|gpg|credential|uploadpack|receive|remote|url)\..*\.(clean|smudge|process|command|textconv|program|driver|uploadpack|receivepack|helper)$/,
   /^gpg\.program$/,
   /\.(command|program|textconv|cmd)$/,

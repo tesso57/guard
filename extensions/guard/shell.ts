@@ -16,6 +16,8 @@ type Sub = {
   reads: string[];
   /** Bodies of here-documents fed to this command's stdin. */
   heredocs: string[];
+  /** Indexes in argv of words bash expands as wildcards */
+  globArgs?: number[];
 };
 
 export type Parsed = {
@@ -99,6 +101,7 @@ export function parseShell(cmd: string, depth = 0): Parsed {
     // An empty word that was never quoted is not a word at all (bash drops it)
     else if (tok !== "" || tokQuoted) cur.argv.push(tok);
     if (globbed && tok !== "[" && tok !== "]") {
+      if (!pendingRedirect) (cur.globArgs ??= []).push(cur.argv.length - 1);
       globs.push(tok);
       // [=c=], [.c.] and [:class:] inside brackets are not understood by node's matcher
       if (/\[[=.:]/.test(tok)) dyn("character class or equivalence class in a wildcard");
@@ -745,6 +748,11 @@ export function isReadOnlyArgv(raw: string[]): boolean {
       }
       return true;
     }
+    case "md5sum":
+    case "sha256sum":
+    case "shasum":
+      // --check opens the paths listed inside the checksum file
+      return !hasShort(a, "c") && !hasLong(a, "--check");
     case "hostname":
       return nonFlags(a).length === 0 && !hasShort(a, "F") && !hasShort(a, "b") && !hasLong(a, "--file", "--boot");
     case "npm":

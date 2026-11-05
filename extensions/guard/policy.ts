@@ -552,7 +552,11 @@ export function hardDeny(tool: string, input: any, cwd: string, roots: string[],
       const a = a0;
       // Staging or unstaging (git add .pi/x, git rm --cached) does not change files
       const gitSub = a[0] === "git" ? a.find((t, k) => k > 0 && !t.startsWith("-")) : undefined;
-      const indexOnly = gitSub === "add" || gitSub === "stage" || (gitSub === "rm" && a.includes("--cached"));
+      const indexOnly =
+        gitSub === "add" || gitSub === "stage" || gitSub === "commit" ||
+        (gitSub === "rm" && a.includes("--cached")) ||
+        (gitSub === "restore" && a.some((t) => t === "--staged" || /^-[A-Za-z]*S/.test(t)) && !a.some((t) => t === "--worktree" || /^-[A-Za-z]*W/.test(t))) ||
+        (gitSub === "reset" && !a.some((t) => ["--hard", "--merge", "--keep"].includes(t)));
       if (changing && !indexOnly) {
         // Raw argv too, so location values (git -C x, npm --prefix x) are seen; a copy's destination is checked above
         const named = [...new Set([...nonFlags(a), ...nonFlags(s.argv)])].filter((t) => !(PLACERS.has(a[0]) && t === nonFlags(a).at(-1)));
@@ -567,7 +571,8 @@ export function hardDeny(tool: string, input: any, cwd: string, roots: string[],
         // The project's own .pi/.agents (code pi loads): any changing command naming a path inside them
         // (git mv x .pi/extensions/, git checkout -- .pi/x, npm i --prefix .pi/extensions). Directories that merely
         // contain them (`.`, `src/..`) stay allowed.
-        const innerRoots = roots.filter((r) => isInside(r, cwd));
+        // Read-only commands that change files only through redirects are covered by the redirect-target checks
+        const innerRoots = isReadOnlyArgv(s.argv) ? [] : roots.filter((r) => isInside(r, cwd));
         const inInner = (p: string) => !!protectedReason(p, innerRoots);
         if (named.some((t) => bases.some((b) => globInto(b, t, innerRoots) || resolveAll(b, t).some(inInner))) || optionPaths.some(inInner))
           return "changes the project's .pi/ or .agents/ (code and settings pi loads)";
@@ -590,6 +595,9 @@ export function hardDeny(tool: string, input: any, cwd: string, roots: string[],
 }
 
 const INNER_NAME = /(?:^|[^\w.-])\.(?:pi|agents)(?:[/\\'"\s)]|$)/;
+
+/** Commands whose operands are all files (or a search pattern), so a wildcard expanding to any name only names files. */
+const GLOB_FILE_COMMANDS = new Set(["cat", "head", "tail", "wc", "ls", "grep", "egrep", "fgrep", "rg", "nl", "stat", "file", "md5sum", "sha256sum", "shasum", "du", "sort", "echo", "basename", "dirname", "realpath", "readlink"]);
 
 const CONTENT_SEARCH = new Set(["rg", "ag", "ack", "grep", "egrep", "fgrep"]);
 const isGrepFamily = (h: string) => h === "grep" || h === "egrep" || h === "fgrep";
@@ -686,7 +694,7 @@ export function sensitive(tool: string, input: any, cwd: string, roots: string[]
     }
     const lower = nameScanText(cmd, parsed).toLowerCase();
     if (PROTECTED_MARKERS.some((m) => lower.includes(m))) return "reads guard or pi internal state";
-    for (const raw of parsed.subcommands) {
+    for (const [si, raw] of parsed.subcommands.entries()) {
       // `env` alone prints the environment; it is only a wrapper when a command follows
       const rawHead = basename(raw[0] ?? "");
       if ((rawHead === "env" || rawHead === "printenv") && raw.slice(1).every((t) => t.startsWith("-") || /^[A-Za-z_]\w*=/.test(t))) return "prints all environment variables";
@@ -695,6 +703,7 @@ export function sensitive(tool: string, input: any, cwd: string, roots: string[]
       const args = a.slice(1);
       if ((head === "export" && (args.length === 0 || args.includes("-p"))) || (head === "set" && args.length === 0) || (head === "declare" && args.some((t) => /^-[a-z]*[xp]/.test(t)))) return "prints the environment";
       if (head === "jq" && args.some((t) => t.includes("$ENV") || /\benv\b/.test(t))) return "reads environment variables";
+      if ((head === "jq" || head === "ps") && parsed.subs[si]?.globArgs?.length) return "a wildcard argument may make it print environment variables";
       // Searching file contents across ~ or / reaches every secret in the home directory
       if (CONTENT_SEARCH.has(head) && (!isGrepFamily(head) || recursiveGrep(args))) {
         // Any directory this command may search, after cd and symlinks
@@ -719,6 +728,9 @@ export function safeAllow(tool: string, input: any, cwd: string, opts: { trusted
     // expand somewhere guard would have to re-derive, so that combination is never a shortcut
     if (parsed.globs.length && parsed.subcommands.some((x) => ["cd", "pushd", "popd"].includes(normalizeArgv(x).argv[0]))) return false;
     if (parsed.globs.some((g) => globHitsOptionLikeName(cwd, g))) return false;
+    // Wildcards expand to file names the agent can choose (`touch 'y[$(sh<p)]'` then `[ -v y* ]`), so they are only a
+    // shortcut where every operand is a file anyway; elsewhere a name can become a program, a format or a subscript
+    if (parsed.subs.some((x) => x.globArgs?.length && !GLOB_FILE_COMMANDS.has(normalizeArgv(x.argv).argv[0]))) return false;
     // Here-documents hide text from the parser on purpose; if guard and bash ever disagree on where a body ends,
     // the difference is a hidden command. Commands with them are always judged (they are almost always writes anyway)
     if (parsed.heredocBodies.length || parsed.subs.some((x) => x.heredocs.length)) return false;

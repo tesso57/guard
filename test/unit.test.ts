@@ -882,6 +882,35 @@ const O = { trusted: true, touched: new Set<string>() };
   ok("r22: git show HEAD:README.md is not sensitive", !sens("git show HEAD:README.md"));
 }
 
+// ---------- review 23 ----------
+{
+  const { clearPathCache, gitConfigIsSafe } = await import("../extensions/guard/paths.ts");
+  const P23 = mkdtempSync(join(tmpdir(), "guard-p23-"));
+  const r23 = protectedRoots(P23, join(AGENT, "sessions"));
+  const safe = (c: string) => (clearPathCache(), safeAllow("bash", { command: c }, P23, O, P(c)));
+  const hd = (c: string) => (clearPathCache(), hardDeny("bash", { command: c }, P23, r23, P(c)));
+  const sens = (c: string) => (clearPathCache(), sensitive("bash", { command: c }, P23, r23, P(c)));
+  // P0-1: wildcards only for commands whose operands are files
+  ok("r23: a file name with $( is not a plain write", !safeAllow("write", { path: "y[$(sh<p)]", content: "x" }, P23, O));
+  writeFileSync(join(P23, "y[$(sh<p)]"), "x");
+  for (const c of ["[ -v y* ]", "test -v y*", "jq -n [e]nv", "ps ??????", "printf y*", "date +y*", "sed -n y* f"]) ok(`r23: wildcard outside file operands is not safe: ${c}`, !safe(c));
+  ok("r23: jq/ps with a wildcard is sensitive", !!sens("jq -n [e]nv") && !!sens("ps ??????"));
+  writeFileSync(join(P23, "a.md"), "x");
+  for (const c of ["cat *.md", "wc -l *.md", "rg TODO *.md", "ls *.md", "head -n 3 *.md"]) ok(`r23: file wildcards stay safe: ${c}`, safe(c));
+  ok("r23: Next.js style [id] paths are still plain writes", safeAllow("write", { path: "app/[id]/page.tsx", content: "x" }, P23, O));
+  // P2: checksum check files, credential helpers
+  ok("r23: md5sum -c is not read-only", !isReadOnlyArgv(["md5sum", "-c", "sums"]) && !isReadOnlyArgv(["sha256sum", "--check", "s"]) && isReadOnlyArgv(["sha256sum", "f"]));
+  const G = mkdtempSync(join(tmpdir(), "guard-g23-"));
+  mkdirSync(join(G, ".git"));
+  writeFileSync(join(G, ".git", "HEAD"), "ref: refs/heads/main\n");
+  writeFileSync(join(G, ".git", "config"), "[credential]\n\thelper = !sh x\n");
+  ok("r23: credential.helper makes git config unsafe", (clearPathCache(), !gitConfigIsSafe(G)));
+  // P2: false positives of the project .pi hard-deny
+  for (const c of ['git commit -m ".pi/guard.json: tighten rules"', "git commit -m tweak .pi/guard.json", "git restore --staged .pi/guard.json", "git reset -- .pi/guard.json", "ls .pi > /tmp/list.txt", "grep -rn foo .pi > out.txt"])
+    ok(`r23: not hard-denied: ${c}`, !hd(c));
+  for (const c of ["git restore .pi/guard.json", "git restore --staged --worktree .pi/x", "git reset --hard -- .pi"]) ok(`r23: still hard-denied: ${c}`, !!hd(c));
+}
+
 // ---------- evaluate ----------
 {
   const score = (probs: number[], conf = 0.9) => ({ type: "score", name: "risk", score: probs.reduce((s, p, i) => s + p * i, 0), confidence: conf, probabilities: probs.map((p, i) => ({ value: i, probability: p })) });
