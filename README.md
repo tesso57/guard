@@ -25,7 +25,7 @@ Without a key, guard runs in **rules-only mode**: the deterministic checks and y
 
 | Order | Check | Result |
 |---|---|---|
-| 1 | Hard deny: recursive deletion of `/`, `~` or system directories, `curl … \| sh`, writes to `authorized_keys`, and **any change to guard's rules, pi's state and session logs, or the project resources pi loads (`.pi/`, `.agents/`)** | Block. No rule or dialog can override it |
+| 1 | Hard deny: recursive deletion of `/`, `~` or system directories, `curl … \| sh`, writes to `authorized_keys`, and **any change to guard's rules, pi's state and session logs, or the project resources pi loads (`.pi/`, `.agents/`)** | Block. No rule can override it; only you can, when the agent asks you and retries (see below) |
 | 2 | Deny and ask rules, in any scope | Block / confirm |
 | 3 | Allow rules. For bash, every subcommand must match and the command must have no dynamic parts such as `$()` or variable expansion | Allow, after a light check for exfiltration, actions outside your request, and text aimed at the judge |
 | 4 | Sensitive paths (`~/.ssh`, `.env`, key files, `/proc/*/environ`, …, after resolving symlinks and globs), printing the environment, and content searches across `~` | Confirm |
@@ -58,6 +58,10 @@ Where guard cannot pin something down, it errs on the side of blocking: wildcard
 When an earlier call in the same message may swap whole directories (`git checkout`, `git pull`, extracting archives, `cp`, `rsync`, package installs), later calls that write ask you first, because neither guard nor the model can see what those directories will contain. Strings that look like secrets are redacted before anything is sent.
 
 Risk is scored on five levels, from 0 to 4. guard looks at the probability of the high-risk levels as well as the weighted average, so a split such as "45% catastrophic, 55% harmless" is still caught.
+
+## When guard blocks a call
+
+The agent is told why, and that it must not work around the check. If it really needs that exact call, it should explain why and ask you; if you agree, it runs the same call again and guard shows you a dialog (allow this time only / deny) instead of blocking. This applies to hard denies and to calls the model judged too dangerous, once per block; nothing is remembered. Calls blocked by your own deny rules stay blocked (remove the rule with `/guard rules`), and without a UI every block stays a block.
 
 ## Approval dialog
 

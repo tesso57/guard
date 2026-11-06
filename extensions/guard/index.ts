@@ -170,6 +170,8 @@ export default function (pi: ExtensionAPI) {
   /** True once an allowed call changed files in ways guard cannot list (git checkout, tar x, rsync, ...). */
   let opaqueChanges = false;
   const promoted = new Set<string>();
+  /** Calls guard blocked this session (tool + input); the same call again asks the user instead of blocking. */
+  const blockedOnce = new Set<string>();
   let consecutiveBlocks = 0;
   let totalBlocks = 0;
 
@@ -425,8 +427,12 @@ export default function (pi: ExtensionAPI) {
     return rule;
   }
 
-  function blockResult(reason: string) {
-    return { block: true as const, reason: `guard: ${reason}. Do not retry this call or try to work around the check; choose a safer approach or ask the user.` };
+  function blockResult(reason: string, retry: "ask-user" | "none" = "none") {
+    const next =
+      retry === "ask-user"
+        ? "Do not try to work around the check. If this exact call is really needed, explain to the user why and ask them; if they agree, run the same call again and guard will ask them to confirm it."
+        : "Do not try to work around the check; choose a safer approach or ask the user.";
+    return { block: true as const, reason: `guard: ${reason}. ${next}` };
   }
 
   function restoreState(ctx: ExtensionContext) {
@@ -442,7 +448,7 @@ export default function (pi: ExtensionAPI) {
     trusted = ctx.isProjectTrusted();
     store.load(ctx.cwd, trusted);
     store.resetSession();
-    modelMemo.clear(); siblingsById.clear(); judged.clear(); touched.clear(); promoted.clear(); verdictCache.clear();
+    modelMemo.clear(); siblingsById.clear(); judged.clear(); touched.clear(); promoted.clear(); verdictCache.clear(); blockedOnce.clear();
     opaqueChanges = false;
     consecutiveBlocks = totalBlocks = 0;
     for (const w of [...loaded.warnings, ...store.warnings]) ctx.ui.notify(`guard: ${w}`, "warning");
@@ -529,17 +535,39 @@ export default function (pi: ExtensionAPI) {
         }
       }
     };
-    const onBlocked = (reason: string) => {
+    const onBlocked = (reason: string, retry: "ask-user" | "none" = "none") => {
       consecutiveBlocks++;
       totalBlocks++;
       if (consecutiveBlocks >= cfg.escalateConsecutive || totalBlocks >= cfg.escalateTotal) {
         ctx.ui.notify(`guard: too many blocked calls (${consecutiveBlocks} in a row, ${totalBlocks} total). Stopped the agent.`, "error");
         consecutiveBlocks = 0;
         ctx.abort();
-        return { ...blockResult(reason), terminate: true };
+        return { ...blockResult(reason, retry), terminate: true };
       }
-      return blockResult(reason);
+      return blockResult(reason, retry);
     };
+
+    // The same call again after a block (hard-deny or the model): the agent asked the user, so the user decides now
+    if (a.action === "block" && a.source !== "rule-deny" && blockedOnce.has(hash) && ctx.hasUI) {
+      blockedOnce.delete(hash);
+      status(ctx, `guard: ${tool} was blocked before; asking`);
+      const again = await confirmDialog(ctx, {
+        title: `${tool}: guard BLOCKED this call before (${a.source === "hard-deny" ? "hard deny" : "too dangerous"})`,
+        body: `${what}\n\nWhy it was blocked: ${a.reasons.join("; ") || "-"}\n\nAllow it only if you asked for exactly this.`,
+        tool,
+        rememberAllow: false,
+        globalAllow: false,
+        projectName: basename(ctx.cwd),
+        timeoutMs: cfg.dialogTimeoutMs,
+      });
+      audit({ ...rec, final: again.decision === "allow" ? "run" : "blocked", choice: `${again.decision}:once`, event: "override" });
+      consecutiveBlocks = 0;
+      if (again.decision === "allow") {
+        onAllowed();
+        return;
+      }
+      return blockResult(again.reason ? `the user denied this call: ${again.reason}` : "the user denied this call");
+    }
 
     if (a.action === "allow") {
       status(ctx, `guard: ${tool} ok (${tag})`);
@@ -551,7 +579,9 @@ export default function (pi: ExtensionAPI) {
       status(ctx, `guard: ${tool} BLOCKED (${tag})`);
       ctx.ui.notify(`guard: blocked ${tool} — ${a.reasons.join("; ")}`, "error");
       audit({ ...rec, final: "blocked" });
-      return onBlocked(a.source === "hard-deny" ? `blocked (${a.reasons[0]})` : a.source === "rule-deny" ? "blocked by the user's deny rule" : "blocked as too dangerous");
+      if (a.source === "rule-deny") return onBlocked(`blocked by the user's deny rule (the user can remove it with /guard rules)`);
+      blockedOnce.add(hash);
+      return onBlocked(a.source === "hard-deny" ? `blocked (${a.reasons[0]})` : `blocked as too dangerous (${a.reasons.join("; ")})`, ctx.hasUI ? "ask-user" : "none");
     }
 
     status(ctx, `guard: ${tool} needs confirmation (${tag})`);
