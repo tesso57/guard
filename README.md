@@ -100,6 +100,20 @@ Rule files are updated under a lock, so several pi processes can change rules at
 { "deny": ["git push --force"], "ask": ["npm publish"] }
 ```
 
+## Tools from other extensions
+
+An extension can tell guard that one of its own tools is safe to run without a judgement, for example a notes extension's `notes_write`, whose arguments are text rather than commands:
+
+```ts
+pi.registerTool({ name: "notes_write", /* ... */ });
+
+pi.on("session_start", () => {
+  pi.events.emit("guard:trust-tool", { tool: "notes_write", by: "notes" });
+});
+```
+
+Emitting in `session_start` works whatever order the extensions load in; without guard installed, nobody listens and nothing happens. Vouched-for tools run without any check and are recorded in the audit log (source `extension`); `/guard rules` lists them. Built-in tools (`bash`, `write`, `edit`, `read`, …) cannot be vouched for, a name only counts once a tool with that name is registered, and tools of project-local extensions (`.pi/extensions`) count only in trusted projects. Only vouch for tools whose effects you are happy to allow unconditionally.
+
 ## Commands
 
 | Command | What it does |

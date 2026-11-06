@@ -19,7 +19,7 @@ import { audit, tail } from "./audit.ts";
 import { type Config, loadConfig } from "./config.ts";
 import { buildRequest, callDecisions, evaluate, type ModelVerdict } from "./judge.ts";
 import { clearPathCache, isFreelyReadable, isInside, protectedReason, protectedRoots, recentlyChangedFiles, resolvePath, sensitiveReason } from "./paths.ts";
-import { hardDeny, inputPaths, pathsStayInProject, safeAllow, sensitive, writesStayPlain } from "./policy.ts";
+import { BUILTIN_TOOLS, hardDeny, inputPaths, pathsStayInProject, safeAllow, sensitive, writesStayPlain } from "./policy.ts";
 import { type Decision, deriveDenyPatterns, derivePatterns, describeMatch, type Match, newId, type Rule, RuleStore, type Scope } from "./rules.ts";
 import { isReadOnlyArgv, normalizeArgv, type Parsed, parseShell } from "./shell.ts";
 import { confirmDialog, preview } from "./ui.ts";
@@ -174,6 +174,31 @@ export default function (pi: ExtensionAPI) {
   let totalBlocks = 0;
 
   const append = (type: string, data: unknown) => pi.appendEntry(type, data);
+
+  /**
+   * Tools other extensions vouch for (`pi.events.emit("guard:trust-tool", { tool, by })`), e.g. a notes extension's
+   * notes_write. They run without judgement. Extensions are code the user installed and run with full privileges anyway;
+   * built-in tools cannot be vouched for, and tools of project-local extensions count only in trusted projects.
+   */
+  const extensionTrust = new Map<string, string>();
+  pi.events.on("guard:trust-tool", (data) => {
+    const d = data as { tool?: unknown; by?: unknown } | undefined;
+    if (typeof d?.tool !== "string" || !d.tool || BUILTIN_TOOLS.has(d.tool)) return;
+    extensionTrust.set(d.tool, typeof d.by === "string" && d.by ? d.by.slice(0, 64) : "an extension");
+  });
+  function trustedByExtension(tool: string): string | undefined {
+    const by = extensionTrust.get(tool);
+    if (!by || BUILTIN_TOOLS.has(tool)) return undefined;
+    try {
+      const info = pi.getAllTools().find((t) => t.name === tool);
+      const src = info?.sourceInfo;
+      if (!src || src.path.startsWith("builtin:")) return undefined;
+      if (src.scope === "project" && !trusted) return undefined;
+      return by;
+    } catch {
+      return undefined;
+    }
+  }
 
   /** Earlier tool calls of the assistant message that contains callId, from the session branch. */
   function siblingsFromBranch(ctx: ExtensionContext, callId: string): ToolCallLike[] {
@@ -430,7 +455,7 @@ export default function (pi: ExtensionAPI) {
     if (m?.role !== "assistant" || !Array.isArray(m.content)) return;
     const calls: ToolCallLike[] = m.content.filter((c: any) => c?.type === "toolCall").map((c: any) => ({ id: c.id, name: c.name, arguments: c.arguments }));
     calls.forEach((c, i) => {
-      if (siblingsById.has(c.id)) return;
+      if (siblingsById.has(c.id) || trustedByExtension(c.name)) return;
       const siblings = calls.slice(0, i);
       siblingsById.set(c.id, siblings);
       // Warms modelMemo; the result itself is discarded and recomputed at tool_call
@@ -447,6 +472,12 @@ export default function (pi: ExtensionAPI) {
     if (cfg.disabled || !enabled) return;
     const tool = event.toolName;
     const input: any = event.input;
+    const vouched = trustedByExtension(tool);
+    if (vouched) {
+      siblingsById.delete(event.toolCallId);
+      audit({ session: ctx.sessionManager.getSessionId(), tool, preview: preview(tool, input), action: "allow", source: "extension", reasons: [`trusted by ${vouched}`], final: "run" });
+      return;
+    }
     const hash = stableHash([tool, input]);
     const siblings = siblingsById.get(event.toolCallId) ?? siblingsFromBranch(ctx, event.toolCallId);
     siblingsById.delete(event.toolCallId);
@@ -596,8 +627,11 @@ export default function (pi: ExtensionAPI) {
         const op = rest[0] ?? "list";
         if (op === "list") {
           const order: Scope[] = ["session", "repo", "project", "global"];
-          const lines = store.all().sort((a, b) => order.indexOf(a.scope) - order.indexOf(b.scope))
-            .map((r) => `[${r.scope}] ${r.decision.padEnd(5)} ${describeMatch(r.tool, r.match)}  (id ${r.id}, hits ${store.hitCount(r.id)}${r.expiresAt ? `, expires ${r.expiresAt.slice(0, 10)}` : ""})`);
+          const lines = [
+            ...[...extensionTrust.keys()].filter((t) => trustedByExtension(t)).map((t) => `[extension] allow tool ${t}  (trusted by ${extensionTrust.get(t)})`),
+            ...store.all().sort((a, b) => order.indexOf(a.scope) - order.indexOf(b.scope))
+              .map((r) => `[${r.scope}] ${r.decision.padEnd(5)} ${describeMatch(r.tool, r.match)}  (id ${r.id}, hits ${store.hitCount(r.id)}${r.expiresAt ? `, expires ${r.expiresAt.slice(0, 10)}` : ""})`),
+          ];
           if (!lines.length) return say("guard: no rules");
           if (!ctx.hasUI) return say(lines.join("\n"));
           const pick = await ctx.ui.select("Rules (select one to delete it)", [...lines, "Close"]);

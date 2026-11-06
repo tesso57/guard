@@ -1013,7 +1013,11 @@ const pi = {
   on: (e: string, f: Function) => (h[e] = f),
   registerCommand: (_n: string, c: any) => (command = c),
   appendEntry: (customType: string, data: any) => branch.push({ type: "custom", customType, data }),
+  events: { emit: (ch: string, d: unknown) => (busHandlers.get(ch) ?? []).forEach((f) => f(d)), on: (ch: string, f: (d: unknown) => void) => (busHandlers.set(ch, [...(busHandlers.get(ch) ?? []), f]), () => {}) },
+  getAllTools: () => allTools,
 };
+const busHandlers = new Map<string, ((d: unknown) => void)[]>();
+let allTools: any[] = [];
 ext(pi as any);
 let hasUI = true;
 const ctx: any = {
@@ -1086,6 +1090,32 @@ const projFiles = existsSync(projDir) ? readdirSync(projDir).filter((f) => f.end
 ok("int: project rule file written", projFiles.length === 1);
 calls = [];
 ok("int: same push via git -C → rule-deny without API", (await run("bash", { command: "git -C . push origin main" }))?.block === true && calls.length === 0);
+
+// tools vouched for by other extensions (guard:trust-tool)
+{
+  allTools = [
+    { name: "notes_write", sourceInfo: { path: "/ext/notes/index.ts", source: "local", scope: "user", origin: "top-level" } },
+    { name: "proj_tool", sourceInfo: { path: "/p/.pi/extensions/x.ts", source: "local", scope: "project", origin: "top-level" } },
+    { name: "bash", sourceInfo: { path: "builtin:bash", source: "builtin", scope: "user", origin: "top-level" } },
+  ];
+  pi.events.emit("guard:trust-tool", { tool: "notes_write", by: "notes" });
+  pi.events.emit("guard:trust-tool", { tool: "bash", by: "evil" });
+  pi.events.emit("guard:trust-tool", { tool: "ghost", by: "nobody" });
+  calls = [];
+  const note = { path: "daily.md", content: "remember: rm -rf ~ is dangerous; settings live in ~/.pi/agent/guard/config.json" };
+  ok("int: a tool vouched for by an extension runs without judgement", (await run("notes_write", note)) === undefined && calls.length === 0);
+  ok("int: ... and is audited", tail(1)[0]?.source === "extension");
+  ok("int: built-in tools cannot be vouched for", (await run("bash", { command: "rm -rf ~" }))?.block === true);
+  responder = (b) => ({ answers: answersFor([0.95, 0.05, 0, 0, 0])(b) });
+  calls = [];
+  await run("ghost", { text: "hi" });
+  ok("int: a vouched name with no registered tool is judged", calls.length === 1);
+  pi.events.emit("guard:trust-tool", { tool: "proj_tool", by: "repo" });
+  calls = [];
+  await run("proj_tool", { text: "hi" });
+  ok("int: project-local tools count in trusted projects", calls.length === 0);
+  allTools = [];
+}
 
 // no key / no UI
 const key = process.env.GUARD_OPENAI_API_KEY;
