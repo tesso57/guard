@@ -64,7 +64,7 @@ Risk is scored on five levels, from 0 to 4. guard looks at the probability of th
 ```
 Allow (this time only)
 Allow (this session: npm install …)
-Allow and remember… ▸     → this project / global
+Allow and remember (this project: …)   (or "… ▸ → this project / global" for read-only calls in trusted projects)
 Deny
 Deny and remember… ▸      → this project / global / this session
 ```

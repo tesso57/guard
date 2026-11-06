@@ -28,7 +28,8 @@ export async function confirmDialog(ctx: ExtensionContext, s: DialogSpec): Promi
   const label = s.patterns?.map((p) => describeMatch(s.tool, p)).join(" / ");
   const denyLabel = s.denyPatterns?.map((p) => describeMatch(s.tool, p)).join(" / ");
   const sessionOpt = label ? `Allow (this session: ${label})` : undefined;
-  const rememberOpt = "Allow and remember… ▸";
+  // Only a trusted read-only call can become a global allow; otherwise the project is the only scope, so no submenu
+  const rememberOpt = s.globalAllow ? "Allow and remember… ▸" : `Allow and remember (this project: ${s.projectName})`;
   const denyRememberOpt = "Deny and remember… ▸";
   const options = [ONCE];
   if (sessionOpt && s.rememberAllow) options.push(sessionOpt, rememberOpt);
@@ -42,6 +43,7 @@ export async function confirmDialog(ctx: ExtensionContext, s: DialogSpec): Promi
     if (pick === sessionOpt) return { decision: "allow", scope: "session" };
     if (pick === rememberOpt || pick === denyRememberOpt) {
       const decision = pick === rememberOpt ? "allow" : "deny";
+      if (decision === "allow" && !s.globalAllow) return { decision, scope: "project" };
       const pats = decision === "allow" ? s.patterns : s.denyPatterns;
       const ex = pats?.map((p) => examples(p)).find(Boolean);
       const scopes = [`This project (${s.projectName})`];
