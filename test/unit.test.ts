@@ -939,6 +939,26 @@ const O = { trusted: true, touched: new Set<string>() };
   for (const c of ["git restore .pi/guard.json", "git restore --staged --worktree .pi/x", "git reset --hard -- .pi"]) ok(`r23: still hard-denied: ${c}`, !!hd(c));
 }
 
+// ---------- pi's installed code is readable ----------
+{
+  const { clearPathCache } = await import("../extensions/guard/paths.ts");
+  const PI = join(AGENT, "install", "releases", "1.5.0", "node_modules", "@earendil-works", "pi-coding-agent");
+  mkdirSync(join(PI, "docs"), { recursive: true });
+  writeFileSync(join(PI, "docs", "extensions.md"), "pi.events");
+  const PJ = mkdtempSync(join(tmpdir(), "guard-pij-"));
+  const rj = protectedRoots(PJ, join(AGENT, "sessions"));
+  const f = join(PI, "docs", "extensions.md");
+  const sens = (tool: string, input: any) => (clearPathCache(), sensitive(tool, input, PJ, rj, tool === "bash" ? P(input.command) : undefined));
+  const safe = (c: string) => (clearPathCache(), safeAllow("bash", { command: c }, PJ, O, P(c)));
+  ok("pi install: read tool is not sensitive", !sens("read", { path: f }));
+  ok("pi install: cat is safe", !sens("bash", { command: `cat ${f}` }) && safe(`cat ${f}`));
+  ok("pi install: rg in it is not sensitive", !sens("bash", { command: `rg -n 'pi.events' ${join(AGENT, "install")}` }));
+  ok("pi install: rg via ~ spelling is not sensitive", !sens("bash", { command: "rg -n events ~/.pi/agent/install/releases" }));
+  ok("pi install: .. out of it into guard is still sensitive", !!sens("bash", { command: "cat ~/.pi/agent/install/../guard/rules.jsonl" }) && !!sens("read", { path: join(AGENT, "install", "..", "guard", "rules.jsonl") }));
+  ok("pi install: other agent state is still sensitive", !!sens("read", { path: join(AGENT, "guard", "rules.jsonl") }) && !!sens("bash", { command: "cat ~/.pi/agent/settings.json" }));
+  ok("pi install: writing there is hard-denied", !!hardDeny("write", { path: f, content: "x" }, PJ, rj) && !!hardDeny("bash", { command: `echo x >> ${f}` }, PJ, rj, P(`echo x >> ${f}`)));
+}
+
 // ---------- evaluate ----------
 {
   const score = (probs: number[], conf = 0.9) => ({ type: "score", name: "risk", score: probs.reduce((s, p, i) => s + p * i, 0), confidence: conf, probabilities: probs.map((p, i) => ({ value: i, probability: p })) });

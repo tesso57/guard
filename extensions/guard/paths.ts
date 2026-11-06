@@ -291,6 +291,12 @@ const PUBLIC_DIRS = [
   "/etc/os-release", "/etc/lsb-release", "/etc/hosts", "/etc/timezone", "/etc/debian_version", "/etc/alpine-release",
 ];
 
+/** pi's own installed releases (its code, types and docs): public, read-only reference material. */
+const PI_INSTALL = join(AGENT_DIR, "install");
+export function isPiInstallPath(p: string): boolean {
+  return isInside(p, PI_INSTALL) && isInside(realPath(p), realPath(PI_INSTALL));
+}
+
 /** A regular file with more than one hard link may be the same file as something outside the project. */
 export function isHardLinked(p: string): boolean {
   try {
@@ -310,7 +316,7 @@ export function isFreelyReadable(p: string, cwd: string): boolean {
   const real = realPath(p);
   const project = !isHomeOrAncestor(cwd) &&
     (isInside(p, cwd) || isInside(p, realPath(cwd))) && isInside(real, realPath(cwd));
-  const publicPath = PUBLIC_DIRS.some((d) => isInside(p, d) && isInside(real, realPath(d)));
+  const publicPath = PUBLIC_DIRS.some((d) => isInside(p, d) && isInside(real, realPath(d))) || isPiInstallPath(p);
   return (project || publicPath) && !isHardLinked(p);
 }
 

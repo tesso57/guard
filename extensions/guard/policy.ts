@@ -8,7 +8,7 @@ import { homedir, userInfo } from "node:os";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import { hasGluedPathValue, innerCommands, INTERPRETER_NAMES, isLongOption, isReadOnlyArgv, isShell, nonFlags, normalizeArgv, type Parsed, parseShell } from "./shell.ts";
-import { containsProtectedRoot, expandGlobFully, gitConfigIsSafe, globHitsOptionLikeName, globMayReach, ignoreFilesReinclude, isFreelyReadable, isHardLinked, isHomeOrAncestor, isInside, isRiskyProjectFile, memo, pathLikeTokens, pathVariants, protectedReason, protectedRoots, realPath, resolvePath, secretFilesUnder, sensitiveReason } from "./paths.ts";
+import { containsProtectedRoot, expandGlobFully, isPiInstallPath, gitConfigIsSafe, globHitsOptionLikeName, globMayReach, ignoreFilesReinclude, isFreelyReadable, isHardLinked, isHomeOrAncestor, isInside, isRiskyProjectFile, memo, pathLikeTokens, pathVariants, protectedReason, protectedRoots, realPath, resolvePath, secretFilesUnder, sensitiveReason } from "./paths.ts";
 
 export const BUILTIN_TOOLS = new Set(["bash", "edit", "write", "read", "grep", "find", "ls"]);
 
@@ -660,7 +660,8 @@ export function sensitive(tool: string, input: any, cwd: string, roots: string[]
   for (const p of [...reads, ...writes]) {
     const r = sensitiveReason(p);
     if (r) return r;
-    if (protectedReason(p, outerRoots)) return "reads guard or pi internal state";
+    // Reading pi's own installed code and docs (~/.pi/agent/install) is fine; writing there is hard-denied
+    if (protectedReason(p, outerRoots) && !(isPiInstallPath(p) && !writes.includes(p))) return "reads guard or pi internal state";
   }
   // pi's grep tool searches hidden files recursively
   if (tool === "grep" && reads.concat(reads.length ? [] : [cwd]).some((p) => isHomeOrAncestor(p) || isHomeOrAncestor(realPath(p)))) return "searches file contents across the home directory";
@@ -692,7 +693,9 @@ export function sensitive(tool: string, input: any, cwd: string, roots: string[]
           return extracts ? "extracts an archive where .pi/ or .agents/ could be created" : "changes permissions recursively where guard's or pi's state lives";
       }
     }
-    const lower = nameScanText(cmd, parsed).toLowerCase();
+    // Mentions of pi's installed code (~/.pi/agent/install/…, without `..`) are not its internal state; the paths
+    // themselves were resolved and checked above
+    const lower = nameScanText(cmd, parsed).toLowerCase().replace(/[^\s'"]*\.pi\/agent\/install(?:\/[^\s'"]*)?/g, (w) => (w.includes("..") ? w : ""));
     if (PROTECTED_MARKERS.some((m) => lower.includes(m))) return "reads guard or pi internal state";
     for (const [si, raw] of parsed.subcommands.entries()) {
       // `env` alone prints the environment; it is only a wrapper when a command follows
