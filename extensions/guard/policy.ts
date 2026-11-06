@@ -8,7 +8,7 @@ import { homedir, userInfo } from "node:os";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import { hasGluedPathValue, innerCommands, INTERPRETER_NAMES, isLongOption, isReadOnlyArgv, isShell, nonFlags, normalizeArgv, type Parsed, parseShell } from "./shell.ts";
-import { containsProtectedRoot, expandGlobFully, isPiCodePath, PI_CODE_DIRS, gitConfigIsSafe, globHitsOptionLikeName, globMayReach, ignoreFilesReinclude, isFreelyReadable, isHardLinked, isHomeOrAncestor, isInside, isRiskyProjectFile, memo, pathLikeTokens, pathVariants, protectedReason, protectedRoots, realPath, resolvePath, secretFilesUnder, sensitiveReason } from "./paths.ts";
+import { containsProtectedRoot, expandGlobFully, trustedDirFor, isPiCodePath, PI_CODE_DIRS, gitConfigIsSafe, globHitsOptionLikeName, globMayReach, ignoreFilesReinclude, isFreelyReadable, isHardLinked, isHomeOrAncestor, isInside, isRiskyProjectFile, memo, pathLikeTokens, pathVariants, protectedReason, protectedRoots, realPath, resolvePath, secretFilesUnder, sensitiveReason } from "./paths.ts";
 
 export const BUILTIN_TOOLS = new Set(["bash", "edit", "write", "read", "grep", "find", "ls"]);
 
@@ -764,12 +764,15 @@ export function safeAllow(tool: string, input: any, cwd: string, opts: { trusted
   if (tool === "edit" || tool === "write") {
     const { writes } = inputPaths(tool, input, cwd);
     if (!writes.length) return false;
-    // When pi runs in ~ (or above), "the project" would be the whole home directory
-    if (isHomeOrAncestor(cwd)) return false;
     const realCwd = realPath(cwd);
     return writes.every((w) => {
       const r = realPath(w);
       if (isHardLinked(w)) return false;
+      // Folders another extension vouched for (guard:trust-dir) take plain edits like the project
+      const td = trustedDirFor(w, true);
+      if (td) return plainInTrustedDir(w, td.path);
+      // When pi runs in ~ (or above), "the project" would be the whole home directory
+      if (isHomeOrAncestor(cwd)) return false;
       // Symlinks that leave the project (docs/notes.md -> ~/.bashrc) are not plain project edits
       if (!isInside(r, realCwd) || r.toLowerCase() === realCwd.toLowerCase()) return false;
       const lexicalBase = isInside(w, cwd) ? cwd : realCwd;
@@ -787,14 +790,21 @@ export function pathsStayInProject(tool: string, input: any, cwd: string, parsed
   return !isHomeOrAncestor(cwd) && [...reads, ...writes].every((p) => isInside(realPath(p), realCwd));
 }
 
+function plainInTrustedDir(w: string, dir: string): boolean {
+  const r = realPath(w);
+  const realDir = realPath(dir);
+  return r.toLowerCase() !== realDir.toLowerCase() && !isRiskyProjectFile(relative(realDir, r)) && !isRiskyProjectFile(relative(dir, w));
+}
+
 export function writesStayPlain(tool: string, input: any, cwd: string, parsed?: Parsed): boolean {
-  if (isHomeOrAncestor(cwd)) return false;
   const { writes } = inputPaths(tool, input, cwd, parsed);
   // A hard-linked file may be the same file as something outside the project
   if (writes.some(isHardLinked)) return false;
   const realCwd = realPath(cwd);
   return writes.every((w) => {
     const r = realPath(w);
-    return isInside(r, realCwd) && r.toLowerCase() !== realCwd.toLowerCase() && !isRiskyProjectFile(r.slice(realCwd.length + 1));
+    const td = trustedDirFor(w, true);
+    if (td) return plainInTrustedDir(w, td.path);
+    return !isHomeOrAncestor(cwd) && isInside(r, realCwd) && r.toLowerCase() !== realCwd.toLowerCase() && !isRiskyProjectFile(r.slice(realCwd.length + 1));
   });
 }

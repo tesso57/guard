@@ -18,7 +18,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { audit, tail } from "./audit.ts";
 import { type Config, loadConfig } from "./config.ts";
 import { buildRequest, callDecisions, evaluate, type ModelVerdict } from "./judge.ts";
-import { clearPathCache, isFreelyReadable, isInside, protectedReason, protectedRoots, recentlyChangedFiles, resolvePath, sensitiveReason } from "./paths.ts";
+import { clearPathCache, isFreelyReadable, listTrustedDirs, trustDir, isInside, protectedReason, protectedRoots, recentlyChangedFiles, resolvePath, sensitiveReason } from "./paths.ts";
 import { BUILTIN_TOOLS, hardDeny, inputPaths, pathsStayInProject, safeAllow, sensitive, writesStayPlain } from "./policy.ts";
 import { type Decision, deriveDenyPatterns, derivePatterns, describeMatch, type Match, newId, type Rule, RuleStore, type Scope } from "./rules.ts";
 import { isReadOnlyArgv, normalizeArgv, type Parsed, parseShell } from "./shell.ts";
@@ -185,6 +185,12 @@ export default function (pi: ExtensionAPI) {
     const d = data as { tool?: unknown; by?: unknown } | undefined;
     if (typeof d?.tool !== "string" || !d.tool || BUILTIN_TOOLS.has(d.tool)) return;
     extensionTrust.set(d.tool, typeof d.by === "string" && d.by ? d.by.slice(0, 64) : "an extension");
+  });
+  // Folders another extension vouches for: { path: "~/.pi/artifacts", by: "artifacts", access?: "read" | "write" }
+  pi.events.on("guard:trust-dir", (data) => {
+    const d = data as { path?: unknown; by?: unknown; access?: unknown } | undefined;
+    if (typeof d?.path !== "string" || !d.path) return;
+    trustDir(d.path, d.access !== "read", typeof d.by === "string" && d.by ? d.by.slice(0, 64) : "an extension");
   });
   function trustedByExtension(tool: string): string | undefined {
     const by = extensionTrust.get(tool);
@@ -629,6 +635,7 @@ export default function (pi: ExtensionAPI) {
           const order: Scope[] = ["session", "repo", "project", "global"];
           const lines = [
             ...[...extensionTrust.keys()].filter((t) => trustedByExtension(t)).map((t) => `[extension] allow tool ${t}  (trusted by ${extensionTrust.get(t)})`),
+            ...listTrustedDirs().map((d) => `[extension] ${d.write ? "read/write" : "read"} folder ${d.path}  (trusted by ${d.by}${d.ignored ? `; ignored: ${d.ignored}` : ""})`),
             ...store.all().sort((a, b) => order.indexOf(a.scope) - order.indexOf(b.scope))
               .map((r) => `[${r.scope}] ${r.decision.padEnd(5)} ${describeMatch(r.tool, r.match)}  (id ${r.id}, hits ${store.hitCount(r.id)}${r.expiresAt ? `, expires ${r.expiresAt.slice(0, 10)}` : ""})`),
           ];

@@ -1143,6 +1143,38 @@ ok("int: same push via git -C → rule-deny without API", (await run("bash", { c
   allTools = [];
 }
 
+// folders vouched for by other extensions (guard:trust-dir)
+{
+  const { listTrustedDirs } = await import("../extensions/guard/paths.ts");
+  const ART = join(HOME, ".pi", "artifacts");
+  mkdirSync(join(ART, "a1"), { recursive: true });
+  writeFileSync(join(ART, "a1", "index.tsx"), "export default 1");
+  pi.events.emit("guard:trust-dir", { path: "~/.pi/artifacts", by: "artifacts" });
+  for (const bad of ["~", "~/.ssh", "~/.pi", "~/.pi/agent/x", "~/.config/fish", "relative/dir", "/etc"]) pi.events.emit("guard:trust-dir", { path: bad, by: "evil" });
+  const ignored = listTrustedDirs().filter((d) => d.ignored).length;
+  ok("int: trust-dir refuses broad, secret, agent, config and relative folders", ignored === 7 && listTrustedDirs().filter((d) => !d.ignored).length === 1, JSON.stringify(listTrustedDirs()));
+  calls = [];
+  ok("int: reading in a trusted folder needs no model", (await run("read", { path: join(ART, "a1", "index.tsx") })) === undefined && calls.length === 0);
+  ok("int: ... nor does cat", (await run("bash", { command: `cat ${join(ART, "a1", "index.tsx")}` })) === undefined && calls.length === 0);
+  ok("int: writing in a trusted folder needs no model", (await run("write", { path: join(ART, "a2", "index.tsx"), content: "x" })) === undefined && calls.length === 0);
+  ok("int: ... nor does an edit", (await run("edit", { path: join(ART, "a1", "index.tsx"), edits: [{ oldText: "1", newText: "2" }] })) === undefined && calls.length === 0);
+  responder = (b) => ({ answers: answersFor([0.95, 0.05, 0, 0, 0])(b) });
+  await run("write", { path: join(ART, "a1", "package.json"), content: "{}" });
+  ok("int: risky files in a trusted folder still get judged", calls.length === 1);
+  writeFileSync(join(ART, ".env"), "K=1");
+  selectScript = [["Deny"]];
+  inputs = [""];
+  ok("int: secrets in a trusted folder still ask", (await run("read", { path: join(ART, ".env") }))?.block === true && selectScript.length === 0);
+  symlinkSync(join(HOME, ".ssh", "id_rsa"), join(ART, "key"));
+  selectScript = [["Deny"]];
+  inputs = [""];
+  ok("int: symlinks out of a trusted folder are not trusted", (await run("read", { path: join(ART, "key") }))?.block === true);
+  pi.events.emit("guard:trust-dir", { path: join(HOME, "docs-ro"), by: "ro", access: "read" });
+  calls = [];
+  await run("write", { path: join(HOME, "docs-ro", "x.md"), content: "x" });
+  ok("int: a read-only trusted folder does not take writes without judgement", calls.length === 1);
+}
+
 // no key / no UI
 const key = process.env.GUARD_OPENAI_API_KEY;
 delete process.env.GUARD_OPENAI_API_KEY;

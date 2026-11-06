@@ -100,7 +100,7 @@ Rule files are updated under a lock, so several pi processes can change rules at
 { "deny": ["git push --force"], "ask": ["npm publish"] }
 ```
 
-## Tools from other extensions
+## Tools and folders from other extensions
 
 An extension can tell guard that one of its own tools is safe to run without a judgement, for example a notes extension's `notes_write`, whose arguments are text rather than commands:
 
@@ -113,6 +113,16 @@ pi.on("session_start", () => {
 ```
 
 Emitting in `session_start` works whatever order the extensions load in; without guard installed, nobody listens and nothing happens. Vouched-for tools run without any check and are recorded in the audit log (source `extension`); `/guard rules` lists them. Built-in tools (`bash`, `write`, `edit`, `read`, …) cannot be vouched for, a name only counts once a tool with that name is registered, and tools of project-local extensions (`.pi/extensions`) count only in trusted projects. Only vouch for tools whose effects you are happy to allow unconditionally.
+
+An extension can also vouch for a folder it owns, such as an artifacts extension's output folder:
+
+```ts
+pi.on("session_start", () => {
+  pi.events.emit("guard:trust-dir", { path: "~/.pi/artifacts", by: "artifacts" }); // access: "read" for read-only
+});
+```
+
+Inside a vouched-for folder, reads are free like reads inside the project, and plain `write`/`edit` calls (and `mkdir`/`touch`) run without a judgement. Everything else is judged as usual: running code there, files that tools run later (`package.json`, `Makefile`, …), secrets (`.env`, keys), hard links, and symlinks that leave the folder. Only folders inside the home directory (or the temp directory) are accepted; the home directory itself, the agent directory `~/.pi/agent`, and folders that hold credentials, tool configuration or programs (`~/.ssh`, `~/.aws`, `~/.config`, `~/.local`, `~/bin`, …) are refused. `/guard rules` lists vouched-for folders, including refused ones and why.
 
 ## Commands
 
