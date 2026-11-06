@@ -291,10 +291,15 @@ const PUBLIC_DIRS = [
   "/etc/os-release", "/etc/lsb-release", "/etc/hosts", "/etc/timezone", "/etc/debian_version", "/etc/alpine-release",
 ];
 
-/** pi's own installed releases (its code, types and docs): public, read-only reference material. */
-const PI_INSTALL = join(AGENT_DIR, "install");
-export function isPiInstallPath(p: string): boolean {
-  return isInside(p, PI_INSTALL) && isInside(realPath(p), realPath(PI_INSTALL));
+/**
+ * Code under the agent directory: pi's own releases and the packages, extensions, skills, prompts and themes it
+ * loads. Reading it is like reading /usr (writing stays hard-denied). Credentials, settings, sessions and guard's
+ * own state live elsewhere in the agent directory and stay protected.
+ */
+export const PI_CODE_DIRS = ["install", "git", "npm", "extensions", "skills", "prompts", "themes"];
+export function isPiCodePath(p: string): boolean {
+  const real = realPath(p);
+  return PI_CODE_DIRS.some((d) => isInside(p, join(AGENT_DIR, d)) && isInside(real, realPath(join(AGENT_DIR, d))));
 }
 
 /** A regular file with more than one hard link may be the same file as something outside the project. */
@@ -316,7 +321,7 @@ export function isFreelyReadable(p: string, cwd: string): boolean {
   const real = realPath(p);
   const project = !isHomeOrAncestor(cwd) &&
     (isInside(p, cwd) || isInside(p, realPath(cwd))) && isInside(real, realPath(cwd));
-  const publicPath = PUBLIC_DIRS.some((d) => isInside(p, d) && isInside(real, realPath(d))) || isPiInstallPath(p);
+  const publicPath = PUBLIC_DIRS.some((d) => isInside(p, d) && isInside(real, realPath(d))) || isPiCodePath(p);
   return (project || publicPath) && !isHardLinked(p);
 }
 

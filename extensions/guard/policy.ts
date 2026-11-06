@@ -8,7 +8,7 @@ import { homedir, userInfo } from "node:os";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import { hasGluedPathValue, innerCommands, INTERPRETER_NAMES, isLongOption, isReadOnlyArgv, isShell, nonFlags, normalizeArgv, type Parsed, parseShell } from "./shell.ts";
-import { containsProtectedRoot, expandGlobFully, isPiInstallPath, gitConfigIsSafe, globHitsOptionLikeName, globMayReach, ignoreFilesReinclude, isFreelyReadable, isHardLinked, isHomeOrAncestor, isInside, isRiskyProjectFile, memo, pathLikeTokens, pathVariants, protectedReason, protectedRoots, realPath, resolvePath, secretFilesUnder, sensitiveReason } from "./paths.ts";
+import { containsProtectedRoot, expandGlobFully, isPiCodePath, PI_CODE_DIRS, gitConfigIsSafe, globHitsOptionLikeName, globMayReach, ignoreFilesReinclude, isFreelyReadable, isHardLinked, isHomeOrAncestor, isInside, isRiskyProjectFile, memo, pathLikeTokens, pathVariants, protectedReason, protectedRoots, realPath, resolvePath, secretFilesUnder, sensitiveReason } from "./paths.ts";
 
 export const BUILTIN_TOOLS = new Set(["bash", "edit", "write", "read", "grep", "find", "ls"]);
 
@@ -25,6 +25,7 @@ const HARD_DENY_BASH: [RegExp, string][] = [
 ];
 
 /** Spellings of guard's and pi's state that can appear in commands without resolving to a known path. */
+const PI_CODE_MENTION = new RegExp(`[^\\s'"]*\\.pi/agent/(?:${PI_CODE_DIRS.join("|")})(?:/[^\\s'"]*)?(?=$|[\\s'"])`, "g");
 const PROTECTED_MARKERS = ["~/.pi", "$home/.pi", "${home}/.pi", ".pi/agent"];
 
 /**
@@ -660,8 +661,8 @@ export function sensitive(tool: string, input: any, cwd: string, roots: string[]
   for (const p of [...reads, ...writes]) {
     const r = sensitiveReason(p);
     if (r) return r;
-    // Reading pi's own installed code and docs (~/.pi/agent/install) is fine; writing there is hard-denied
-    if (protectedReason(p, outerRoots) && !(isPiInstallPath(p) && !writes.includes(p))) return "reads guard or pi internal state";
+    // Reading pi's own code and the packages it loads (~/.pi/agent/install, git, npm, …) is fine; writing is hard-denied
+    if (protectedReason(p, outerRoots) && !(isPiCodePath(p) && !writes.includes(p))) return "reads guard or pi internal state";
   }
   // pi's grep tool searches hidden files recursively
   if (tool === "grep" && reads.concat(reads.length ? [] : [cwd]).some((p) => isHomeOrAncestor(p) || isHomeOrAncestor(realPath(p)))) return "searches file contents across the home directory";
@@ -693,9 +694,9 @@ export function sensitive(tool: string, input: any, cwd: string, roots: string[]
           return extracts ? "extracts an archive where .pi/ or .agents/ could be created" : "changes permissions recursively where guard's or pi's state lives";
       }
     }
-    // Mentions of pi's installed code (~/.pi/agent/install/…, without `..`) are not its internal state; the paths
+    // Mentions of pi's code directories (~/.pi/agent/install/…, git/…, without `..`) are not its internal state; the paths
     // themselves were resolved and checked above
-    const lower = nameScanText(cmd, parsed).toLowerCase().replace(/[^\s'"]*\.pi\/agent\/install(?:\/[^\s'"]*)?/g, (w) => (w.includes("..") ? w : ""));
+    const lower = nameScanText(cmd, parsed).toLowerCase().replace(PI_CODE_MENTION, (w) => (w.includes("..") ? w : ""));
     if (PROTECTED_MARKERS.some((m) => lower.includes(m))) return "reads guard or pi internal state";
     for (const [si, raw] of parsed.subcommands.entries()) {
       // `env` alone prints the environment; it is only a wrapper when a command follows

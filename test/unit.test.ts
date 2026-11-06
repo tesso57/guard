@@ -956,6 +956,12 @@ const O = { trusted: true, touched: new Set<string>() };
   ok("pi install: rg via ~ spelling is not sensitive", !sens("bash", { command: "rg -n events ~/.pi/agent/install/releases" }));
   ok("pi install: .. out of it into guard is still sensitive", !!sens("bash", { command: "cat ~/.pi/agent/install/../guard/rules.jsonl" }) && !!sens("read", { path: join(AGENT, "install", "..", "guard", "rules.jsonl") }));
   ok("pi install: other agent state is still sensitive", !!sens("read", { path: join(AGENT, "guard", "rules.jsonl") }) && !!sens("bash", { command: "cat ~/.pi/agent/settings.json" }));
+  mkdirSync(join(AGENT, "git", "github.com", "u", "artifact", "skills"), { recursive: true });
+  writeFileSync(join(AGENT, "git", "github.com", "u", "artifact", "package.json"), "{}");
+  ok("pi packages: reading git-installed packages is fine", !sens("read", { path: join(AGENT, "git", "github.com", "u", "artifact", "package.json") }) && !sens("bash", { command: "ls -la ~/.pi/agent/git/github.com/u/artifact; rg -n x ~/.pi/agent/git/github.com/u/artifact" }));
+  ok("pi packages: listing extensions is fine", !sens("bash", { command: "ls -la ~/.pi/agent/extensions" }));
+  for (const f2 of ["auth.json", "models.json", "mcp.json", "settings.json", "sessions/x.jsonl", "guard/audit.jsonl"]) ok(`pi state stays sensitive: ${f2}`, !!sens("read", { path: join(AGENT, f2) }) && !!sens("bash", { command: `rg -n x ~/.pi/agent/${f2}` }));
+  ok("pi packages: a lookalike name is not code", !!sens("bash", { command: "cat ~/.pi/agent/gitx/a" }));
   ok("pi install: writing there is hard-denied", !!hardDeny("write", { path: f, content: "x" }, PJ, rj) && !!hardDeny("bash", { command: `echo x >> ${f}` }, PJ, rj, P(`echo x >> ${f}`)));
 }
 
