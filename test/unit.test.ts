@@ -1087,6 +1087,7 @@ ok("int: npm run lint → confirm → session rule", (await run("bash", { comman
 ok("int: session rule recorded in branch", branch.some((e) => e.customType === "guard-rule" && e.data.op === "add"));
 const req1 = calls[0].body;
 ok("int: request has developer + user intent + guard context + function_call", req1.input[0].role === "developer" && req1.input.some((i: any) => i.role === "user" && JSON.stringify(i).includes("run the tests")) && guardContext(req1).cwd === PROJ && lastCall(req1).type === "function_call");
+ok("int: the newest user message is marked as the current instruction", (() => { const us = req1.input.filter((i: any) => i.role === "user"); return JSON.stringify(us.at(-1)).includes("most recent message") && us.slice(0, -1).every((u: any) => !JSON.stringify(u).includes("most recent message")); })());
 ok("int: cwd is not inside the agent-controlled arguments", !("__cwd" in JSON.parse(lastCall(req1).arguments)));
 ok("int: auth header + model + cache key", calls[0].auth === `Bearer ${process.env.GUARD_OPENAI_API_KEY}` && req1.model === "gpt-6-luna" && req1.prompt_cache_key === "guard:sess-1");
 calls = [];

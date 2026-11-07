@@ -40,7 +40,7 @@ If the API call fails, the model refuses to answer, or the input had to be trunc
 
 guard sends the Decisions API:
 
-- your most recent messages, so the model knows what you asked for
+- your most recent messages (3 by default, `contextUserMessages`), so the model knows what you asked for; the newest is marked as your current instruction, and an explicit go-ahead there for the pending action counts as within your request
 - the agent's recent tool calls
 - your past decisions
 - the call being judged
