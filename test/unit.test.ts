@@ -2151,6 +2151,23 @@ const run = async (toolName: string, input: any) => h.tool_call({ type: "tool_ca
   const complexInput = { values: Array.from({ length: 100_000 }, () => 0) };
   const complexResult = await run("custom-unserializable", complexInput);
   ok("int: overly complex tool input is blocked without recording its contents", complexResult?.block === true && complexResult.reason.includes("input could not be inspected") && tail(1)[0]?.preview.includes("withheld"));
+  for (const method of ["getSessionId", "getBranch"] as const) {
+    const previous = ctx.sessionManager[method];
+    ctx.sessionManager[method] = () => { throw new Error("opaque-session-context-error"); };
+    try {
+      let result: any, threw = false;
+      try { result = await run("custom-unserializable", { value: "x" }); } catch { threw = true; }
+      ok(`int: ${method} failure blocks without exposing details`, !threw && result?.block === true && !JSON.stringify(tail(1)).includes("opaque-session-context-error"));
+    } finally { ctx.sessionManager[method] = previous; }
+  }
+  const previousSessionId = ctx.sessionManager.getSessionId;
+  try {
+    for (const invalidId of [undefined, null, "", {}]) {
+      ctx.sessionManager.getSessionId = () => invalidId;
+      const result = await run("custom-unserializable", { value: "x" });
+      ok("int: an invalid session identifier blocks the call", result?.block === true && result.reason.includes("session context unavailable"));
+    }
+  } finally { ctx.sessionManager.getSessionId = previousSessionId; }
   await run("bash", { command: "echo reset-before-abort-error" });
   const savedAbort = ctx.abort;
   ctx.abort = () => { throw new Error("opaque-abort-error"); };

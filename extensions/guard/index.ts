@@ -902,6 +902,15 @@ export default function (pi: ExtensionAPI) {
       }
       return blockResult(reason, retry);
     };
+    let session: string;
+    try {
+      session = ctx.sessionManager.getSessionId();
+      if (typeof session !== "string" || !session) throw new Error("invalid session id");
+    }
+    catch {
+      recordAudit(ctx, { tool, preview: `${tool} [arguments withheld: session unavailable]`, action: "block", source: "error", reasons: ["session context unavailable"], final: "blocked" });
+      return onBlocked("session context unavailable");
+    }
     let vouched: string | undefined;
     let trustAvailable = false;
     // Project trust may have changed since the last event. If it cannot be
@@ -909,16 +918,21 @@ export default function (pi: ExtensionAPI) {
     try { syncProject(ctx); trustAvailable = true; vouched = trustedByExtension(tool); } catch { /* assess will fail closed */ }
     if (vouched) {
       siblingsById.delete(event.toolCallId);
-      recordAudit(ctx, { session: ctx.sessionManager.getSessionId(), tool, preview: auditPreview(ctx, tool, input), action: "allow", source: "extension", reasons: [`trusted by ${vouched}`], final: "run" });
+      recordAudit(ctx, { session, tool, preview: auditPreview(ctx, tool, input), action: "allow", source: "extension", reasons: [`trusted by ${vouched}`], final: "run" });
       return;
     }
     let hash: string;
     try { hash = toolInputHash(tool, input); }
     catch {
-      recordAudit(ctx, { session: ctx.sessionManager.getSessionId(), tool, preview: `${tool} [arguments withheld: input could not be inspected]`, action: "block", source: "error", reasons: ["tool input could not be inspected"], final: "blocked" });
+      recordAudit(ctx, { session, tool, preview: `${tool} [arguments withheld: input could not be inspected]`, action: "block", source: "error", reasons: ["tool input could not be inspected"], final: "blocked" });
       return onBlocked("the tool input could not be inspected");
     }
-    const batch = siblingsById.get(event.toolCallId) ?? siblingsFromBranch(ctx, event.toolCallId);
+    let batch: BatchContext;
+    try { batch = siblingsById.get(event.toolCallId) ?? siblingsFromBranch(ctx, event.toolCallId); }
+    catch {
+      recordAudit(ctx, { session, tool, preview: `${tool} [arguments withheld: session history unavailable]`, action: "block", source: "error", reasons: ["session history unavailable"], final: "blocked" });
+      return onBlocked("session history unavailable");
+    }
     if (!batch.problem) siblingsById.delete(event.toolCallId);
 
     status(ctx, `guard: judging ${tool}…`);
@@ -946,10 +960,9 @@ export default function (pi: ExtensionAPI) {
       store.all();
       if (!store.hasErrors) retryRulesVersion = store.version;
     } catch { /* no retry shortcut when rules cannot be refreshed */ }
-    const retryKey = stableHash([hash, ctx.cwd, trustAvailable ? trusted : "unavailable", ctx.sessionManager.getSessionId(), trustedDirs.version, retryRulesVersion]);
+    const retryKey = stableHash([hash, ctx.cwd, trustAvailable ? trusted : "unavailable", session, trustedDirs.version, retryRulesVersion]);
     judged.set(event.toolCallId, hash);
     const what = preview(tool, input);
-    const session = ctx.sessionManager.getSessionId();
     const risk = a.verdict?.risk;
     const tag = `${a.source}${risk !== undefined ? ` ${risk.toFixed(1)}` : ""}${a.verdict?.category ? ` ${a.verdict.category}` : ""}`;
     const shellChangedDuringJudgement = a.source === "error" && a.reasons[0] === "shell environment or executable lookup changed during judgement";
