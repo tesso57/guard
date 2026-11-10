@@ -167,6 +167,8 @@ pi.on("session_start", () => {
 
 Emitting in `session_start` works whatever order the extensions load in; without guard installed, nobody listens and nothing happens. Vouched-for tools run without any check and are recorded in the audit log (source `extension`); `/guard rules` lists them. Built-in tools (`bash`, `write`, `edit`, `read`, …) cannot be vouched for, a name only counts once a tool with that name is registered, and tools of project-local extensions (`.pi/extensions`) count only in trusted projects. Only vouch for tools whose effects you are happy to allow unconditionally.
 
+The event bus does not authenticate which extension sent a trust event. Any loaded extension can vouch for an eligible tool or folder, including one owned by another extension; the `by` value is a display label, not proof of ownership.
+
 An extension can also vouch for a folder it owns, such as an artifacts extension's output folder:
 
 ```ts
