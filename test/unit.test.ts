@@ -2151,6 +2151,20 @@ const run = async (toolName: string, input: any) => h.tool_call({ type: "tool_ca
   const complexInput = { values: Array.from({ length: 100_000 }, () => 0) };
   const complexResult = await run("custom-unserializable", complexInput);
   ok("int: overly complex tool input is blocked without recording its contents", complexResult?.block === true && complexResult.reason.includes("input could not be inspected") && tail(1)[0]?.preview.includes("withheld"));
+  const deepInput: any = {};
+  let deepCursor = deepInput;
+  for (let i = 0; i < 30_000; i++) { deepCursor.next = {}; deepCursor = deepCursor.next; }
+  const deepResult = await run("custom-unserializable", deepInput);
+  ok("int: deeply nested tool input is blocked without escaping the handler", deepResult?.block === true && deepResult.reason.includes("input could not be inspected"));
+  const sparseResult = await run("custom-unserializable", { values: new Array(2) });
+  ok("int: sparse arrays cannot be confused with JSON null values", sparseResult?.block === true && sparseResult.reason.includes("input could not be inspected"));
+  const previousResponder = responder;
+  responder = (body) => ({ answers: answersFor([1, 0, 0, 0, 0])(body) });
+  try {
+    const shared = { value: "ordinary" };
+    const sharedResult = await run("custom-json", { first: shared, second: shared });
+    ok("int: shared non-cyclic JSON values are not mistaken for cycles", sharedResult === undefined);
+  } finally { responder = previousResponder; }
   for (const method of ["getSessionId", "getBranch"] as const) {
     const previous = ctx.sessionManager[method];
     ctx.sessionManager[method] = () => { throw new Error("opaque-session-context-error"); };
