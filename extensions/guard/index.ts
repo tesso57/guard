@@ -2,7 +2,7 @@
  * guard — judges the risk of every pi tool call before it runs.
  *
  * Evaluation order:
- *   1. hard deny (protected paths, obvious destruction)          → block (cannot be overridden)
+ *   1. hard deny (protected paths, obvious destruction)          → block; an exact retry may ask once
  *   2. deny / ask rules (any scope)                               → block / confirm
  *   3. allow rule matching every subcommand                       → light model check (exfiltration, intent, judge manipulation)
  *   4. sensitive paths                                            → confirm
@@ -14,6 +14,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
 import { basename, relative } from "node:path";
+import { types as utilTypes } from "node:util";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { audit, tail, type AuditRecord } from "./audit.ts";
 import { type Config, loadConfig } from "./config.ts";
@@ -84,6 +85,7 @@ function toolInputHash(tool: string, input: unknown): string {
     // JSON.stringify collapses -0 to 0, but a tool can distinguish them.
     if (typeof value === "number" && Number.isFinite(value) && !Object.is(value, -0)) return;
     if (typeof value !== "object") throw new Error("tool input is not JSON data");
+    if (utilTypes.isProxy(value)) throw new Error("tool input contains a proxy");
     const array = Array.isArray(value);
     const prototype = Object.getPrototypeOf(value);
     if (!array && prototype !== Object.prototype && prototype !== null) throw new Error("tool input is not a plain object");

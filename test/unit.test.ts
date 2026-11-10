@@ -2139,6 +2139,15 @@ const run = async (toolName: string, input: any) => h.tool_call({ type: "tool_ca
   const accessorInput = Object.defineProperty({}, "value", { enumerable: true, get() { getterCalled = true; return "opaque-getter-value"; } });
   const accessorResult = await run("custom-unserializable", accessorInput);
   ok("int: accessor-based tool input is blocked without invoking the getter", accessorResult?.block === true && !getterCalled);
+  let proxyRead = false;
+  const proxyInput = new Proxy({ value: "x" }, { get(target, key, receiver) { proxyRead = true; return Reflect.get(target, key, receiver); } });
+  const proxyResult = await run("custom-unserializable", proxyInput);
+  ok("int: proxy-based tool input is blocked without reading through the proxy", proxyResult?.block === true && proxyResult.reason.includes("input could not be inspected") && !proxyRead);
+  const nestedProxyResult = await run("custom-unserializable", { nested: proxyInput });
+  const revokedProxy = Proxy.revocable({}, {});
+  revokedProxy.revoke();
+  const revokedProxyResult = await run("custom-unserializable", revokedProxy.proxy);
+  ok("int: nested and revoked proxies are also blocked", nestedProxyResult?.block === true && revokedProxyResult?.block === true && !proxyRead);
   await run("bash", { command: "echo reset-before-abort-error" });
   const savedAbort = ctx.abort;
   ctx.abort = () => { throw new Error("opaque-abort-error"); };
