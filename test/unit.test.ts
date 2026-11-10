@@ -3618,6 +3618,15 @@ ok("int: a known deny remains a block when another rule file is unreadable", kno
 const unreadableRuleResult = await run("bash", { command: "git status" });
 hasUI = true;
 ok("int: unreadable rules cannot silently allow a safe shortcut", unreadableRuleResult?.block === true && tail(1)[0]?.reasons.some((reason: string) => reason.includes("cannot read global rules")), JSON.stringify({ unreadableRuleResult, audit: tail(1)[0] }));
+let unreadableRetryDialog = false;
+const unreadableSelect = ctx.ui.select;
+ctx.ui.select = async () => { unreadableRetryDialog = true; return "Deny"; };
+try {
+  const blockedCommand = "printf unreadable-rules >> ~/.pi/agent/guard/rules.jsonl";
+  const firstBlock = await run("bash", { command: blockedCommand });
+  const secondBlock = await run("bash", { command: blockedCommand });
+  ok("int: unreadable rules do not offer an unusable blocked-call retry", firstBlock?.block === true && secondBlock?.block === true && !firstBlock.reason.includes("run the same call again") && !unreadableRetryDialog);
+} finally { ctx.ui.select = unreadableSelect; }
 rmSync(ruleFile, { recursive: true });
 renameSync(ruleBackup, ruleFile);
 ok("int: rule reads recover after the file is restored", (await run("bash", { command: "git status" })) === undefined);

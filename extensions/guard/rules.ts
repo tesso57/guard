@@ -476,6 +476,10 @@ export class RuleStore {
     return this.hits.get(id) ?? 0;
   }
 
+  get hasErrors(): boolean {
+    return this.fileErrors.size > 0;
+  }
+
   all(): Rule[] {
     this.refresh();
     return [...this.session(), ...this.repo, ...this.project, ...this.global].filter(live);

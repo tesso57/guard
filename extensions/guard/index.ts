@@ -890,7 +890,7 @@ export default function (pi: ExtensionAPI) {
     try {
       store.syncSession(ctx.sessionManager.getBranch() as any[]);
       store.all();
-      retryRulesVersion = store.version;
+      if (!store.hasErrors) retryRulesVersion = store.version;
     } catch { /* no retry shortcut when rules cannot be refreshed */ }
     const retryKey = stableHash([hash, ctx.cwd, trustAvailable ? trusted : "unavailable", ctx.sessionManager.getSessionId(), trustedDirs.version, retryRulesVersion]);
     judged.set(event.toolCallId, hash);
