@@ -11,8 +11,8 @@
  *   6. function_call: the call being judged
  */
 import { createHash } from "node:crypto";
-import type { Config } from "./config.ts";
-import { clip, redact, redactString } from "./redact.ts";
+import { validBaseUrl, type Config } from "./config.ts";
+import { clip, redact, redactString, uniqueKey } from "./redact.ts";
 import { describeMatch, type Rule } from "./rules.ts";
 
 type ScoreAnswer = { type: "score"; name: string; score: number; confidence: number; probabilities: { value: number; label?: string; probability: number }[] };
@@ -32,6 +32,7 @@ export type ModelVerdict = {
   addressesEvaluator?: number;
   category?: string;
   truncated: boolean;
+  redacted: boolean;
 };
 
 const DEVELOPER = `You evaluate ONE pending tool call that an autonomous coding agent wants to execute on a developer's machine, before it runs.
@@ -83,6 +84,10 @@ export type JudgeRequest = {
   userMessages: string[];
   /** Recent tool calls, oldest first. */
   history: { id: string; name: string; arguments: unknown }[];
+  /** True when a prior call could not be inspected safely and its arguments were withheld. */
+  historyIncomplete?: boolean;
+  /** True when attachment preparation stopped before collecting all relevant files. */
+  attachmentsIncomplete?: boolean;
   /** Current (or about-to-be-written) contents of files the pending call executes or that were changed this session. */
   attachedFiles: Record<string, string>;
   past: Rule[];
@@ -91,90 +96,197 @@ export type JudgeRequest = {
   sessionId?: string;
 };
 
-const MAX_ATTACHED_FILES = 20;
+export const MAX_ATTACHED_FILES = 20;
 const MAX_ATTACHED_CHARS = 200_000;
+const MAX_RESPONSE_BYTES = 1_048_576;
+class DecisionResponseError extends Error {}
 
 function safeName(n: string) {
-  return n.replace(/[^a-zA-Z0-9_.-]/g, "_").slice(0, 128) || "tool";
+  const name = redactString(n).replace(/[^a-zA-Z0-9_.-]/g, "_").slice(0, 128) || "tool";
+  // Only guard's own synthetic call may use this name; other tools are untrusted inputs.
+  return name === "guard_collect_context" ? "tool_guard_collect_context" : name;
 }
 function safeCallId(id: string) {
-  return id.length <= 64 ? id : createHash("sha256").update(id).digest("hex").slice(0, 48);
+  return /^[A-Za-z0-9_-]{1,64}$/.test(id) && id !== "guard-context" && redactString(id) === id ? id : createHash("sha256").update(id).digest("hex").slice(0, 48);
 }
 
 export function buildRequest(cfg: Config, req: JudgeRequest) {
-  const state = { truncated: false };
-  const prep = (v: unknown) => clip(redact(v), cfg.maxFieldChars, state);
+  const state = { truncated: !!req.historyIncomplete || !!req.attachmentsIncomplete, redacted: false };
+  const usedCallIds = new Set(["guard-context"]);
+  const callId = (id: string) => {
+    const base = safeCallId(id);
+    let candidate = base;
+    for (let suffix = 2; usedCallIds.has(candidate); suffix++) {
+      const tail = `-${suffix}`;
+      candidate = base.slice(0, 64 - tail.length) + tail;
+    }
+    usedCallIds.add(candidate);
+    return candidate;
+  };
+  const prep = (v: unknown, relevant = false) => {
+    const masked = redact(v);
+    // A model cannot safely approve executable input or context it could not inspect.
+    if (relevant && JSON.stringify(masked) !== JSON.stringify(v)) state.redacted = true;
+    return clip(masked, cfg.maxFieldChars, state);
+  };
   const items: unknown[] = [{ role: "developer", content: DEVELOPER }];
-  for (const m of req.userMessages) items.push({ role: "user", content: [{ type: "input_text", text: String(clip(redactString(m), 4000, { truncated: false })) }] });
-  for (const h of req.history)
-    items.push({ type: "function_call", call_id: safeCallId(h.id), name: safeName(h.name), arguments: JSON.stringify(clip(redact(h.arguments), 2000, { truncated: false })), status: "completed" });
+  for (const m of req.userMessages) {
+    const masked = redactString(m);
+    if (masked !== m) state.redacted = true;
+    items.push({ role: "user", content: [{ type: "input_text", text: String(clip(masked, 4000, state)) }] });
+  }
+  for (const h of req.history) {
+    if (redactString(h.name) !== h.name) state.redacted = true;
+    const masked = redact(h.arguments);
+    if (JSON.stringify(masked) !== JSON.stringify(h.arguments)) state.redacted = true;
+    items.push({ type: "function_call", call_id: callId(h.id), name: safeName(h.name), arguments: JSON.stringify(clip(masked, 2000, state)), status: "completed" });
+  }
   if (req.past.length) {
     items.push({
       role: "user",
       content: [
         { type: "input_text", text: "Past decisions I made in the approval dialog for similar tool calls:" },
-        { type: "input_json", data: req.past.map((r) => ({ decision: r.decision, tool: r.tool, pattern: describeMatch(r.tool, r.match), scope: r.scope, decided_at: r.createdAt })) },
+        { type: "input_json", data: prep(req.past.map((r) => ({ decision: r.decision, tool: r.tool, pattern: describeMatch(r.tool, r.match), scope: r.scope, decided_at: r.createdAt })), true) },
       ],
     });
   }
   // Context that guard itself collected, as a tool output: outside the agent's arguments (so it cannot be forged)
   // and not in a user message (so attached file contents are not mistaken for the human's request).
-  const files: Record<string, unknown> = {};
+  const files: Record<string, unknown> = Object.create(null);
   let budget = MAX_ATTACHED_CHARS;
   for (const [path, content] of Object.entries(req.attachedFiles)) {
     if (Object.keys(files).length >= MAX_ATTACHED_FILES || budget <= 0) {
       state.truncated = true;
       break;
     }
-    const c = prep(content) as string;
-    files[path] = c;
+    const c = prep(content, true) as string;
+    if (c.length > budget) {
+      state.truncated = true;
+      break;
+    }
+    files[uniqueKey(files, prep(path, true) as string)] = c;
     budget -= c.length;
   }
   items.push({ type: "function_call", call_id: "guard-context", name: "guard_collect_context", arguments: "{}", status: "completed" });
-  items.push({ type: "function_call_output", call_id: "guard-context", output: JSON.stringify({ cwd: req.cwd, files }) });
-  items.push({ type: "function_call", call_id: safeCallId(req.callId), name: safeName(req.tool), arguments: JSON.stringify(prep(req.input)), status: "in_progress" });
+  items.push({ type: "function_call_output", call_id: "guard-context", output: JSON.stringify({ cwd: prep(req.cwd, true), files }) });
+  if (redactString(req.tool) !== req.tool) state.redacted = true;
+  items.push({ type: "function_call", call_id: callId(req.callId), name: safeName(req.tool), arguments: JSON.stringify(prep(req.input, true)), status: "in_progress" });
 
   const questions: unknown[] = req.light ? [Q_EXFIL, Q_UNTRUSTED, Q_INTENT, Q_EVALUATOR] : [Q_RISK, Q_IRREVERSIBLE, Q_EXFIL, Q_UNTRUSTED, Q_INTENT, Q_EVALUATOR, Q_CATEGORY];
   if (!req.light && req.past.some((r) => r.decision === "allow")) questions.push(Q_COVERED_ALLOW);
   if (!req.light && req.past.some((r) => r.decision === "deny")) questions.push(Q_COVERED_DENY);
 
   const body: Record<string, unknown> = { model: cfg.model, input: items, questions };
-  if (req.sessionId) body.prompt_cache_key = `guard:${req.sessionId}`.slice(0, 64);
-  return { body, truncated: state.truncated };
+  if (req.sessionId) body.prompt_cache_key = `guard:${redactString(req.sessionId)}`.slice(0, 64);
+  return { body, truncated: state.truncated, redacted: state.redacted };
+}
+
+async function waitWithSignal<T>(pending: Promise<T>, signal: AbortSignal): Promise<T> {
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(signal.reason ?? new Error("aborted"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
+  try { return await Promise.race([pending, aborted]); }
+  finally { if (onAbort) signal.removeEventListener("abort", onAbort); }
+}
+
+async function readDecisionResponse(res: Response, signal: AbortSignal): Promise<{ answers?: Answer[] }> {
+  if (!res.body) throw new DecisionResponseError("Decisions API: invalid JSON response");
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  let finished = false;
+  try {
+    for (;;) {
+      const { value, done } = await waitWithSignal(reader.read(), signal);
+      if (done) { finished = true; break; }
+      if (chunks.length >= 4096) throw new DecisionResponseError("Decisions API: response too fragmented");
+      total += value.byteLength;
+      if (total > MAX_RESPONSE_BYTES) throw new DecisionResponseError("Decisions API: response too large");
+      chunks.push(value);
+    }
+  } finally {
+    // Cancellation is best effort; a broken stream must not hold the judgement open indefinitely.
+    if (!finished) try { void reader.cancel().catch(() => {}); } catch { /* preserve the read error */ }
+    try { reader.releaseLock(); } catch { /* preserve the read error */ }
+  }
+  try {
+    return JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(Buffer.concat(chunks, total)));
+  } catch {
+    // Native JSON parse errors may contain a fragment of the response.
+    throw new DecisionResponseError("Decisions API: invalid JSON response");
+  }
 }
 
 export async function callDecisions(cfg: Config, body: unknown, signal?: AbortSignal): Promise<Answer[]> {
+  if (signal?.aborted) throw signal.reason ?? new Error("aborted");
+  if (!validBaseUrl(cfg.baseUrl)) throw new Error("Decisions API: invalid base URL");
   const key = process.env.GUARD_OPENAI_API_KEY;
   if (!key) throw new Error("GUARD_OPENAI_API_KEY is not set");
   let lastErr: Error | undefined;
+  // One deadline covers both attempts, including response streaming.
+  const timeout = AbortSignal.timeout(cfg.timeoutMs);
+  const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
   for (let attempt = 0; attempt < 2; attempt++) {
-    const timeout = AbortSignal.timeout(cfg.timeoutMs);
+    if (signal?.aborted) throw signal.reason ?? new Error("aborted");
+    if (timeout.aborted) { lastErr = new Error("Decisions API: request timeout"); break; }
     try {
-      const res = await fetch(`${cfg.baseUrl}/decisions`, {
+      const serializedBody = JSON.stringify(body);
+      if (requestSignal.aborted) throw requestSignal.reason ?? new Error("aborted");
+      const pending = fetch(`${cfg.baseUrl}/decisions`, {
         method: "POST",
-        signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+        signal: requestSignal,
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-        body: JSON.stringify(body),
+        body: serializedBody,
       });
+      // If a nonconforming fetch resolves after cancellation, discard its body too.
+      void pending.then((late) => {
+        if (requestSignal.aborted) try { void late.body?.cancel().catch(() => {}); } catch { /* best effort */ }
+      }, () => {});
+      const res = await waitWithSignal(pending, requestSignal);
       if (res.ok) {
-        const data = (await res.json()) as { answers?: Answer[] };
-        if (!Array.isArray(data.answers)) throw new Error("Decisions API: response has no answers");
+        const data = await readDecisionResponse(res, requestSignal);
+        if (!Array.isArray(data?.answers)) throw new DecisionResponseError("Decisions API: response has no answers");
         return data.answers;
       }
-      lastErr = new Error(`Decisions API ${res.status}: ${(await res.text()).slice(0, 300)}`);
+      // Error bodies may echo request data and can be arbitrarily large. Do not persist or display them.
+      try { void res.body?.cancel().catch(() => {}); } catch { /* the status remains usable */ }
+      const hints: Record<number, string> = { 400: "invalid request", 401: "authentication failed", 403: "access denied", 404: "endpoint not found", 429: "rate limited" };
+      lastErr = new Error(`Decisions API ${res.status}${hints[res.status] ? ` (${hints[res.status]})` : ""}`);
       if (res.status !== 429 && res.status < 500) break;
     } catch (e: any) {
       if (signal?.aborted) throw e;
-      lastErr = e;
+      lastErr = timeout.aborted ? new Error("Decisions API: request timeout") : e instanceof DecisionResponseError ? e : new Error("Decisions API: request failed");
+      if (timeout.aborted) break;
     }
   }
   throw lastErr ?? new Error("Decisions API: unknown error");
 }
 
-export function evaluate(cfg: Config, answers: Answer[], opts: { light: boolean; truncated: boolean }): ModelVerdict {
+function probability(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
+}
+
+function validRiskAnswer(r: Answer | undefined): r is ScoreAnswer {
+  return !!r && r.type === "score" && Number.isFinite(r.score) && r.score >= 0 && r.score <= 4 && probability(r.confidence)
+    && Array.isArray(r.probabilities) && r.probabilities.length === 5
+    && r.probabilities.every((p) => p && Number.isInteger(p.value) && p.value >= 0 && p.value <= 4 && probability(p.probability))
+    && new Set(r.probabilities.map((p) => p.value)).size === 5
+    && Math.abs(r.probabilities.reduce((sum, p) => sum + p.probability, 0) - 1) < 0.01;
+}
+
+export function evaluate(cfg: Config, answers: Answer[], opts: { light: boolean; truncated: boolean; redacted?: boolean; expectPastDenial?: boolean; expectPastApproval?: boolean }): ModelVerdict {
   const t = cfg.thresholds;
-  const by = new Map(answers.map((a) => [a.name, a]));
-  const v: ModelVerdict = { action: "allow", reasons: [], onlySoftReasons: true, truncated: opts.truncated };
+  const by = new Map<string, Answer>();
+  const duplicates = new Set<string>();
+  for (const a of answers) {
+    if (!a || typeof a !== "object" || typeof a.name !== "string") continue;
+    if (by.has(a.name)) duplicates.add(a.name);
+    by.set(a.name, a);
+  }
+  const v: ModelVerdict = { action: "allow", reasons: [], onlySoftReasons: true, truncated: opts.truncated, redacted: !!opts.redacted };
   const raise = (to: "confirm" | "block", why: string, soft = false) => {
     v.reasons.push(why);
     if (!soft) v.onlySoftReasons = false;
@@ -182,30 +294,48 @@ export function evaluate(cfg: Config, answers: Answer[], opts: { light: boolean;
   };
   const pred = (name: string) => {
     const a = by.get(name);
-    if (a?.type === "predicate") return a.probability;
+    if (!duplicates.has(name) && a?.type === "predicate" && probability(a.probability)) return a.probability;
     raise("confirm", `${name}: no answer or refused`);
     return 0;
   };
+  // Ambiguous duplicates still require confirmation, but must not hide an explicit block signal.
+  let duplicateExfilBlock = false;
+  let duplicateRiskBlock = false;
+  for (const answer of answers) {
+    if (!answer || typeof answer !== "object") continue;
+    if (duplicates.has("exfiltration") && answer.name === "exfiltration" && answer.type === "predicate" && probability(answer.probability) && answer.probability >= t.blockExfil)
+      duplicateExfilBlock = true;
+    if (!opts.light && duplicates.has("risk") && answer.name === "risk" && validRiskAnswer(answer)) {
+      const pCat = answer.probabilities.find((p) => p.value === 4)?.probability ?? 0;
+      const pHigh = answer.probabilities.filter((p) => p.value >= 3).reduce((sum, p) => sum + p.probability, 0);
+      if (pCat >= t.blockPCatastrophic || pHigh >= t.blockPHigh) duplicateRiskBlock = true;
+    }
+  }
+  if (duplicateExfilBlock) raise("block", "duplicate exfiltration answer includes a block signal");
+  if (duplicateRiskBlock) raise("block", "duplicate risk answer includes a block signal");
 
   if (!opts.light) {
     const r = by.get("risk");
-    if (r?.type === "score") {
-      v.risk = r.score;
+    if (!duplicates.has("risk") && validRiskAnswer(r)) {
       v.confidence = r.confidence;
       const probs = r.probabilities ?? [];
+      const weighted = probs.reduce((sum, p) => sum + p.value * p.probability, 0) / probs.reduce((sum, p) => sum + p.probability, 0);
+      v.risk = Math.max(r.score, weighted);
+      if (Math.abs(r.score - weighted) > 0.05) raise("confirm", "risk score disagrees with its probability distribution");
       v.pHigh = probs.filter((p) => p.value >= 3).reduce((s, p) => s + p.probability, 0);
       const pCat = probs.find((p) => p.value === 4)?.probability ?? 0;
       if (pCat >= t.blockPCatastrophic) raise("block", `catastrophic p=${pCat.toFixed(2)}`);
       else if (v.pHigh >= t.blockPHigh) raise("block", `destructive or worse p=${v.pHigh.toFixed(2)}`);
       else if (v.pHigh >= t.confirmPHigh) raise("confirm", `destructive or worse p=${v.pHigh.toFixed(2)}`, true);
-      else if (r.score >= t.confirmScore) raise("confirm", `risk ${r.score.toFixed(2)}`, true);
-      else if (r.score >= 1 && r.confidence < t.lowConfidence) raise("confirm", `low confidence (${r.confidence.toFixed(2)})`, true);
+      else if (v.risk >= t.confirmScore) raise("confirm", `risk ${v.risk.toFixed(2)}`, true);
+      else if (v.risk >= 1 && r.confidence < t.lowConfidence) raise("confirm", `low confidence (${r.confidence.toFixed(2)})`, true);
     } else raise("confirm", "risk: no answer or refused");
 
     const irr = pred("irreversible");
     if (irr >= t.confirmIrreversible) raise("confirm", `irreversible p=${irr.toFixed(2)}`, true);
     const c = by.get("category");
-    if (c?.type === "choice") v.category = c.choice;
+    if (!duplicates.has("category") && c?.type === "choice" && typeof c.choice === "string" && probability(c.confidence) && Q_CATEGORY.choices.some((choice) => choice.value === c.choice)) v.category = c.choice;
+    else raise("confirm", "category: invalid answer, no answer or refused");
   }
 
   const untrusted = pred("runs_untrusted_code");
@@ -218,13 +348,17 @@ export function evaluate(cfg: Config, answers: Answer[], opts: { light: boolean;
   v.addressesEvaluator = pred("addresses_evaluator");
   if (v.addressesEvaluator >= t.confirmAddressesEvaluator) raise("confirm", `addresses the judge or is obfuscated p=${v.addressesEvaluator.toFixed(2)}`);
   if (opts.truncated) raise("confirm", "input was truncated for judgement");
+  if (opts.redacted) raise("confirm", "part of the judgement context was redacted");
 
   const cd = by.get("similar_to_past_denial");
-  if (cd?.type === "predicate" && cd.probability >= t.pastDenialCovered) raise("confirm", `similar to a past denial p=${cd.probability.toFixed(2)}`);
+  if ((opts.expectPastDenial || cd) && (!cd || duplicates.has("similar_to_past_denial") || cd.type !== "predicate" || !probability(cd.probability))) raise("confirm", "similar_to_past_denial: invalid or missing answer");
+  else if (cd?.type === "predicate" && cd.probability >= t.pastDenialCovered) raise("confirm", `similar to a past denial p=${cd.probability.toFixed(2)}`);
 
   // A past approval may only lower confirms that come from risk, irreversibility or low confidence
   const ca = by.get("covered_by_past_approval");
-  if (v.action === "confirm" && v.onlySoftReasons && ca?.type === "predicate" && ca.probability >= t.pastApprovalCovered) {
+  if ((opts.expectPastApproval || ca) && (!ca || duplicates.has("covered_by_past_approval") || ca.type !== "predicate" || !probability(ca.probability)))
+    raise("confirm", "covered_by_past_approval: invalid or missing answer");
+  if (opts.expectPastApproval && v.action === "confirm" && v.onlySoftReasons && !duplicates.has("covered_by_past_approval") && ca?.type === "predicate" && probability(ca.probability) && ca.probability >= t.pastApprovalCovered) {
     v.action = "allow";
     v.reasons.push(`same as a past approval p=${ca.probability.toFixed(2)}`);
   }

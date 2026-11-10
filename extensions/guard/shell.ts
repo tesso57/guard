@@ -458,6 +458,27 @@ const WRAPPERS: Record<string, string[]> = {
   xargs: ["-I", "-i", "-n", "-P", "-L", "-l", "-s", "-d", "-E", "-a", "--arg-file", "--delimiter", "--max-args", "--max-procs"],
 };
 
+/** Remove command wrappers while optionally observing each wrapper's own argument range. */
+export function unwrapCommandWrappers(a: string[], observe?: (argv: string[], start: number, end: number) => void): string[] {
+  let start = 0;
+  for (;;) {
+    const name = basename(a[start] ?? "");
+    const w = Object.hasOwn(WRAPPERS, name) ? WRAPPERS[name] : undefined;
+    if (!w) {
+      observe?.(a, start, a.length);
+      return a.slice(start);
+    }
+    let next = start + 1;
+    while (next < a.length && (a[next].startsWith("-") || (name === "env" && /^[^=]+=/.test(a[next])))) {
+      const option = a[next++];
+      if (w.includes(option) && next < a.length) next++;
+    }
+    if (["timeout", "chrt", "taskset", "flock"].includes(name) && next < a.length) next++;
+    observe?.(a, start, next);
+    start = next;
+  }
+}
+
 /**
  * Normalizes argv for matching: basename of the command, without leading global options.
  *
@@ -467,21 +488,7 @@ const WRAPPERS: Record<string, string[]> = {
  *   so `timeout 9 git -C x -c k=v push` is seen as `git push`.
  */
 export function normalizeArgv(a: string[], mode: "allow" | "deny" = "allow"): { argv: string[]; unknownOption: boolean } {
-  let rest = [...a];
-  if (mode === "deny") {
-    for (;;) {
-      const name = basename(rest[0] ?? "");
-      const w = Object.hasOwn(WRAPPERS, name) ? WRAPPERS[name] : undefined;
-      if (!w) break;
-      const head = basename(rest.shift()!);
-      while (rest.length && (rest[0].startsWith("-") || (head === "env" && /^[A-Za-z_]\w*=/.test(rest[0])))) {
-        const t = rest.shift()!;
-        if (w.includes(t)) rest.shift();
-      }
-      // Wrappers with a positional argument before the command (duration, priority, CPU mask, lock file)
-      if (["timeout", "chrt", "taskset", "flock"].includes(head) && rest.length) rest.shift();
-    }
-  }
+  let rest = mode === "deny" ? unwrapCommandWrappers(a) : [...a];
   if (!rest.length) return { argv: [], unknownOption: false };
   const head = basename(rest[0]);
   rest = rest.slice(1);
@@ -620,7 +627,7 @@ const hasLong = (a: string[], ...names: string[]) => flags(a).some((t) => names.
 const onlyFlagsFrom = (a: string[], allowed: string[]) => a.slice(2).every((t) => allowed.includes(t));
 
 // rg options that only change what is searched or printed. -z (runs decompressors), -L/--follow, --pre,
-// --hostname-bin, --hyperlink-format, --engine, --no-config/--config-path style options are not listed.
+// --hostname-bin, --hyperlink-format, --engine and --config-path style options are not listed.
 const RG_SHORT_FLAGS = new Set([..."abcFhHiIlnNoOpqsSuUvwxy0".split(""), "."]);
 const RG_SHORT_VALUES = new Set([..."ABCdeEgjmMrtT".split("")]);
 const RG_LONG_FLAGS = new Set([
@@ -630,7 +637,7 @@ const RG_LONG_FLAGS = new Set([
   "no-ignore-dot", "no-ignore-exclude", "no-ignore-files", "no-ignore-global", "no-ignore-parent", "no-ignore-vcs", "no-line-number",
   "no-messages", "no-column", "no-unicode", "null", "null-data", "one-file-system", "only-matching", "passthru", "pcre2", "pretty",
   "quiet", "smart-case", "stats", "text", "trim", "type-list", "unrestricted", "vimgrep", "with-filename", "word-regexp", "no-hidden",
-  "no-follow", "no-binary", "no-text", "no-trim", "no-pcre2", "no-stats", "no-multiline", "no-crlf", "no-fixed-strings", "no-invert-match",
+  "no-follow", "no-binary", "no-text", "no-trim", "no-pcre2", "no-stats", "no-multiline", "no-crlf", "no-fixed-strings", "no-invert-match", "no-config",
 ]);
 const RG_LONG_VALUES = new Set([
   "after-context", "before-context", "context", "color", "colors", "context-separator", "field-context-separator", "field-match-separator",
@@ -669,6 +676,7 @@ const READ_ONLY = new Set([
 ]);
 const GIT_READ_ONLY = new Set(["status", "diff", "log", "show", "blame", "ls-files", "rev-parse", "describe", "shortlog", "grep", "ls-tree", "cat-file"]);
 const NPM_READ_ONLY = new Set(["ls", "list", "explain", "why"]);
+const VERSION_TOOLS = new Set([...READ_ONLY, "git", "npm", "node", "python", "python3", "ruby", "perl", "php", "sh", "bash", "zsh"]);
 
 /**
  * True only if the command cannot write files, run other programs, or change system state,
@@ -680,7 +688,7 @@ export function isReadOnlyArgv(raw: string[]): boolean {
   const head = a[0];
   // An empty command name is never read-only (it may hide the real command)
   if (!head) return false;
-  if (a.length === 2 && /^(--version|-V|--help)$/.test(a[1])) return true;
+  if (a.length === 2 && /^(--version|-V|--help)$/.test(a[1])) return VERSION_TOOLS.has(head);
   switch (head) {
     case "test":
     case "[":
@@ -711,6 +719,8 @@ export function isReadOnlyArgv(raw: string[]): boolean {
       return !a.some((t) => /^-(exec|execdir|ok|okdir|delete|fprint|fprint0|fprintf|fls)$/.test(t));
     case "rg":
       // An allowlist: rg keeps gaining options that run programs (--pre, --hostname-bin) or follow links out (-L)
+      // Requiring it first avoids mistaking a pattern or an option value for a flag.
+      if (process.env.RIPGREP_CONFIG_PATH && a[1] !== "--no-config") return false;
       return rgOptionsAreKnown(a);
     case "grep":
     case "egrep":

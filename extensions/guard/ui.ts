@@ -1,5 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { describeMatch, examples, type Match } from "./rules.ts";
+import { extractEdits } from "./edits.ts";
 
 export type Choice = { decision: "allow" | "deny"; scope: "once" | "session" | "project" | "global"; reason?: string };
 
@@ -22,11 +23,18 @@ const ONCE = "Allow (this time only)";
 const DENY = "Deny";
 const BACK = "← Back";
 
+/** Prevent terminal control sequences and bidirectional controls from disguising displayed input. */
+export function displayText(text: string): string {
+  return text.replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u061c\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g,
+    (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
+const inline = (text: string) => displayText(text).replace(/\n/g, "\\n");
+
 /** Two-step approval dialog. Esc, timeout or no selection count as "deny this time". */
 export async function confirmDialog(ctx: ExtensionContext, s: DialogSpec): Promise<Choice> {
-  const opts = { timeout: s.timeoutMs };
-  const label = s.patterns?.map((p) => describeMatch(s.tool, p)).join(" / ");
-  const denyLabel = s.denyPatterns?.map((p) => describeMatch(s.tool, p)).join(" / ");
+  const opts = { timeout: s.timeoutMs, signal: ctx.signal };
+  const label = s.patterns?.map((p) => inline(describeMatch(s.tool, p))).join(" / ");
+  const denyLabel = s.denyPatterns?.map((p) => inline(describeMatch(s.tool, p))).join(" / ");
   const sessionOpt = label ? `Allow (this session: ${label})` : undefined;
   const rememberOpt = "Allow and remember… ▸";
   const denyRememberOpt = "Deny and remember… ▸";
@@ -37,22 +45,23 @@ export async function confirmDialog(ctx: ExtensionContext, s: DialogSpec): Promi
   const askReason = async () => (await ctx.ui.input("Reason (optional, passed to the agent)", "", opts))?.trim() || undefined;
 
   for (;;) {
-    const pick = await ctx.ui.select(`${s.title}\n\n${s.body}`, options, opts);
+    const pick = await ctx.ui.select(displayText(`${s.title}\n\n${s.body}`), options, opts);
     if (pick === ONCE) return { decision: "allow", scope: "once" };
-    if (pick === sessionOpt) return { decision: "allow", scope: "session" };
-    if (pick === rememberOpt || pick === denyRememberOpt) {
+    if (sessionOpt && s.rememberAllow && pick === sessionOpt) return { decision: "allow", scope: "session" };
+    if ((pick === rememberOpt && options.includes(rememberOpt)) || (pick === denyRememberOpt && options.includes(denyRememberOpt))) {
       const decision = pick === rememberOpt ? "allow" : "deny";
       const pats = decision === "allow" ? s.patterns : s.denyPatterns;
       const ex = pats?.map((p) => examples(p)).find(Boolean);
-      const scopes = [`This project (${s.projectName})`];
+      const scopes = [`This project (${inline(s.projectName)})`];
       // A deny is always on the safe side, so every scope is offered for it
       if (decision === "deny" || s.globalAllow) scopes.push("Global");
       if (decision === "deny") scopes.push("This session");
       scopes.push(BACK);
-      const head = `Remember as ${decision}: ${decision === "allow" ? label : denyLabel}` + (ex ? `\nmatches: ${ex.yes}\ndoes not match: ${ex.no}` : "");
+      const head = `Remember as ${decision}: ${decision === "allow" ? label : denyLabel}` + (ex ? `\nmatches: ${inline(ex.yes)}\ndoes not match: ${inline(ex.no)}` : "");
       const sc = await ctx.ui.select(head, scopes, opts);
       if (!sc) return { decision: "deny", scope: "once" };
       if (sc === BACK) continue;
+      if (!scopes.includes(sc)) return { decision: "deny", scope: "once" };
       const scope = sc === "Global" ? "global" : sc === "This session" ? "session" : "project";
       return { decision, scope, reason: decision === "deny" ? await askReason() : undefined };
     }
@@ -61,18 +70,24 @@ export async function confirmDialog(ctx: ExtensionContext, s: DialogSpec): Promi
   }
 }
 
-/** Summary for the dialog: diffs for edit, head and tail of the content for write. */
+/** Show both ends when a command or file change is too long for the dialog. */
 export function preview(tool: string, input: any): string {
-  const cut = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
-  if (tool === "bash" || tool === "powershell") return cut(String(input?.command ?? ""), 1500);
-  if (tool === "edit" && Array.isArray(input?.edits)) {
-    const parts = input.edits.slice(0, 3).map((e: any) => `- ${cut(String(e?.oldText ?? ""), 200)}\n+ ${cut(String(e?.newText ?? ""), 200)}`);
-    return `edit ${input.path}\n${parts.join("\n")}${input.edits.length > 3 ? `\n… (${input.edits.length - 3} more)` : ""}`;
+  const cut = (s: string, n: number) => {
+    if (s.length <= n) return s;
+    const head = Math.ceil(n / 2);
+    const tail = n - head;
+    return `${s.slice(0, head)}\n… [${s.length - n} chars omitted] …\n${s.slice(-tail)}`;
+  };
+  if (tool === "bash" || tool === "powershell") return displayText(cut(String(input?.command ?? ""), 1500));
+  const edits = tool === "edit" ? extractEdits(input) : undefined;
+  if (edits) {
+    const parts = edits.slice(0, 3).map((e) => `- ${cut(e.oldText, 200)}\n+ ${cut(e.newText, 200)}`);
+    return displayText(`edit ${inline(cut(String(input.path), 1500))}\n${parts.join("\n")}${edits.length > 3 ? `\n… (${edits.length - 3} more)` : ""}`);
   }
   if (tool === "write" && typeof input?.content === "string") {
     const c: string = input.content;
-    return `write ${input.path} (${c.length} chars)\n${c.length > 600 ? `${c.slice(0, 300)}\n…\n${c.slice(-300)}` : c}`;
+    return displayText(`write ${inline(cut(String(input.path), 1500))} (${c.length} chars)\n${cut(c, 600)}`);
   }
-  if (typeof input?.path === "string") return `${tool} ${input.path}`;
-  return `${tool} ${cut(JSON.stringify(input), 500)}`;
+  if (typeof input?.path === "string") return displayText(`${tool} ${inline(cut(input.path, 1500))}`);
+  return displayText(`${tool} ${cut(JSON.stringify(input) ?? String(input), 500)}`);
 }

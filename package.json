@@ -3,10 +3,19 @@
   "version": "0.1.0",
   "description": "pi coding agent extension that judges the risk of every tool call with the OpenAI Decisions API before it runs",
   "type": "module",
+  "license": "MIT",
   "private": true,
-  "keywords": ["pi-package"],
+  "keywords": [
+    "pi-package",
+    "pi-extension"
+  ],
+  "files": [
+    "extensions"
+  ],
   "pi": {
-    "extensions": ["./extensions/guard/index.ts"]
+    "extensions": [
+      "./extensions/index.ts"
+    ]
   },
   "engines": {
     "node": ">=22.19.0"
@@ -14,17 +23,20 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "knip": "knip",
-    "test": "node --no-warnings test/unit.test.ts",
+    "test": "node --experimental-strip-types --test test/unit.test.ts tests/*.test.ts",
     "test:e2e": "node test/e2e.mjs",
-    "check": "npm run typecheck && npm run knip && npm test && npm run test:e2e"
+    "check:package": "node scripts/check-package.mjs",
+    "check": "npm run typecheck && npm run knip && npm test && npm run check:package && npm run test:e2e"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
   },
   "devDependencies": {
+    "@earendil-works/pi-ai": "^1.5.0",
     "@earendil-works/pi-coding-agent": "^1.5.0",
-    "@types/node": "^22.10.0",
+    "@types/node": "^26.0.0",
     "knip": "^6.44.1",
-    "typescript": "^5.7.0"
+    "typescript": "^5.9.3",
+    "yaml": "2.9.0"
   }
 }

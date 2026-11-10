@@ -4,13 +4,153 @@
  *   sensitive : access to paths that likely hold secrets, or to guard's own state → confirm
  *   safeAllow : obviously safe → allow without calling the model
  */
-import { homedir, userInfo } from "node:os";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { basename, dirname, join, relative } from "node:path";
-import { hasGluedPathValue, innerCommands, INTERPRETER_NAMES, isLongOption, isReadOnlyArgv, isShell, nonFlags, normalizeArgv, type Parsed, parseShell } from "./shell.ts";
-import { containsProtectedRoot, expandGlobFully, gitConfigIsSafe, globHitsOptionLikeName, globMayReach, ignoreFilesReinclude, isFreelyReadable, isHardLinked, isHomeOrAncestor, isInside, isRiskyProjectFile, memo, pathLikeTokens, pathVariants, protectedReason, protectedRoots, realPath, resolvePath, secretFilesUnder, sensitiveReason } from "./paths.ts";
+import { homedir, tmpdir, userInfo } from "node:os";
+import { createHash } from "node:crypto";
+import { accessSync, constants, existsSync, opendirSync, statSync } from "node:fs";
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { hasGluedPathValue, innerCommands, INTERPRETER_NAMES, isLongOption, isReadOnlyArgv, isShell, nonFlags, normalizeArgv, type Parsed, parseShell, unwrapCommandWrappers } from "./shell.ts";
+import { readRegularText } from "./files.ts";
+import { containsProtectedRoot, expandGlobFully, gitConfigIsSafe, globHitsOptionLikeName, globMayReach, ignoreFilesReinclude, isFreelyReadable, isHardLinked, isHomeOrAncestor, isInside, isInsideExact, isProtectedHardLink, isRiskyProjectFile, memo, pathLikeTokens, pathVariants, protectedReason, protectedRoots, readFallbackVariants, realPath, resolvePath, secretFilesUnder, sensitiveReason, UNKNOWN_PATH } from "./paths.ts";
 
 const BUILTIN_TOOLS = new Set(["bash", "edit", "write", "read", "grep", "find", "ls"]);
+const INCOMPLETE_DIRECTORY_COMPARISON = "/__guard_incomplete_directory_comparison__";
+const BASH_BUILTINS = new Set(["echo", "printf", "pwd", "cd", "pushd", "popd", "dirs", "true", "false", "test", "[", "type", "command", "builtin", "enable", "export", "set", "declare", "unset", "read", "history", "help", "alias", "unalias", "hash", ":"]);
+
+function printfChanges(args: string[], matches: (name: string) => boolean): boolean {
+  return args.some((arg, i) => arg === "-v" ? matches(args[i + 1] ?? "") : arg.startsWith("-v") && arg.length > 2 && matches(arg.slice(2)));
+}
+
+function usesShellNameref(parsed: Parsed): boolean {
+  return parsed.subs.some((s) => {
+    let found = false;
+    unwrapCommandWrappers(s.argv, (argv, start, end) => {
+      const head = basename(argv[start] ?? "");
+      if (["declare", "typeset", "local"].includes(head) && argv.slice(start + 1, end).some((arg) => /^-[A-Za-z]*n/.test(arg))) found = true;
+    });
+    return found;
+  });
+}
+
+function usesBuiltinControl(parsed: Parsed): boolean {
+  return parsed.subs.some((s) => {
+    let found = false;
+    unwrapCommandWrappers(s.argv, (argv, start) => { if (basename(argv[start] ?? "") === "enable") found = true; });
+    return found;
+  });
+}
+
+function changesShellStartup(parsed: Parsed): boolean {
+  const relevant = /^(?:(?:BASH_ENV|ENV|BASHOPTS|SHELLOPTS|PS4)(?:\[[^\]]*\])?(?:\+?=|$)|BASH_FUNC_.*%%=)/;
+  return parsed.subs.some((s) => {
+    if (s.assigns.some((assignment) => relevant.test(assignment)) || ((s.argv[0] ?? "").includes("=") && relevant.test(s.argv[0]))) return true;
+    let changes = false;
+    unwrapCommandWrappers(s.argv, (argv, start, end) => {
+      const head = basename(argv[start] ?? "");
+      if (!["env", "export", "declare", "typeset", "local", "readonly", "unset", "read", "printf"].includes(head)) return;
+      const args = argv.slice(start + 1, end);
+      if (["env", "export", "declare", "typeset", "local", "readonly", "unset", "read"].includes(head) && args.some((arg) => relevant.test(arg) || (head === "env" && /^--unset=(?:BASH_ENV|ENV|BASHOPTS|SHELLOPTS|PS4)$/.test(arg)))) changes = true;
+      if (head === "printf" && printfChanges(args, (name) => relevant.test(name))) changes = true;
+    });
+    return changes;
+  });
+}
+
+function changesExecutableSearch(parsed: Parsed): boolean {
+  const pathVariable = /^PATH(?:\[[^\]]*\])?(?:\+?=|$)/;
+  return parsed.subs.some((s) => {
+    if (s.assigns.some((assignment) => pathVariable.test(assignment)) || ((s.argv[0] ?? "").includes("=") && pathVariable.test(s.argv[0]))) return true;
+    let changes = false;
+    unwrapCommandWrappers(s.argv, (argv, start, end) => {
+      const head = basename(argv[start] ?? "");
+      if (!["env", "export", "declare", "typeset", "local", "readonly", "hash", "unset", "read", "printf"].includes(head)) return;
+      const args = argv.slice(start + 1, end);
+      if (["export", "declare", "typeset", "local", "readonly", "env"].includes(head))
+        changes ||= args.some((arg) => pathVariable.test(arg) || (head === "env" && (arg === "--unset=PATH" || /^-[^-]*i/.test(arg) || /^-S/.test(arg) || isLongOption(arg, "--ignore-environment") || isLongOption(arg, "--split-string"))));
+      if (head === "hash" && args.some((arg) => /^-[^-]*p/.test(arg))) changes = true;
+      if ((head === "unset" || head === "read") && args.some((arg) => pathVariable.test(arg))) changes = true;
+      if (head === "printf" && printfChanges(args, (name) => pathVariable.test(name))) changes = true;
+    });
+    return changes;
+  });
+}
+
+function enablesShellTracing(parsed: Parsed): boolean {
+  return parsed.subs.some((s) => {
+    const [head, ...args] = normalizeArgv(s.argv, "deny").argv;
+    if (head !== "set" && !isShell(basename(head ?? ""))) return false;
+    return args.some((arg, i) => /^-[^-]*x/.test(arg) || (arg === "-o" && args[i + 1] === "xtrace"));
+  });
+}
+
+/** Find the nearest repository root without running Git or loading its configuration. */
+export function enclosingRepository(cwd: string): string | undefined {
+  for (let dir = resolve(cwd); ; dir = dirname(dir)) {
+    if (existsSync(join(dir, ".git"))) return dir;
+    if (dirname(dir) === dir) return undefined;
+  }
+}
+
+/** Pi prepends its bin directory to PATH. Project or temporary executables must not masquerade as safe commands. */
+export function inspectExecutablePath(parsed: Parsed, cwd: string, platform: NodeJS.Platform = process.platform): { risk?: string; fingerprint?: string } {
+  // Git Bash may use POSIX paths and Windows executable suffixes that Node's native PATH lookup cannot reproduce.
+  if (platform === "win32") {
+    const risky = parsed.subs.some((s) => {
+      const rawHead = s.argv[0];
+      if (!rawHead) return false;
+      const head = normalizeArgv(s.argv, "deny").argv[0];
+      return rawHead.includes("/") || rawHead.includes("\\") || (!!head && !BASH_BUILTINS.has(head));
+    });
+    return risky ? { risk: "cannot verify executable lookup for an external command on Windows" } : {};
+  }
+  // Pi updates the first case-insensitive PATH key, but Unix shells read only the uppercase key.
+  const pathKey = Object.keys(process.env).find((key) => key.toLowerCase() === "path") ?? "PATH";
+  const agentDir = getAgentDir();
+  const agentBin = join(agentDir, "bin");
+  const piPath = process.env[pathKey] ?? "";
+  const updatedPiPath = piPath.split(delimiter).filter(Boolean).includes(agentBin) ? piPath : [agentBin, piPath].filter(Boolean).join(delimiter);
+  const shellPath = pathKey === "PATH" ? updatedPiPath : process.env.PATH;
+  const pathEntries = shellPath?.split(delimiter) ?? [];
+  const physicalCwd = realPath(cwd);
+  const repos = [enclosingRepository(cwd), enclosingRepository(physicalCwd)].filter((root): root is string => root !== undefined);
+  const unsafeRoots = [cwd, physicalCwd, ...repos, agentDir, realPath(agentDir), "/tmp", "/private/tmp", tmpdir(), realPath(tmpdir())];
+  let probes = 0;
+  let risk: string | undefined;
+  const selected: unknown[] = [];
+  for (const { s, a, bases, unknown } of subsWithBases(parsed, cwd)) {
+    const head = a[0];
+    if (!head || s.argv[0]?.includes("/") || BASH_BUILTINS.has(head)) continue;
+    if (shellPath === undefined) return { risk: "cannot determine the shell executable search path" };
+    if (unknown && pathEntries.some((entry) => !entry || !isAbsolute(entry))) return { risk: "cannot determine the executable search directory" };
+    for (const base of bases) {
+      let found = false;
+      for (const entry of pathEntries) {
+        if (++probes > 512) return { risk: "executable search exceeds the inspection limit" };
+        const candidate = join(resolve(base, entry || "."), head);
+        let st;
+        try {
+          accessSync(candidate, constants.X_OK);
+          st = statSync(candidate);
+          if (!st.isFile()) continue;
+        } catch (error: any) {
+          if (["ENOENT", "ENOTDIR", "EACCES"].includes(error?.code)) continue;
+          return { risk: "cannot inspect the executable search path" };
+        }
+        const actual = realPath(candidate);
+        selected.push([head, base, candidate, actual, st.dev, st.ino, st.mode, st.size, st.mtimeMs, st.ctimeMs]);
+        if ([candidate, actual].some((path) => unsafeRoots.some((root) => isInside(path, root)))) risk ??= "a command resolves to a project, temporary or Pi-managed executable";
+        found = true;
+        break; // Bash uses the first executable it finds.
+      }
+      if (!found) selected.push([head, base, null]);
+    }
+  }
+  return { risk, fingerprint: createHash("sha256").update(JSON.stringify(selected)).digest("hex") };
+}
+
+export function executablePathRisk(parsed: Parsed, cwd: string, platform: NodeJS.Platform = process.platform): string | undefined {
+  return inspectExecutablePath(parsed, cwd, platform).risk;
+}
 
 const HARD_DENY_BASH: [RegExp, string][] = [
   [/\bmkfs(?:\.\w+)?\b/, "creates a file system"],
@@ -113,12 +253,17 @@ function bashWriteTargets(raw: string[]): string[] {
   return out;
 }
 
-/** Every string in a nested value, for tools whose argument names we do not know. */
+/** Keys and string values may both carry paths or commands in tools with unknown schemas. */
 function allStrings(v: unknown, out: string[] = []): string[] {
   if (typeof v === "string") out.push(v);
   else if (Array.isArray(v)) v.forEach((x) => allStrings(x, out));
-  else if (v && typeof v === "object") Object.values(v).forEach((x) => allStrings(x, out));
+  else if (v && typeof v === "object") for (const [key, value] of Object.entries(v)) { out.push(key); allStrings(value, out); }
   return out;
+}
+
+/** Unknown tools may treat any string as a command or path; long strings exceed deterministic parsing limits. */
+export function hasUninspectedToolInput(tool: string, input: unknown): boolean {
+  return !BUILTIN_TOOLS.has(tool) && allStrings(input).some((value) => value.length >= 16 * 1024);
 }
 
 /**
@@ -159,29 +304,45 @@ function computeInputPaths(tool: string, input: any, cwd: string, parsed?: Parse
   if (!BUILTIN_TOOLS.has(tool)) {
     // Unknown tools: every path-like string counts, including words inside command-like strings
     const strs = allStrings(input).filter((x) => x.length < 16 * 1024);
-    const words = strs.flatMap((x) => (/\s/.test(x.trim()) ? parseShell(x).subcommands.flat() : [x]));
-    const ps = pathLikeTokens(cwd, words);
+    const words = strs.flatMap((x) => (/\s/.test(x.trim()) ? [x, ...parseShell(x).subcommands.flat()] : [x]));
+    // Unknown schemas may carry a literal path with whitespace or '=' rather than a shell command.
+    const literals = strs.filter((x) => !/[\r\n]/.test(x) && !/^https?:\/\//i.test(x) && (/^(?:\/|~\/|\.{1,2}\/|\$HOME\/|file:\/\/)/i.test(x) || x.includes("/")));
+    const ps = [...pathLikeTokens(cwd, words), ...literals.flatMap((x) => pathVariants(cwd, x))];
     return { reads: ps, writes: ps };
   }
   const p: string[] = [];
-  for (const k of ["path", "file_path", "filePath", "file", "dir", "directory"]) if (typeof input?.[k] === "string") p.push(...pathVariants(cwd, input[k]));
+  for (const k of ["path", "file_path", "filePath", "file", "dir", "directory"]) if (typeof input?.[k] === "string") {
+    p.push(...pathVariants(cwd, input[k]));
+    if (tool === "read") p.push(...readFallbackVariants(cwd, input[k]));
+  }
   if (tool === "edit" || tool === "write") return { reads: [], writes: p };
   return { reads: p, writes: [] };
 }
 
-/** Entries directly inside the given directories (bounded; a huge directory counts as unreadable `/`). */
+/** Entries directly inside the given directories; an incomplete scan gets a sentinel. */
 function dirChildren(paths: string[]): string[] {
   const out: string[] = [];
   for (const p of paths) {
-    let names: string[];
+    let directory: import("node:fs").Dir;
     try {
       if (!statSync(p).isDirectory()) continue;
-      names = readdirSync(p);
-    } catch {
-      continue;
+      directory = opendirSync(p);
+    } catch (error: any) {
+      if (error?.code === "ENOENT" || error?.code === "ENOTDIR") continue;
+      return [INCOMPLETE_DIRECTORY_COMPARISON];
     }
-    if (names.length > 2000) return ["/"];
-    out.push(...names.map((n) => join(p, n)));
+    try {
+      for (;;) {
+        const entry = directory.readSync();
+        if (!entry) break;
+        if (out.length >= 2000) return [INCOMPLETE_DIRECTORY_COMPARISON];
+        out.push(join(p, entry.name));
+      }
+    } catch {
+      return [INCOMPLETE_DIRECTORY_COMPARISON];
+    } finally {
+      try { directory.closeSync(); } catch { return [INCOMPLETE_DIRECTORY_COMPARISON]; }
+    }
   }
   return out;
 }
@@ -199,8 +360,7 @@ function patchFiles(a: string[], s: Parsed["subs"][number], bases: string[]): { 
     const path = resolvePath(bases[0], src);
     let text: string;
     try {
-      if (statSync(path).size > 2_000_000) throw new Error("too large");
-      text = readFileSync(path, "utf8");
+      text = readRegularText(path, 2_000_001);
     } catch {
       readable = false;
       continue;
@@ -457,10 +617,12 @@ function strictlyReadOnly(parsed: Parsed | undefined, writes: string[]): boolean
 
 export function hardDeny(tool: string, input: any, cwd: string, roots: string[], parsed?: Parsed, depth = 0): string | undefined {
   const { reads, writes } = inputPaths(tool, input, cwd, parsed);
+  const unlinkOnly = tool === "bash" && !!parsed && parsed.ok && !parsed.dynamic.length && !parsed.writes.length && parsed.subcommands.length > 0 && parsed.subcommands.every((a) => ["rm", "unlink"].includes(normalizeArgv(a, "deny").argv[0]));
   for (const w of writes) {
     const r = protectedReason(w, roots);
     if (r) return `writes to a ${r}`;
-    if (basename(w) === "authorized_keys" || basename(realPath(w)) === "authorized_keys") return "writes to authorized_keys";
+    if (basename(w).toLowerCase() === "authorized_keys" || basename(realPath(w)).toLowerCase() === "authorized_keys") return "writes to authorized_keys";
+    if (!unlinkOnly && isProtectedHardLink(w, roots)) return "writes through a hard link to protected state";
   }
   if (tool !== "bash") {
     // Built-in tools take data (file contents, search patterns), not commands; running such data later is judged then
@@ -490,7 +652,7 @@ export function hardDeny(tool: string, input: any, cwd: string, roots: string[],
         if (r) return r;
       }
     const resolveAll = (b: string, t: string) => [...pathVariants(b, t), ...(hasGlob(t) ? globTargets(b, t) : [])];
-    const outerRoots = roots.filter((r) => !isInside(realPath(r), realPath(cwd)));
+    const outerRoots = roots.filter((r) => !isInsideExact(realPath(r), realPath(cwd)));
     // Wildcards are checked against guard's state by pattern, so a skipped or truncated expansion cannot hide them
     const globInto = (b: string, t: string, rs: string[]) => hasGlob(t) && globMayReach(b, t, rs).into;
     const globAround = (b: string, t: string, rs: string[]) => hasGlob(t) && globMayReach(b, t, rs).around;
@@ -562,7 +724,7 @@ export function hardDeny(tool: string, input: any, cwd: string, roots: string[],
         const named = [...new Set([...nonFlags(a), ...nonFlags(s.argv)])].filter((t) => !(PLACERS.has(a[0]) && t === nonFlags(a).at(-1)));
         // The project's own .pi/.agents are guarded by the explicit write checks; counting the project as their
         // parent would block every `git add .` or `prettier --write .` in projects that have .pi/guard.json
-        const hits = (p: string) => containsProtectedRoot(p, outerRoots) || (protectedReason(p, roots) && !isInside(realPath(p), realPath(cwd)));
+        const hits = (p: string) => containsProtectedRoot(p, outerRoots) || (protectedReason(p, roots) && !isInsideExact(realPath(p), realPath(cwd)));
         if (named.some((t) => bases.some((b) => globInto(b, t, outerRoots) || globAround(b, t, outerRoots) || resolveAll(b, t).some(hits))))
           return "changes guard's or pi's state, or a directory that contains it";
         // Values glued to options (-C../../.pi, -t../x, --directory=../x)
@@ -572,7 +734,7 @@ export function hardDeny(tool: string, input: any, cwd: string, roots: string[],
         // (git mv x .pi/extensions/, git checkout -- .pi/x, npm i --prefix .pi/extensions). Directories that merely
         // contain them (`.`, `src/..`) stay allowed.
         // Read-only commands that change files only through redirects are covered by the redirect-target checks
-        const innerRoots = isReadOnlyArgv(s.argv) ? [] : roots.filter((r) => isInside(realPath(r), realPath(cwd)));
+        const innerRoots = isReadOnlyArgv(s.argv) ? [] : roots.filter((r) => isInsideExact(realPath(r), realPath(cwd)));
         const inInner = (p: string) => !!protectedReason(p, innerRoots);
         if (named.some((t) => bases.some((b) => globInto(b, t, innerRoots) || resolveAll(b, t).some(inInner))) || optionPaths.some(inInner))
           return "changes the project's .pi/ or .agents/ (code and settings pi loads)";
@@ -587,7 +749,7 @@ export function hardDeny(tool: string, input: any, cwd: string, roots: string[],
   // Names in quoted text and in here-documents fed to cat (commit messages, docs) are not paths
   const lower = nameScanText(cmd, parsed).toLowerCase();
   // The project's own .pi/ is covered by the write checks above; naming it (git add .pi/x) is not a change to it
-  const outer = roots.filter((r) => !isInside(realPath(r), realPath(cwd)));
+  const outer = roots.filter((r) => !isInsideExact(realPath(r), realPath(cwd)));
   const touchesProtected =
     reads.some((p) => protectedReason(p, outer)) || outer.some((r) => lower.includes(r.toLowerCase())) || PROTECTED_MARKERS.some((m) => lower.includes(m));
   if (touchesProtected && !strictlyReadOnly(parsed, writes)) return "may modify a protected path (guard rules, pi state, extensions or settings)";
@@ -622,6 +784,13 @@ function searchExposure(tool: string, input: any, cwd: string, parsed?: Parsed):
     let unknown = false;
     for (const r of roots0) {
       const real = realPath(r);
+      try {
+        if (statSync(real).isFile()) {
+          if (sensitiveReason(real)) return { hit: real, unknown };
+          if (isHardLinked(real)) unknown = true;
+          continue;
+        }
+      } catch { unknown = true; continue; }
       const { files, complete } = secretFilesUnder(real);
       if (!complete) unknown = true;
       const hit = files.find((f) => hidden || !relativeHasHidden(real, f));
@@ -649,18 +818,51 @@ function searchExposure(tool: string, input: any, cwd: string, parsed?: Parsed):
   return { unknown };
 }
 
+/** True if a content search's reachable files could not be checked completely. */
+export function searchNeedsJudgement(tool: string, input: any, cwd: string, parsed?: Parsed): boolean {
+  return searchExposure(tool, input, cwd, parsed).unknown;
+}
+
+/** An ambient ripgrep config may inject options such as --pre and --follow. */
+export function usesRipgrepConfig(parsed?: Parsed): boolean {
+  if (!process.env.RIPGREP_CONFIG_PATH || !parsed) return false;
+  return parsed.subcommands.some((raw) => {
+    const a = normalizeArgv(raw, "deny").argv;
+    return a[0] === "rg" && a[1] !== "--no-config";
+  });
+}
+
 function relativeHasHidden(root: string, file: string): boolean {
   return file.slice(root.length).split("/").some((seg) => seg.startsWith("."));
 }
 
 export function sensitive(tool: string, input: any, cwd: string, roots: string[], parsed?: Parsed): string | undefined {
+  if (tool === "bash" && (process.env.BASH_ENV || process.env.ENV || process.env.BASHOPTS || process.env.SHELLOPTS || Object.keys(process.env).some((key) => key.startsWith("BASH_FUNC_") && key.endsWith("%%"))))
+    return "shell startup settings, options or imported functions may run code or alter parsing";
+  if (tool === "bash" && parsed && changesShellStartup(parsed))
+    return "the command changes shell startup or tracing settings";
+  if (tool === "bash" && parsed && usesShellNameref(parsed))
+    return "indirect shell variable references may change execution settings";
+  if (tool === "bash" && parsed && usesBuiltinControl(parsed))
+    return "shell builtin controls may change command resolution or load code";
+  if (tool === "bash" && parsed && changesExecutableSearch(parsed))
+    return "the command changes executable search paths or command lookup";
+  if (tool === "bash" && parsed && enablesShellTracing(parsed))
+    return "shell tracing may run PS4 expansions or expose command data";
+  if (tool === "bash" && parsed) {
+    const executableRisk = executablePathRisk(parsed, cwd);
+    if (executableRisk) return executableRisk;
+  }
   const { reads, writes } = inputPaths(tool, input, cwd, parsed);
+  if (reads.includes(INCOMPLETE_DIRECTORY_COMPARISON)) return "directory comparison could not be inspected completely";
+  if (reads.includes(UNKNOWN_PATH)) return "some wildcard read paths could not be inspected completely";
   // The project's own .pi/ holds project files (prompts, guard.json); reading them is fine
-  const outerRoots = roots.filter((r) => !isInside(realPath(r), realPath(cwd)));
+  const outerRoots = roots.filter((r) => !isInsideExact(realPath(r), realPath(cwd)));
   for (const p of [...reads, ...writes]) {
     const r = sensitiveReason(p);
     if (r) return r;
     if (protectedReason(p, outerRoots)) return "reads guard or pi internal state";
+    if (isHardLinked(p)) return "a hard-linked file may share contents with a path outside the project";
   }
   // pi's grep tool searches hidden files recursively
   if (tool === "grep" && reads.concat(reads.length ? [] : [cwd]).some((p) => isHomeOrAncestor(p) || isHomeOrAncestor(realPath(p)))) return "searches file contents across the home directory";
@@ -767,8 +969,8 @@ export function safeAllow(tool: string, input: any, cwd: string, opts: { trusted
       const r = realPath(w);
       if (isHardLinked(w)) return false;
       // Symlinks that leave the project (docs/notes.md -> ~/.bashrc) are not plain project edits
-      if (!isInside(r, realCwd) || r.toLowerCase() === realCwd.toLowerCase()) return false;
-      const lexicalBase = isInside(w, cwd) ? cwd : realCwd;
+      if (!isInsideExact(r, realCwd) || r.toLowerCase() === realCwd.toLowerCase()) return false;
+      const lexicalBase = isInsideExact(w, cwd) ? cwd : realCwd;
       return !isRiskyProjectFile(relative(realCwd, r)) && !isRiskyProjectFile(relative(lexicalBase, w));
     });
   }
@@ -780,7 +982,7 @@ export function safeAllow(tool: string, input: any, cwd: string, opts: { trusted
 export function pathsStayInProject(tool: string, input: any, cwd: string, parsed?: Parsed): boolean {
   const { reads, writes } = inputPaths(tool, input, cwd, parsed);
   const realCwd = realPath(cwd);
-  return !isHomeOrAncestor(cwd) && [...reads, ...writes].every((p) => isInside(realPath(p), realCwd));
+  return !isHomeOrAncestor(cwd) && [...reads, ...writes].every((p) => isInsideExact(realPath(p), realCwd));
 }
 
 export function writesStayPlain(tool: string, input: any, cwd: string, parsed?: Parsed): boolean {
@@ -791,6 +993,6 @@ export function writesStayPlain(tool: string, input: any, cwd: string, parsed?: 
   const realCwd = realPath(cwd);
   return writes.every((w) => {
     const r = realPath(w);
-    return isInside(r, realCwd) && r.toLowerCase() !== realCwd.toLowerCase() && !isRiskyProjectFile(r.slice(realCwd.length + 1));
+    return isInsideExact(r, realCwd) && r.toLowerCase() !== realCwd.toLowerCase() && !isRiskyProjectFile(r.slice(realCwd.length + 1));
   });
 }

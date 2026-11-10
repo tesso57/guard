@@ -7,11 +7,13 @@
  * Global allow rules apply only in trusted projects, so a freshly cloned repository cannot reuse them.
  */
 import { createHash, randomBytes } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { DATA_DIR } from "./config.ts";
-import { innerCommands, isLongOption, normalizeArgv, type Parsed, parseShell } from "./shell.ts";
+import { innerCommands, isLongOption, isReadOnlyArgv, normalizeArgv, type Parsed, parseShell } from "./shell.ts";
 import { inputPaths } from "./policy.ts";
+import { gitConfigIsSafe } from "./paths.ts";
+import { readRegularText } from "./files.ts";
 
 export type Decision = "allow" | "deny" | "ask";
 export type Scope = "session" | "project" | "global" | "repo";
@@ -59,24 +61,47 @@ const SUBCOMMAND_TOOLS = new Set(["git", "npm", "pnpm", "yarn", "bun", "cargo", 
 /** Subcommands whose next word picks an arbitrary script, so the rule needs three words. */
 const SCRIPT_SUBCOMMANDS = new Set(["run", "run-script", "exec", "x", "dlx"]);
 
-const isExactOnly = (a: string[]) => EXACT_ONLY.some((p) => p.every((t, i) => a[i] === t));
+const requiresExactAllow = (a: string[]) => EXACT_ONLY.some((p) => p.every((t, i) => a[i] === t));
 const isWord = (t?: string) => !!t && /^[a-z][\w:@-]*$/i.test(t);
 
 export function newId(): string {
-  return randomBytes(3).toString("hex");
+  return randomBytes(8).toString("hex");
 }
+
+/** Preserve argument boundaries when presenting a command to a user or the judge. */
+const showArg = (value: string) => /^[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : `'${value.replace(/'/g, "'\\''")}'`;
+const showArgv = (argv: string[]) => argv.map(showArg).join(" ");
 
 export function describeMatch(tool: string, m: Match): string {
   switch (m.kind) {
-    case "argv": return `${m.prefix.join(" ")} …`;
-    case "argv-exact": return m.argv.join(" ");
-    case "path": return `${tool} ${m.path}`;
+    case "argv": return `${showArgv(m.prefix)} …`;
+    case "argv-exact": return showArgv(m.argv);
+    case "path": return `${tool} ${showArg(m.path)}`;
     case "tool": return `${tool} (any input)`;
   }
 }
 
+/** A global allow must not grant write or command-execution capabilities in another project. */
+export function globalAllowPatternIsReadOnly(tool: string, m: Match): boolean {
+  if (tool === "bash") return (m.kind === "argv" || m.kind === "argv-exact") && isReadOnlyArgv(m.kind === "argv" ? m.prefix : m.argv);
+  return ["read", "grep", "find", "ls"].includes(tool) && m.kind === "path";
+}
+
 function dedupe(ms: Match[]): Match[] {
   return ms.filter((m, i) => ms.findIndex((x) => JSON.stringify(x) === JSON.stringify(m)) === i);
+}
+
+function commandLikeInput(value: unknown): boolean {
+  if (typeof value === "string") return /[\s$`;&|<>()]/.test(value);
+  if (Array.isArray(value)) return value.some(commandLikeInput);
+  if (value && typeof value === "object") return Object.entries(value).some(([key, v]) =>
+    (/^(command|cmd|script|code|shell|powershell|expression)$/i.test(key) && typeof v === "string" && v.length > 0) || commandLikeInput(v));
+  return false;
+}
+
+/** Whether any input for this tool can qualify for an any-input allow rule. */
+export function supportsAnyInputAllow(tool: string): boolean {
+  return !["bash", "edit", "write", "read", "powershell"].includes(tool);
 }
 
 function nonBashPattern(tool: string, input: any, cwd: string): Match[] | undefined {
@@ -84,8 +109,8 @@ function nonBashPattern(tool: string, input: any, cwd: string): Match[] | undefi
   const paths = [...new Set([...reads, ...writes])];
   if (paths.length === 1 && ["edit", "write", "read", "grep", "find", "ls"].includes(tool)) return [{ kind: "path", path: paths[0] }];
   // "Any input" is only offered for tools whose arguments contain no command-like text
-  const commandLike = JSON.stringify(input ?? {}).match(/"[^"]*\s[^"]*"/g)?.length ?? 0;
-  if (paths.length === 0 && commandLike === 0 && !["bash", "edit", "write", "read", "powershell"].includes(tool)) return [{ kind: "tool" }];
+  const serialized = JSON.stringify(input ?? {});
+  if (serialized.length < 16 * 1024 && paths.length === 0 && !commandLikeInput(input) && supportsAnyInputAllow(tool)) return [{ kind: "tool" }];
   return undefined;
 }
 
@@ -100,7 +125,7 @@ export function derivePatterns(tool: string, input: any, cwd: string, parsed?: P
     parsed.subs.map((s): Match => {
       const { argv: a, unknownOption } = normalizeArgv(s.argv);
       const sub = a[1];
-      if (unknownOption || s.writes.length || isExactOnly(a) || !SUBCOMMAND_TOOLS.has(a[0]) || !isWord(sub)) return { kind: "argv-exact", argv: a };
+      if (unknownOption || s.writes.length || requiresExactAllow(a) || !SUBCOMMAND_TOOLS.has(a[0]) || !isWord(sub)) return { kind: "argv-exact", argv: a };
       if (SCRIPT_SUBCOMMANDS.has(sub)) return isWord(a[2]) ? { kind: "argv", prefix: a.slice(0, 3) } : { kind: "argv-exact", argv: a };
       return { kind: "argv", prefix: a.slice(0, 2) };
     }),
@@ -130,9 +155,9 @@ export function deriveDenyPatterns(tool: string, input: any, cwd: string, parsed
 export function examples(m: Match): { yes: string; no: string } | undefined {
   if (m.kind === "argv") {
     const words = m.prefix.filter((t) => !t.startsWith("-"));
-    return { yes: `${m.prefix.join(" ")} --foo`, no: words.length > 1 ? `${words.slice(0, -1).join(" ")} other` : `${words[0]}x` };
+    return { yes: `${showArgv(m.prefix)} --foo`, no: words.length > 1 ? `${showArgv(words.slice(0, -1))} other` : showArg(`${words[0]}x`) };
   }
-  if (m.kind === "argv-exact") return { yes: m.argv.join(" "), no: `${m.argv.join(" ")} --other` };
+  if (m.kind === "argv-exact") return { yes: showArgv(m.argv), no: `${showArgv(m.argv)} --other` };
   return undefined;
 }
 
@@ -141,7 +166,7 @@ function allowMatchesArgv(m: Match, raw: string[]): boolean {
   const { argv: a, unknownOption } = normalizeArgv(raw);
   if (unknownOption) return false;
   if (m.kind === "argv-exact") return m.argv.length === a.length && m.argv.every((t, i) => a[i] === t);
-  if (m.kind === "argv") return !isExactOnly(a) && m.prefix.every((t, i) => a[i] === t);
+  if (m.kind === "argv") return m.prefix.length > 0 && !requiresExactAllow(a) && m.prefix.every((t, i) => a[i] === t);
   return false;
 }
 
@@ -207,20 +232,34 @@ function expandSubcommands(subs: string[][], depth = 0): string[][] {
 
 function matchesNonBash(r: Rule, tool: string, input: any, cwd: string, mode: "any" | "all"): boolean {
   const m = r.match;
-  if (m.kind === "tool") return true;
+  if (m.kind === "tool") return mode === "any" || !!nonBashPattern(tool, input, cwd)?.some((pattern) => pattern.kind === "tool");
   if (m.kind !== "path") return false;
   const { reads, writes } = inputPaths(tool, input, cwd);
   const ps = [...reads, ...writes];
   return mode === "any" ? ps.includes(m.path) : ps.length > 0 && ps.every((p) => p === m.path);
 }
 
+function validRule(r: any): r is Rule {
+  if (!r || typeof r !== "object" || typeof r.id !== "string" || !r.id.trim() || typeof r.tool !== "string" || !r.tool.trim() ||
+      !["allow", "deny", "ask"].includes(r.decision) || !["session", "project", "global"].includes(r.scope) ||
+      typeof r.createdAt !== "string" || (r.expiresAt !== undefined && (typeof r.expiresAt !== "string" || !Number.isFinite(Date.parse(r.expiresAt)))) ||
+      (r.cwd !== undefined && typeof r.cwd !== "string") || !r.match || typeof r.match !== "object") return false;
+  const m = r.match;
+  const words = (v: unknown) => Array.isArray(v) && v.length > 0 && typeof v[0] === "string" && v[0].trim().length > 0 && v.every((x) => typeof x === "string");
+  if (m.kind === "argv") return r.tool === "bash" && words(m.prefix);
+  if (m.kind === "argv-exact") return r.tool === "bash" && words(m.argv);
+  if (m.kind === "path") return r.tool !== "bash" && typeof m.path === "string" && m.path.length > 0;
+  return m.kind === "tool" && r.tool !== "bash";
+}
+
 /** Parses a rule file line by line. Broken lines are kept verbatim so a later write never drops them. */
-function readJsonl(file: string): { rules: Rule[]; broken: string[] } {
+function readJsonl(file: string, scope: "project" | "global"): { rules: Rule[]; broken: string[] } {
   let text = "";
   try {
-    text = readFileSync(file, "utf8");
-  } catch {
-    return { rules: [], broken: [] };
+    text = readRegularText(file, 8_000_000);
+  } catch (e: any) {
+    if (e?.code === "ENOENT") return { rules: [], broken: [] };
+    throw e;
   }
   const rules: Rule[] = [];
   const broken: string[] = [];
@@ -228,7 +267,7 @@ function readJsonl(file: string): { rules: Rule[]; broken: string[] } {
     if (!line.trim()) continue;
     try {
       const r = JSON.parse(line);
-      if (r && typeof r.id === "string" && r.match && r.decision) rules.push(r);
+      if (validRule(r) && r.scope === scope) rules.push(r);
       else broken.push(line);
     } catch {
       broken.push(line);
@@ -243,35 +282,40 @@ const sleep = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(
  * Runs fn on the freshly read file contents under a lock, then writes atomically.
  * Prevents lost updates when several pi processes change rules at the same time.
  */
-function updateFile(file: string, fn: (rules: Rule[]) => Rule[]): Rule[] {
+function updateFile(file: string, scope: "project" | "global", fn: (rules: Rule[]) => Rule[]): Rule[] {
   mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
   const lock = `${file}.lock`;
-  const deadline = Date.now() + 3000;
+  const deadline = performance.now() + 3000;
   for (;;) {
     try {
       mkdirSync(lock);
       break;
-    } catch {
-      try {
-        // Steal a stale lock by renaming it first: only one process can win the rename
-        if (Date.now() - statSync(lock).mtimeMs > 10_000) {
-          const grave = `${lock}.stale.${process.pid}.${randomBytes(3).toString("hex")}`;
-          renameSync(lock, grave);
-          rmSync(grave, { recursive: true, force: true });
-          continue;
-        }
-      } catch { /* someone else got there first */ }
-      if (Date.now() > deadline) throw new Error(`guard: could not lock ${file}`);
+    } catch (e: any) {
+      if (e?.code !== "EEXIST") throw e;
+      // Age alone cannot tell a crashed process from a paused or slow one.
+      if (performance.now() > deadline) throw new Error(`guard: could not lock ${file}; if no guard process is updating it, remove ${lock}`);
       sleep(20);
     }
   }
   try {
-    const { rules, broken } = readJsonl(file);
+    const { rules, broken } = readJsonl(file, scope);
     const next = fn(rules);
-    const tmp = `${file}.${process.pid}.tmp`;
+    const tmp = `${file}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
     const lines = [...next.map((r) => JSON.stringify(r)), ...broken];
-    writeFileSync(tmp, lines.join("\n") + (lines.length ? "\n" : ""), { mode: 0o600 });
-    renameSync(tmp, file);
+    let fd: number | undefined;
+    let created = false;
+    try {
+      fd = openSync(tmp, "wx", 0o600);
+      created = true;
+      writeFileSync(fd, lines.join("\n") + (lines.length ? "\n" : ""));
+      closeSync(fd);
+      fd = undefined;
+      renameSync(tmp, file);
+      created = false;
+    } finally {
+      try { if (fd !== undefined) closeSync(fd); }
+      finally { if (created) rmSync(tmp, { force: true }); }
+    }
     return next;
   } finally {
     rmSync(lock, { recursive: true, force: true });
@@ -283,7 +327,18 @@ function projectFile(cwd: string): string {
   return join(DATA_DIR, "projects", `${basename(cwd).replace(/[^\w.-]/g, "_")}-${h}.jsonl`);
 }
 
-const live = (r: Rule) => !r.expiresAt || Date.parse(r.expiresAt) >= Date.now();
+// Expiration is a limit on permissions, never a way to drop a remembered denial or confirmation.
+const live = (r: Rule) => r.decision !== "allow" || !r.expiresAt || Date.parse(r.expiresAt) >= Date.now();
+
+function fileVersion(file: string): string {
+  try {
+    const st = statSync(file, { bigint: true });
+    return `${st.dev}:${st.ino}:${st.size}:${st.mtimeNs}:${st.ctimeNs}`;
+  } catch (e: any) {
+    if (e?.code === "ENOENT") return "missing";
+    throw e;
+  }
+}
 
 export class RuleStore {
   global: Rule[] = [];
@@ -296,7 +351,8 @@ export class RuleStore {
   private sessionFromBranch: Rule[] = [];
   private sessionPending: Rule[] = [];
   private hits = new Map<string, number>();
-  private mtimes = new Map<string, number>();
+  private fileVersions = new Map<string, string>();
+  private fileErrors = new Map<string, string>();
   private trusted = false;
   private cwd = "";
 
@@ -307,19 +363,37 @@ export class RuleStore {
   load(cwd: string, trusted: boolean) {
     this.cwd = cwd;
     this.trusted = trusted;
-    this.mtimes.clear();
+    this.fileVersions.clear();
+    this.fileErrors.clear();
     this.warnings = [];
     this.refresh(true);
     this.repo = [];
     if (trusted) {
+      const repoFile = join(cwd, ".pi", "guard.json");
       try {
-        const cfg = JSON.parse(readFileSync(join(cwd, ".pi", "guard.json"), "utf8"));
+        const contents = readRegularText(repoFile);
+        let cfg: any;
+        try { cfg = JSON.parse(contents); } catch { throw new Error("invalid JSON"); }
+        if (!cfg || typeof cfg !== "object" || Array.isArray(cfg) || ["deny", "ask"].some((key) => cfg[key] !== undefined && (!Array.isArray(cfg[key]) || !cfg[key].every((p: unknown) => typeof p === "string" && p.trim()))))
+          throw new Error("deny and ask must be arrays of non-empty command strings");
         // A repository may only add deny and ask rules, never allow rules
-        for (const d of ["deny", "ask"] as const)
-          for (const p of cfg[d] ?? [])
-            this.repo.push({ id: `repo-${d}-${p}`, decision: d, tool: "bash", match: { kind: "argv", prefix: String(p).trim().split(/\s+/) }, scope: "repo", createdAt: "" });
-      } catch {
-        /* no repo config */
+        for (const d of ["deny", "ask"] as const) {
+          for (const [index, p] of (cfg[d] ?? []).entries()) {
+            const parsed = parseShell(p);
+            if (!parsed.ok || parsed.dynamic.length || parsed.subcommands.length !== 1 || parsed.writes.length || parsed.globs.length || parsed.subs.some((sub) => sub.reads.length || sub.heredocs.length))
+              throw new Error(`${d}[${index}] must be one static command without redirects or wildcards`);
+            const argv = normalizeArgv(parsed.subcommands[0], "deny").argv;
+            if (!argv.length) throw new Error(`${d}[${index}] has no command`);
+            const id = `repo-${d}-${createHash("sha256").update(p).digest("hex").slice(0, 16)}`;
+            this.repo.push({ id, decision: d, tool: "bash", match: { kind: "argv", prefix: argv }, scope: "repo", createdAt: "" });
+          }
+        }
+      } catch (e: any) {
+        if (e?.code !== "ENOENT") {
+          const message = `cannot read repository rules (${repoFile}): ${e?.message ?? String(e)}`;
+          this.warnings.push(message);
+          this.fileErrors.set("repo", message);
+        }
       }
     }
     this.version++;
@@ -329,14 +403,27 @@ export class RuleStore {
   private refresh(force = false) {
     const f = this.files();
     for (const scope of ["global", "project"] as const) {
-      let m = -1;
-      try { m = statSync(f[scope]).mtimeMs; } catch { /* missing file */ }
-      if (force || this.mtimes.get(scope) !== m) {
-        const { rules, broken } = readJsonl(f[scope]);
-        this[scope] = rules;
-        if (broken.length) this.warnings.push(`${broken.length} unreadable line(s) in ${f[scope]} were ignored (kept in the file)`);
-        this.mtimes.set(scope, m);
-        if (!force) this.version++;
+      try {
+        const version = fileVersion(f[scope]);
+        if (force || this.fileVersions.get(scope) !== version || this.fileErrors.has(scope)) {
+          const { rules, broken } = readJsonl(f[scope], scope);
+          // A concurrent replacement or removal can otherwise make this decision use a stale or
+          // accidentally empty rule set. Retain known rules and require confirmation until retry.
+          if (fileVersion(f[scope]) !== version) throw new Error("rule file changed while reading");
+          this[scope] = rules;
+          this.fileVersions.set(scope, version);
+          if (broken.length) {
+            const message = `${broken.length} unreadable line(s) in ${f[scope]} (kept in the file)`;
+            if (this.fileErrors.get(scope) !== message) this.warnings.push(message);
+            this.fileErrors.set(scope, message);
+          } else this.fileErrors.delete(scope);
+          if (!force) this.version++;
+        }
+      } catch (e: any) {
+        const message = `cannot read ${scope} rules (${f[scope]}): ${e?.message ?? String(e)}`;
+        if (this.fileErrors.get(scope) !== message) { this.warnings.push(message); this.version++; }
+        this.fileErrors.set(scope, message);
+        this.fileVersions.delete(scope);
       }
     }
   }
@@ -344,21 +431,41 @@ export class RuleStore {
   /** Rebuilds session rules from the current branch of the pi session, so rewinding with /tree drops later approvals. */
   syncSession(branch: { type: string; customType?: string; data?: any }[]) {
     const rules = new Map<string, Rule>();
+    const invalidIds = new Set<string>();
+    const observedIds = new Set<string>();
+    let anonymousInvalid = 0;
     for (const e of branch) {
       if (e.type !== "custom" || e.customType !== SESSION_ENTRY) continue;
-      if (e.data?.op === "add") rules.set(e.data.rule.id, e.data.rule);
-      if (e.data?.op === "remove") rules.delete(e.data.id);
+      if (e.data?.op === "add") {
+        const rule = e.data.rule;
+        if (validRule(rule) && rule.scope === "session") { rules.set(rule.id, rule); invalidIds.delete(rule.id); observedIds.add(rule.id); }
+        else if (typeof rule?.id === "string" && rule.id.trim()) invalidIds.add(rule.id);
+        else anonymousInvalid++;
+      } else if (e.data?.op === "remove" && typeof e.data.id === "string" && e.data.id.trim()) {
+        rules.delete(e.data.id);
+        invalidIds.delete(e.data.id);
+        observedIds.add(e.data.id);
+      } else anonymousInvalid++;
     }
-    const before = this.sessionFromBranch.map((r) => r.id).join();
+    const invalidCount = invalidIds.size + anonymousInvalid;
+    const error = invalidCount ? `${invalidCount} invalid session rule event(s) in the current branch` : undefined;
+    if (this.fileErrors.get("session") !== error) {
+      if (error) { this.fileErrors.set("session", error); this.warnings.push(error); }
+      else this.fileErrors.delete("session");
+      this.version++;
+    }
+    const before = JSON.stringify(this.sessionFromBranch);
+    const pendingBefore = this.sessionPending.length;
     this.sessionFromBranch = [...rules.values()];
-    this.sessionPending = this.sessionPending.filter((r) => !rules.has(r.id));
-    if (before !== this.sessionFromBranch.map((r) => r.id).join()) this.version++;
+    this.sessionPending = this.sessionPending.filter((r) => !observedIds.has(r.id));
+    if (before !== JSON.stringify(this.sessionFromBranch) || pendingBefore !== this.sessionPending.length) this.version++;
   }
 
   resetSession() {
     this.sessionFromBranch = [];
     this.sessionPending = [];
     this.hits.clear();
+    this.fileErrors.delete("session");
   }
 
   session(): Rule[] {
@@ -376,13 +483,19 @@ export class RuleStore {
 
   /** The strictest decision that applies. A bash allow needs every subcommand to match an allow rule. */
   find(tool: string, input: any, cwd: string, parsed?: Parsed): { decision: Decision; rules: Rule[] } | undefined {
-    const rules = this.all().filter((r) => r.tool === tool && (r.scope !== "session" || !r.cwd || r.cwd === cwd));
+    const allRules = this.all();
+    const rules = allRules.filter((r) => r.tool === tool && (r.scope !== "session" || !r.cwd || r.cwd === cwd));
     const expanded = parsed ? expandSubcommands(parsed.subcommands) : [];
     for (const d of ["deny", "ask"] as const) {
+      if (d === "ask" && this.fileErrors.size) throw new Error([...this.fileErrors.values()].join("; "));
       const hit = rules.filter((r) => r.decision === d && (tool === "bash" ? expanded.some((a) => strictMatchesArgv(r.match, a)) : matchesNonBash(r, tool, input, cwd, "any")));
       if (hit.length) return { decision: d, rules: hit };
     }
-    const allows = rules.filter((r) => r.decision === "allow" && (r.scope !== "global" || this.trusted));
+    const globalCallIsReadOnly = tool === "bash"
+      ? !!parsed && parsed.ok && !parsed.dynamic.length && !parsed.writes.length && parsed.subcommands.length > 0 && parsed.subcommands.every(isReadOnlyArgv)
+        && (!parsed.subcommands.some((a) => normalizeArgv(a).argv[0] === "git") || gitConfigIsSafe(cwd))
+      : ["read", "grep", "find", "ls"].includes(tool) && inputPaths(tool, input, cwd).writes.length === 0;
+    const allows = rules.filter((r) => r.decision === "allow" && (r.scope !== "global" || (this.trusted && globalCallIsReadOnly && globalAllowPatternIsReadOnly(tool, r.match))));
     if (tool === "bash") {
       if (!parsed || !parsed.ok || parsed.dynamic.length || !parsed.subcommands.length) return undefined;
       const used: Rule[] = [];
@@ -397,13 +510,13 @@ export class RuleStore {
     return hit.length ? { decision: "allow", rules: hit } : undefined;
   }
 
-  /** Past decisions on the same tool with a similar pattern, passed to the model as evidence (max 5). */
+  /** Past decisions on the same tool with a similar pattern, ordered by strictness. */
   related(tool: string, input: any, cwd: string, parsed?: Parsed): Rule[] {
     const heads = new Set(parsed ? expandSubcommands(parsed.subcommands).map((a) => normalizeArgv(a, "deny").argv[0]) : []);
     const { reads, writes } = inputPaths(tool, input, cwd, parsed);
     const dirs = new Set([...reads, ...writes].map((p) => dirname(p)));
     return this.all()
-      .filter((r) => r.scope !== "repo" && r.tool === tool)
+      .filter((r) => r.scope !== "repo" && r.tool === tool && (r.scope !== "session" || !r.cwd || r.cwd === cwd))
       .filter((r) => {
         const m = r.match;
         if (m.kind === "argv") return heads.has(m.prefix[0]);
@@ -411,17 +524,20 @@ export class RuleStore {
         if (m.kind === "path") return dirs.has(dirname(m.path));
         return true;
       })
-      .slice(0, 5);
+      // Limited context should retain restrictive decisions before approvals.
+      .sort((a, b) => ({ deny: 0, ask: 1, allow: 2 })[a.decision] - ({ deny: 0, ask: 1, allow: 2 })[b.decision]);
   }
 
   add(rule: Rule, appendEntry: (type: string, data: unknown) => void) {
+    if (!validRule(rule)) throw new Error("invalid rule: check its tool name, scope and pattern");
     if (rule.scope === "session") {
-      this.sessionPending.push(rule);
       appendEntry(SESSION_ENTRY, { op: "add", rule });
+      this.sessionPending.push(rule);
     } else if (rule.scope === "project" || rule.scope === "global") {
       const file = this.files()[rule.scope];
-      this[rule.scope] = updateFile(file, (rs) => [...rs, rule]);
-      this.mtimes.set(rule.scope, statSync(file).mtimeMs);
+      this[rule.scope] = updateFile(file, rule.scope, (rs) => [...rs, rule]);
+      // Another process can replace the file as soon as the lock is released. Re-read on next use.
+      this.fileVersions.delete(rule.scope);
     }
     this.version++;
   }
@@ -429,9 +545,9 @@ export class RuleStore {
   remove(id: string, appendEntry: (type: string, data: unknown) => void): Rule | undefined {
     const s = this.session().find((r) => r.id === id);
     if (s) {
+      appendEntry(SESSION_ENTRY, { op: "remove", id });
       this.sessionPending = this.sessionPending.filter((r) => r.id !== id);
       this.sessionFromBranch = this.sessionFromBranch.filter((r) => r.id !== id);
-      appendEntry(SESSION_ENTRY, { op: "remove", id });
       this.version++;
       return s;
     }
@@ -440,11 +556,11 @@ export class RuleStore {
     if (!scope) return undefined;
     let removed: Rule | undefined;
     const file = this.files()[scope];
-    this[scope] = updateFile(file, (rs) => {
+    this[scope] = updateFile(file, scope, (rs) => {
       removed = rs.find((x) => x.id === id);
       return rs.filter((x) => x.id !== id);
     });
-    this.mtimes.set(scope, statSync(file).mtimeMs);
+    this.fileVersions.delete(scope);
     this.version++;
     return removed;
   }
