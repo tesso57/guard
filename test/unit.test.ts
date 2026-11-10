@@ -4031,6 +4031,16 @@ ok("int: same push via git -C → rule-deny without API", (await run("bash", { c
     clearPathCache();
     ok("int: invalid trust-dir access never grants a shortcut", !trustedDirFor(join(invalidAccessDir, "file"), false) && !trustedDirFor(join(invalidAccessDir, "file"), true));
   }
+  const overlappingParent = join(HOME, ".pi", "overlapping-grants");
+  const overlappingChild = join(overlappingParent, "child");
+  mkdirSync(overlappingChild, { recursive: true });
+  pi.events.emit("guard:trust-dir", { path: overlappingParent, by: "parent", access: "write" });
+  pi.events.emit("guard:trust-dir", { path: overlappingChild, by: "child", access: "read" });
+  clearPathCache();
+  ok("int: a read-only child grant does not revoke an overlapping parent write grant", !!trustedDirFor(join(overlappingChild, "note.txt"), true));
+  pi.events.emit("guard:trust-dir", { path: overlappingParent, by: "parent", access: "read" });
+  clearPathCache();
+  ok("int: replacing the parent write grant removes the overlapping write shortcut", !trustedDirFor(join(overlappingChild, "note.txt"), true) && !!trustedDirFor(join(overlappingChild, "note.txt"), false));
   ok("int: trusted-folder permission does not fold path case", !trustedDirFor(join(HOME, ".pi", "ARTIFACTS", "a1", "index.tsx"), true));
   if (process.platform !== "win32") {
     const permissionDir = join(HOME, ".pi", "permission-target");

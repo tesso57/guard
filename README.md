@@ -179,7 +179,7 @@ pi.on("session_start", () => {
 
 Inside a vouched-for folder, reads are free like reads inside the project, and plain `write`/`edit` calls (and `mkdir`/`touch`) run without a judgement. Everything else is judged as usual: running code there, files that tools run later (`package.json`, `Makefile`, …), secrets (`.env`, keys), hard links, and symlinks that leave the folder. Only folders inside the home directory (or the temp directory) are accepted; the home directory itself, the agent directory `~/.pi/agent`, and folders that hold credentials, tool configuration or programs (`~/.ssh`, `~/.aws`, `~/.config`, `~/.local`, `~/bin`, …) are refused. `/guard rules` lists vouched-for folders, including refused ones and why.
 
-The optional `access` field accepts `"read"` or `"write"` and defaults to `"write"` when omitted. Events with other values are ignored.
+The optional `access` field accepts `"read"` or `"write"` and defaults to `"write"` when omitted. Events with other values are ignored. Grants for overlapping folders are additive: a read-only child grant does not revoke a parent folder's write grant. Re-registering the same folder replaces its previous grant, including when the new registration uses a symlink to that folder.
 
 ## Commands
 
