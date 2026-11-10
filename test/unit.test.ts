@@ -4987,6 +4987,30 @@ responder = (b) => ({ answers: answersFor([0.1, 0.8, 0.1, 0, 0])(b) });
 await command.handler("check npm run typecheck", ctx);
 ok("cmd: /guard check", notes[0].startsWith("ALLOW via model"), notes[0]);
 
+// Retry history is bounded; evicting an old entry must fail closed.
+{
+  const configFile = join(AGENT, "guard", "config.json");
+  const previousConfig = readFileSync(configFile, "utf8");
+  writeFileSync(configFile, JSON.stringify({ ...JSON.parse(previousConfig), escalateConsecutive: 1000, escalateTotal: 100_000 }));
+  await command.handler("reload", ctx);
+  const blockedCommand = (index: number) => `printf retry-${index} >> ~/.pi/agent/guard/rules.jsonl`;
+  try {
+    for (let i = 0; i <= 500; i++) await run("bash", { command: blockedCommand(i) });
+    let dialogs = 0;
+    const savedSelect = ctx.ui.select;
+    ctx.ui.select = async () => { dialogs++; return "Deny"; };
+    try {
+      const old = await run("bash", { command: blockedCommand(0) });
+      ok("int: evicted blocked-call history requires a fresh block", old?.block === true && dialogs === 0);
+      const recent = await run("bash", { command: blockedCommand(500) });
+      ok("int: recent blocked-call history still permits a retry dialog", recent?.block === true && dialogs === 1);
+    } finally { ctx.ui.select = savedSelect; }
+  } finally {
+    writeFileSync(configFile, previousConfig);
+    await command.handler("reload", ctx);
+  }
+}
+
 srv.close();
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -100,6 +100,8 @@ The agent is told why, and that it must not work around the check. If it really 
 
 Retry eligibility is discarded when settings are reloaded, guard is toggled, the session tree changes, or the project or trust state changes. Changed rules or trusted-folder grants also require a fresh block before a retry can be offered.
 
+Guard keeps at most 500 blocked-call retry entries. If an older entry is evicted, that call is blocked again before a new retry can be offered.
+
 ## Approval dialog
 
 ```
