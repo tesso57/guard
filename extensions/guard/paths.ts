@@ -385,6 +385,9 @@ const UNTRUSTABLE_HOME_DIRS = new Set([".ssh", ".gnupg", ".aws", ".azure", ".gcl
 
 /** Registers a folder; returns why it was refused, if it was. Only folders inside the home directory (or tmp) qualify. */
 export function trustDir(raw: string, write: boolean, by: string): string | undefined {
+  // Trust events may arrive after a path or symlink changed since the last call.
+  realCache.clear();
+  memoCache.clear();
   const reason = ((): string | undefined => {
     if (!isAbsolute(raw) && !raw.startsWith("~")) return "not an absolute path";
     const abs = resolvePath(HOME, raw);

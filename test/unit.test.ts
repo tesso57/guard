@@ -4016,7 +4016,7 @@ ok("int: same push via git -C → rule-deny without API", (await run("bash", { c
 
 // folders vouched for by other extensions (guard:trust-dir)
 {
-  const { listTrustedDirs, trustDir, trustedDirFor } = await import("../extensions/guard/paths.ts");
+  const { listTrustedDirs, trustDir, trustedDirFor, realPath } = await import("../extensions/guard/paths.ts");
   const ART = join(HOME, ".pi", "artifacts");
   mkdirSync(join(ART, "a1"), { recursive: true });
   writeFileSync(join(ART, "a1", "index.tsx"), "export default 1");
@@ -4043,6 +4043,21 @@ ok("int: same push via git -C → rule-deny without API", (await run("bash", { c
   ok("int: replacing the parent write grant removes the overlapping write shortcut", !trustedDirFor(join(overlappingChild, "note.txt"), true) && !!trustedDirFor(join(overlappingChild, "note.txt"), false));
   ok("int: trusted-folder permission does not fold path case", !trustedDirFor(join(HOME, ".pi", "ARTIFACTS", "a1", "index.tsx"), true));
   if (process.platform !== "win32") {
+    const cacheParent = mkdtempSync(join(tmpdir(), "guard-trust-cache-"));
+    const cacheTarget = join(cacheParent, "target");
+    const cacheOther = join(cacheParent, "other");
+    const cacheAlias = join(cacheParent, "alias");
+    mkdirSync(cacheTarget);
+    mkdirSync(cacheOther);
+    pi.events.emit("guard:trust-dir", { path: cacheTarget, by: "test", access: "write" });
+    symlinkSync(cacheOther, cacheAlias);
+    clearPathCache();
+    realPath(cacheAlias);
+    rmSync(cacheAlias);
+    symlinkSync(cacheTarget, cacheAlias);
+    pi.events.emit("guard:trust-dir", { path: cacheAlias, by: "test", access: "read" });
+    clearPathCache();
+    ok("int: trust registration refreshes cached alias targets before replacing permissions", !!trustedDirFor(join(cacheTarget, "file"), false) && !trustedDirFor(join(cacheTarget, "file"), true));
     const permissionDir = join(HOME, ".pi", "permission-target");
     const permissionAlias = join(HOME, ".pi", "permission-alias");
     mkdirSync(permissionDir, { recursive: true });
