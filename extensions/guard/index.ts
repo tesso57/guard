@@ -865,7 +865,6 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     const hash = stableHash([tool, input]);
-    const retryKey = stableHash([hash, ctx.cwd, trustAvailable ? trusted : "unavailable", ctx.sessionManager.getSessionId(), trustedDirs.version]);
     const batch = siblingsById.get(event.toolCallId) ?? siblingsFromBranch(ctx, event.toolCallId);
     if (!batch.problem) siblingsById.delete(event.toolCallId);
 
@@ -887,6 +886,13 @@ export default function (pi: ExtensionAPI) {
     const judgementAborted = !!ctx.signal?.aborted;
     if (judgementAborted) a = { action: "block", source: "error", reasons: ["judgement was aborted"], rememberAllow: false, globalAllow: false };
     else if (inputChanged) a = { action: "block", source: "error", reasons: ["input changed during judgement"], rememberAllow: false, globalAllow: false };
+    let retryRulesVersion: number | undefined;
+    try {
+      store.syncSession(ctx.sessionManager.getBranch() as any[]);
+      store.all();
+      retryRulesVersion = store.version;
+    } catch { /* no retry shortcut when rules cannot be refreshed */ }
+    const retryKey = stableHash([hash, ctx.cwd, trustAvailable ? trusted : "unavailable", ctx.sessionManager.getSessionId(), trustedDirs.version, retryRulesVersion]);
     judged.set(event.toolCallId, hash);
     const what = preview(tool, input);
     const session = ctx.sessionManager.getSessionId();
@@ -942,7 +948,7 @@ export default function (pi: ExtensionAPI) {
 
     // A repeated model or hard-deny block can be approved once, with the same
     // context and policy rechecks used for every other confirmation.
-    const retryOverride = a.action === "block" && (a.source === "hard-deny" || a.source === "model") && blockedOnce.has(retryKey) && ctx.hasUI;
+    const retryOverride = retryRulesVersion !== undefined && a.action === "block" && (a.source === "hard-deny" || a.source === "model") && blockedOnce.has(retryKey) && ctx.hasUI;
     if (retryOverride) {
       blockedOnce.delete(retryKey);
       a = { ...a, action: "confirm", rememberAllow: false, globalAllow: false, patterns: undefined };
@@ -962,8 +968,8 @@ export default function (pi: ExtensionAPI) {
       status(ctx, `guard: ${tool} BLOCKED (${tag})`);
       try { ctx.ui.notify(displayText(`guard: blocked ${tool} — ${a.reasons.join("; ")}`), "error"); } catch { /* notification failure must not prevent blocking */ }
       recordAudit(ctx, { ...rec, final: "blocked" });
-      if (a.source === "hard-deny" || a.source === "model") blockedOnce.add(retryKey);
-      return onBlocked(inputChanged ? "the input changed during judgement" : batch.problem ? batch.problem : shellChangedDuringJudgement ? "the shell environment or executable lookup changed during judgement" : contextChangedDuringJudgement ? "the judgement context changed during judgement" : policyChangedDuringJudgement ? "the filesystem policy changed during judgement" : a.source === "error" && a.reasons[0] === "session changed during judgement" ? "the session changed during judgement" : a.source === "hard-deny" ? `blocked (${a.reasons[0]})` : a.source === "rule-deny" ? "blocked by the user's deny rule" : "blocked as too dangerous", (a.source === "hard-deny" || a.source === "model") && ctx.hasUI ? "ask-user" : "none");
+      if (retryRulesVersion !== undefined && (a.source === "hard-deny" || a.source === "model")) blockedOnce.add(retryKey);
+      return onBlocked(inputChanged ? "the input changed during judgement" : batch.problem ? batch.problem : shellChangedDuringJudgement ? "the shell environment or executable lookup changed during judgement" : contextChangedDuringJudgement ? "the judgement context changed during judgement" : policyChangedDuringJudgement ? "the filesystem policy changed during judgement" : a.source === "error" && a.reasons[0] === "session changed during judgement" ? "the session changed during judgement" : a.source === "hard-deny" ? `blocked (${a.reasons[0]})` : a.source === "rule-deny" ? "blocked by the user's deny rule" : "blocked as too dangerous", retryRulesVersion !== undefined && (a.source === "hard-deny" || a.source === "model") && ctx.hasUI ? "ask-user" : "none");
     }
 
     status(ctx, `guard: ${tool} needs confirmation (${tag})`);

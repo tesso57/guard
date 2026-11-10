@@ -4021,6 +4021,37 @@ ok("int: same push via git -C → rule-deny without API", (await run("bash", { c
     const changedSettings = await run("bash", { command: reloadScopedRetry });
     ok("int: settings reload invalidates an earlier blocked-call retry", changedSettings?.block === true && !reloadRetryDialogOpened);
   } finally { ctx.ui.select = selectBeforeReloadRetry; }
+  await run("bash", { command: "echo reset-before-rule-retry" });
+  const ruleScopedRetry = "printf rule-retry >> ~/.pi/agent/guard/rules.jsonl";
+  await run("bash", { command: ruleScopedRetry });
+  await command.handler("rules add deny session tool:retry-rule-sentinel", ctx);
+  const retryRuleId = branch.findLast((entry) => entry.customType === "guard-rule" && entry.data?.rule?.tool === "retry-rule-sentinel")?.data?.rule?.id;
+  let ruleRetryDialogOpened = false;
+  const selectBeforeRuleRetry = ctx.ui.select;
+  ctx.ui.select = async () => { ruleRetryDialogOpened = true; return "Deny"; };
+  try {
+    const changedRules = await run("bash", { command: ruleScopedRetry });
+    ok("int: rule changes invalidate an earlier blocked-call retry", !!retryRuleId && changedRules?.block === true && !ruleRetryDialogOpened);
+  } finally {
+    ctx.ui.select = selectBeforeRuleRetry;
+    if (retryRuleId) await command.handler(`rules rm ${retryRuleId}`, ctx);
+  }
+  await run("bash", { command: "echo reset-before-external-rule-retry" });
+  const externalRuleRetry = "printf external-retry >> ~/.pi/agent/guard/rules.jsonl";
+  await run("bash", { command: externalRuleRetry });
+  const priorRules = readFileSync(ruleFile, "utf8");
+  appendFileSync(ruleFile, JSON.stringify({ id: "external-retry-rule", decision: "deny", tool: "bash", match: { kind: "argv", prefix: ["unrelated-retry-rule"] }, scope: "global", createdAt: "" }) + "\n");
+  let externalRetryDialogOpened = false;
+  const selectBeforeExternalRetry = ctx.ui.select;
+  ctx.ui.select = async () => { externalRetryDialogOpened = true; return "Deny"; };
+  try {
+    const changedRules = await run("bash", { command: externalRuleRetry });
+    ok("int: external rule changes invalidate an earlier blocked-call retry", changedRules?.block === true && !externalRetryDialogOpened);
+  } finally {
+    ctx.ui.select = selectBeforeExternalRetry;
+    writeFileSync(ruleFile, priorRules);
+    await command.handler("reload", ctx);
+  }
   for (const [label, change] of [
     ["toggle", async () => { await command.handler("off", ctx); await command.handler("on", ctx); }],
     ["tree change", async () => { await h.session_tree({ type: "session_tree" }, ctx); }],

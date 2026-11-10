@@ -98,7 +98,7 @@ Risk is scored on five levels, from 0 to 4. guard looks at the probability of th
 
 The agent is told why, and that it must not work around the check. If it really needs that exact call, it should explain why and ask you; if you agree, it runs the same call again and guard shows you a dialog (allow this time only / deny) instead of blocking. This applies to hard denies and to calls the model judged too dangerous, once per block; nothing is remembered. Calls blocked by your own deny rules stay blocked (remove the rule with `/guard rules`), and without a UI every block stays a block.
 
-Retry eligibility is discarded when settings are reloaded, guard is toggled, the session tree changes, or the project or trust state changes. A changed trusted-folder grant also requires a fresh block before a retry can be offered.
+Retry eligibility is discarded when settings are reloaded, guard is toggled, the session tree changes, or the project or trust state changes. Changed rules or trusted-folder grants also require a fresh block before a retry can be offered.
 
 ## Approval dialog
 
