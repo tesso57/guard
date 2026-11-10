@@ -1010,12 +1010,12 @@ export default function (pi: ExtensionAPI) {
       projectName: basename(ctx.cwd),
       timeoutMs: cfg.dialogTimeoutMs,
       });
-    } catch (e: any) {
+    } catch {
       if (ctx.signal?.aborted) {
         recordAudit(ctx, { ...rec, preview: `${tool} [arguments withheld: confirmation was aborted]`, action: "block", source: "error", reasons: ["confirmation was aborted"], final: "blocked" });
         return onCancelled("confirmation was aborted");
       }
-      warn(ctx, `guard: approval dialog failed: ${e?.message ?? String(e)}`);
+      warn(ctx, "guard: approval dialog failed");
       recordAudit(ctx, { ...rec, preview: `${tool} [arguments withheld: approval dialog failed]`, final: "blocked", choice: "dialog-error" });
       return onBlocked("the approval dialog failed");
     }

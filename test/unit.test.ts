@@ -3726,10 +3726,11 @@ ctx.ui.select = async () => undefined;
 const timedOut = await run("bash", { command: "python -c 'print(123)'" });
 ctx.ui.select = originalSelect;
 ok("int: approval timeout blocks a command without rememberable patterns", timedOut?.block === true);
-ctx.ui.select = async () => { throw new Error("UI unavailable"); };
+notes.length = 0;
+ctx.ui.select = async () => { throw new Error("opaque-dialog-exception-secret"); };
 const dialogFailure = await run("bash", { command: "python -c 'print(456)'" });
 ctx.ui.select = originalSelect;
-ok("int: approval dialog failure blocks the call", dialogFailure?.block === true && dialogFailure.reason.includes("dialog failed"));
+ok("int: approval dialog failure blocks the call without exposing exception details", dialogFailure?.block === true && dialogFailure.reason.includes("dialog failed") && !JSON.stringify(notes).includes("opaque-dialog-exception-secret") && !JSON.stringify(tail(1)).includes("opaque-dialog-exception-secret"));
 
 responder = (b) => ({ answers: answersFor([1, 0, 0, 0, 0])(b) });
 calls = [];
