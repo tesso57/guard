@@ -2390,6 +2390,20 @@ const run = async (toolName: string, input: any) => h.tool_call({ type: "tool_ca
     ctx.ui.select = savedSelect;
   }
   await run("bash", { command: "git status" });
+  const savedTrustCheck = ctx.isProjectTrusted;
+  ctx.ui.select = async () => {
+    ctx.isProjectTrusted = () => { throw new Error("opaque-dialog-trust-error"); };
+    return "Allow (this time only)";
+  };
+  try {
+    let result: any, threw = false;
+    try { result = await run("bash", { command: "guard-dialog-trust-error operation" }); } catch { threw = true; }
+    ok("int: unavailable project trust after approval blocks without leaking the exception", !threw && result?.block === true && !JSON.stringify(tail(1)).includes("opaque-dialog-trust-error"));
+  } finally {
+    ctx.isProjectTrusted = savedTrustCheck;
+    ctx.ui.select = savedSelect;
+  }
+  await run("bash", { command: "git status" });
   const denyAbortController = new AbortController();
   ctx.signal = denyAbortController.signal;
   let denyAbortStep = 0;

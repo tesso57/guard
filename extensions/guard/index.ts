@@ -987,12 +987,13 @@ export default function (pi: ExtensionAPI) {
     const dialogEpoch = stateEpoch;
     const dialogConfig = cfg;
     const dialogCwd = ctx.cwd;
-    const dialogTrusted = ctx.isProjectTrusted();
+    let dialogTrusted: boolean;
     const dialogShellEnvironment = tool === "bash" ? shellEnvironmentHash() : undefined;
     let dialogExecutable: ReturnType<typeof inspectExecutablePath> | undefined;
     let dialogContextHash: string;
     let dialogPolicyHash: string;
     try {
+      dialogTrusted = ctx.isProjectTrusted();
       const dialogParsed = tool === "bash" ? parseShell(String(input?.command ?? "")) : undefined;
       clearPathCache();
       dialogContextHash = stableHash(context(ctx, event.toolCallId, tool, dialogParsed, batch.earlier, batch.peers, batch.historyBoundary));
@@ -1036,7 +1037,13 @@ export default function (pi: ExtensionAPI) {
       recordAudit(ctx, { ...rec, preview: `${tool} [arguments withheld: settings changed during confirmation]`, action: "block", source: "error", reasons: ["settings changed during confirmation"], final: "blocked" });
       return onBlocked("the settings changed during confirmation");
     }
-    if (ctx.cwd !== dialogCwd || ctx.isProjectTrusted() !== dialogTrusted) {
+    let trustAfterDialog: boolean;
+    try { trustAfterDialog = ctx.isProjectTrusted(); }
+    catch {
+      recordAudit(ctx, { ...rec, preview: `${tool} [arguments withheld: project trust could not be inspected]`, action: "block", source: "error", reasons: ["could not inspect project trust after confirmation"], final: "blocked" });
+      return onBlocked("could not inspect project trust after confirmation");
+    }
+    if (ctx.cwd !== dialogCwd || trustAfterDialog !== dialogTrusted) {
       recordAudit(ctx, { ...rec, preview: `${tool} [arguments withheld: project changed during confirmation]`, action: "block", source: "error", reasons: ["project or trust changed during confirmation"], final: "blocked" });
       return onBlocked("the project or trust changed during confirmation");
     }
