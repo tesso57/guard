@@ -60,11 +60,14 @@ test("extensions can vouch for a tool and a folder in real Pi sessions", async (
     const artifacts = join(dir, ".pi", "artifacts");
     await mkdir(artifacts, { recursive: true });
     const target = join(artifacts, "note.txt");
+    let vouchForFolder = true;
     const folderFake = createFakeModel([
       { content: [{ type: "toolCall", id: "folder-call", name: "write", arguments: { path: target, content: "saved note" } }] },
       { content: [{ type: "toolCall", id: "risky-call", name: "write", arguments: { path: join(artifacts, "package.json"), content: "{}" } }] },
       { content: [{ type: "text", text: "done" }] },
       { content: [{ type: "toolCall", id: "still-trusted-call", name: "write", arguments: { path: target, content: "saved note" } }] },
+      { content: [{ type: "text", text: "done" }] },
+      { content: [{ type: "toolCall", id: "after-reload-call", name: "write", arguments: { path: target, content: "must not be written" } }] },
       { content: [{ type: "text", text: "done" }] },
     ]);
     const folderLoader = new DefaultResourceLoader({
@@ -72,7 +75,7 @@ test("extensions can vouch for a tool and a folder in real Pi sessions", async (
       agentDir,
       additionalExtensionPaths: [fileURLToPath(new URL("../extensions/index.ts", import.meta.url))],
       extensionFactories: [(pi) => {
-        pi.on("session_start", () => { pi.events.emit("guard:trust-dir", { path: artifacts, by: "artifacts" }); });
+        pi.on("session_start", () => { if (vouchForFolder) pi.events.emit("guard:trust-dir", { path: artifacts, by: "artifacts" }); });
       }],
       noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
     });
@@ -121,6 +124,15 @@ test("extensions can vouch for a tool and a folder in real Pi sessions", async (
       const lastResult = folderSession.messages.findLast((message) => message.role === "toolResult");
       assert.ok(lastResult && lastResult.role === "toolResult" && !lastResult.isError, JSON.stringify(lastResult));
       assert.equal(readFileSync(target, "utf8"), "saved note");
+      vouchForFolder = false;
+      await folderSession.reload();
+      folderSession.modelRuntime.hasConfiguredAuth = () => true;
+      folderSession.agent.streamFunction = folderFake.stream;
+      await folderSession.prompt("Try updating after reload");
+      const afterReload = folderSession.messages.findLast((message) => message.role === "toolResult");
+      assert.ok(afterReload && afterReload.role === "toolResult" && afterReload.isError, JSON.stringify(afterReload));
+      assert.equal(readFileSync(target, "utf8"), "saved note");
+      assert.equal(requests, 0);
     } finally { folderSession.dispose(); }
 
     if (process.platform !== "win32") {
