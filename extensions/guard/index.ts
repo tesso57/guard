@@ -280,6 +280,7 @@ export default function (pi: ExtensionAPI) {
   pi.events.on("guard:trust-dir", (data) => {
     const d = data as { path?: unknown; by?: unknown; access?: unknown } | undefined;
     if (typeof d?.path !== "string" || !d.path) return;
+    if (d.access !== undefined && d.access !== "read" && d.access !== "write") return;
     trustDir(d.path, d.access !== "read", typeof d.by === "string" && d.by ? d.by.slice(0, 64) : "an extension");
   });
   /** Why a vouched-for tool name does not count (undefined when it does). */

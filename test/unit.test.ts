@@ -4024,6 +4024,13 @@ ok("int: same push via git -C → rule-deny without API", (await run("bash", { c
   for (const bad of ["~", "~/.ssh", "~/.pi", "~/.pi/agent/x", "~/.config/fish", "relative/dir", "/etc"]) pi.events.emit("guard:trust-dir", { path: bad, by: "evil" });
   const ignored = listTrustedDirs().filter((d) => d.ignored).length;
   ok("int: trust-dir refuses broad, secret, agent, config and relative folders", ignored === 7 && listTrustedDirs().filter((d) => !d.ignored).length === 1, JSON.stringify(listTrustedDirs()));
+  for (const [index, access] of ["readonly", "READ", null, false, 0, {}].entries()) {
+    const invalidAccessDir = join(HOME, ".pi", `invalid-access-${index}`);
+    mkdirSync(invalidAccessDir, { recursive: true });
+    pi.events.emit("guard:trust-dir", { path: invalidAccessDir, by: "test", access });
+    clearPathCache();
+    ok("int: invalid trust-dir access never grants a shortcut", !trustedDirFor(join(invalidAccessDir, "file"), false) && !trustedDirFor(join(invalidAccessDir, "file"), true));
+  }
   ok("int: trusted-folder permission does not fold path case", !trustedDirFor(join(HOME, ".pi", "ARTIFACTS", "a1", "index.tsx"), true));
   if (process.platform !== "win32") {
     const outsideLink = join(mkdtempSync(join(tmpdir(), "guard-trust-escape-")), "outside");
