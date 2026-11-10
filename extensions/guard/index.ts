@@ -21,7 +21,7 @@ import { predictEdits } from "./edits.ts";
 import { readBoundedText } from "./files.ts";
 import { buildRequest, callDecisions, evaluate, MAX_ATTACHED_FILES, type ModelVerdict } from "./judge.ts";
 import { redact } from "./redact.ts";
-import { clearPathCache, isFreelyReadable, listTrustedDirs, trustDir, isHardLinked, isInsideExact, pathLikeTokens, pathVariants, protectedReason, protectedRoots, realPath, recentlyChangedFiles, resolvePath, sensitiveReason } from "./paths.ts";
+import { clearPathCache, createTrustedDirState, isFreelyReadable, listTrustedDirs, trustDir, type TrustedDirState, isHardLinked, isInsideExact, pathLikeTokens, pathVariants, protectedReason, protectedRoots, realPath, recentlyChangedFiles, resolvePath, sensitiveReason } from "./paths.ts";
 import { BUILTIN_TOOLS, hardDeny, hasUninspectedToolInput, inputPaths, inspectExecutablePath, pathsStayInProject, safeAllow, searchNeedsJudgement, sensitive, usesRipgrepConfig, writesStayPlain } from "./policy.ts";
 import { type Decision, deriveDenyPatterns, derivePatterns, describeMatch, globalAllowPatternIsReadOnly, type Match, newId, type Rule, RuleStore, type Scope, supportsAnyInputAllow } from "./rules.ts";
 import { isReadOnlyArgv, normalizeArgv, type Parsed, parseShell } from "./shell.ts";
@@ -139,20 +139,20 @@ const IGNORE_FILES = new Set([".ignore", ".rgignore", ".gitignore", ".fdignore"]
 const NO_PATH_READ_COMMANDS = new Set(["echo", "printf", "pwd", "true", "false", "whoami", "uname", "id", "groups", "basename", "dirname"]);
 
 /** Plain edits of ordinary project files and mkdir/touch: they cannot create links or reach outside the project. */
-function isPlainChange(c: ToolCallLike, cwd: string): boolean {
+function isPlainChange(c: ToolCallLike, cwd: string, trustedDirs: TrustedDirState): boolean {
   if (siblingWrites(c, cwd).some((p) => IGNORE_FILES.has(basename(p)))) return false;
-  if (c.name === "write" || c.name === "edit") return safeAllow(c.name, c.arguments, cwd, { trusted: false, touched: new Set() });
+  if (c.name === "write" || c.name === "edit") return safeAllow(c.name, c.arguments, cwd, { trusted: false, touched: new Set(), trustedDirs });
   if (c.name !== "bash") return false;
   const p = parseShell(String(c.arguments?.command ?? ""));
-  return p.subcommands.every((a) => ["mkdir", "touch"].includes(normalizeArgv(a).argv[0])) && safeAllow("bash", c.arguments, cwd, { trusted: false, touched: new Set() }, p);
+  return p.subcommands.every((a) => ["mkdir", "touch"].includes(normalizeArgv(a).argv[0])) && safeAllow("bash", c.arguments, cwd, { trusted: false, touched: new Set(), trustedDirs }, p);
 }
 
 /** True for calls that cannot change the file system: read tools and strictly read-only bash. */
-function isPureRead(c: ToolCallLike, cwd: string): boolean {
+function isPureRead(c: ToolCallLike, cwd: string, trustedDirs: TrustedDirState): boolean {
   if (["read", "grep", "find", "ls"].includes(c.name)) return true;
   if (c.name !== "bash") return false;
   const p = parseShell(String(c.arguments?.command ?? ""));
-  return p.ok && !p.dynamic.length && !p.writes.length && p.subcommands.every(isReadOnlyArgv) && writesStayPlain("bash", c.arguments, cwd, p) && inputPaths("bash", c.arguments, cwd, p).writes.length === 0;
+  return p.ok && !p.dynamic.length && !p.writes.length && p.subcommands.every(isReadOnlyArgv) && writesStayPlain("bash", c.arguments, cwd, p, trustedDirs) && inputPaths("bash", c.arguments, cwd, p).writes.length === 0;
 }
 
 function isRegularFile(p: string): boolean {
@@ -165,6 +165,7 @@ function isRegularFile(p: string): boolean {
 }
 
 export default function (pi: ExtensionAPI) {
+  const trustedDirs = createTrustedDirState();
   let cfg: Config = loadConfig();
   const store = new RuleStore();
   let enabled = true;
@@ -281,7 +282,7 @@ export default function (pi: ExtensionAPI) {
     const d = data as { path?: unknown; by?: unknown; access?: unknown } | undefined;
     if (typeof d?.path !== "string" || !d.path) return;
     if (d.access !== undefined && d.access !== "read" && d.access !== "write") return;
-    trustDir(d.path, d.access !== "read", typeof d.by === "string" && d.by ? d.by.slice(0, 64) : "an extension");
+    trustDir(d.path, d.access !== "read", typeof d.by === "string" && d.by ? d.by.slice(0, 64) : "an extension", trustedDirs);
   });
   /** Why a vouched-for tool name does not count (undefined when it does). */
   function trustProblem(tool: string): string | undefined {
@@ -565,7 +566,7 @@ export default function (pi: ExtensionAPI) {
     store.syncSession(ctx.sessionManager.getBranch() as any[]);
     const found = store.find(tool, input, ctx.cwd, parsed);
     // An allow rule only covers calls whose paths stay inside the project, writing only plain files
-    const rule = found?.decision === "allow" && (!writesStayPlain(tool, input, ctx.cwd, parsed) || !pathsStayInProject(tool, input, ctx.cwd, parsed)) ? undefined : found;
+    const rule = found?.decision === "allow" && (!writesStayPlain(tool, input, ctx.cwd, parsed, trustedDirs) || !pathsStayInProject(tool, input, ctx.cwd, parsed)) ? undefined : found;
     const patterns = derivePatterns(tool, input, ctx.cwd, parsed);
     const denyPatterns = deriveDenyPatterns(tool, input, ctx.cwd, parsed);
     if (rule?.decision === "deny") return { ...base, action: "block", source: "rule-deny", reasons: rule.rules.map((r) => `${r.scope} deny rule: ${describeMatch(r.tool, r.match)}`), auditReasons: rule.rules.map((r) => `${r.scope} deny rule [${r.id}]`), rules: rule.rules };
@@ -577,14 +578,14 @@ export default function (pi: ExtensionAPI) {
     // Pi may execute all calls in this message concurrently, regardless of their order in the message.
     const peers = opts.peers ?? opts.siblings ?? [];
     const cx = context(ctx, callId, tool, parsed, opts.siblings ?? [], peers, opts.historyBoundary);
-    const siblingMayChange = peers.some((sb) => !isPureRead(sb, ctx.cwd) && !isPlainChange(sb, ctx.cwd));
+    const siblingMayChange = peers.some((sb) => !isPureRead(sb, ctx.cwd, trustedDirs) && !isPlainChange(sb, ctx.cwd, trustedDirs));
     // Concurrent tree changes and non-plain writes can change paths or execution configuration.
     const treeChanger = peers.find((sb) => {
       if (changesTrees(sb)) return true;
       const writes = siblingWrites(sb, ctx.cwd);
-      if (sb.name === "bash") return !isPlainChange(sb, ctx.cwd) && writes.length > 0;
+      if (sb.name === "bash") return !isPlainChange(sb, ctx.cwd, trustedDirs) && writes.length > 0;
       if (sb.name !== "write" && sb.name !== "edit") return false;
-      return !isPlainChange(sb, ctx.cwd);
+      return !isPlainChange(sb, ctx.cwd, trustedDirs);
     });
     const readsPaths = !!treeChanger && (inputPaths(tool, input, ctx.cwd, parsed).reads.length > 0 || ["grep", "find", "ls"].includes(tool) ||
       (tool === "bash" && !!parsed?.subcommands.some((raw) => {
@@ -676,13 +677,13 @@ export default function (pi: ExtensionAPI) {
     const shortcutsOk = !siblingRun && !siblingMayChange;
     // Files earlier calls of this message will write count as touched for this judgement (git dirs, ignore files)
     const touchedNow = new Set([...touched, ...peers.flatMap((sb) => siblingWrites(sb, ctx.cwd))]);
-    if (shortcutsOk && !cx.changedFilesRun && safeAllow(tool, input, ctx.cwd, { trusted, touched: touchedNow }, parsed)) return { ...base, action: "allow", source: "safe", reasons: [] };
+    if (shortcutsOk && !cx.changedFilesRun && safeAllow(tool, input, ctx.cwd, { trusted, touched: touchedNow, trustedDirs }, parsed)) return { ...base, action: "allow", source: "safe", reasons: [] };
     if (shortcutsOk && !cx.changedFilesRun && !historyIncomplete && !uncertainSearch && cfg.skipModelTools.includes(tool)) {
       // read/grep/find/ls skip the model only inside the project (or public system directories). pi's read tries
       // other spellings (curly quotes, NFD, AM/PM) when a path does not exist, so a read must name an existing file.
       const reads = inputPaths(tool, input, ctx.cwd).reads;
       const exists = tool !== "read" || reads.every((p) => existsSync(p));
-      if (exists && (reads.length ? reads : [ctx.cwd]).every((p) => isFreelyReadable(p, ctx.cwd))) return { ...base, action: "allow", source: "skip", reasons: [] };
+      if (exists && (reads.length ? reads : [ctx.cwd]).every((p) => isFreelyReadable(p, ctx.cwd, trustedDirs))) return { ...base, action: "allow", source: "skip", reasons: [] };
     }
 
     const judgeContext = historyIncomplete === cx.historyIncomplete ? cx : { ...cx, historyIncomplete };
@@ -1161,7 +1162,7 @@ export default function (pi: ExtensionAPI) {
               const why = trustProblem(tool);
               return displayText(`[extension] allow tool ${tool}  (trusted by ${extensionTrust.get(tool)}${why ? `; ignored: ${why}` : ""})`).replace(/\n/g, "\\n");
             }),
-            ...listTrustedDirs().map((dir) => displayText(`[extension] ${dir.write ? "read/write" : "read"} folder ${dir.path}  (trusted by ${dir.by}${dir.ignored ? `; ignored: ${dir.ignored}` : ""})`).replace(/\n/g, "\\n")),
+            ...listTrustedDirs(trustedDirs).map((dir) => displayText(`[extension] ${dir.write ? "read/write" : "read"} folder ${dir.path}  (trusted by ${dir.by}${dir.ignored ? `; ignored: ${dir.ignored}` : ""})`).replace(/\n/g, "\\n")),
             ...store.all().sort((a, b) => order.indexOf(a.scope) - order.indexOf(b.scope))
               .map((r) => displayText(`[${r.scope}] ${r.decision.padEnd(5)} ${describeMatch(r.tool, r.match)}  (id ${r.id}, hits ${store.hitCount(r.id)}${r.decision === "allow" && r.expiresAt ? `, expires ${r.expiresAt.slice(0, 10)}` : ""})`).replace(/\n/g, "\\n")),
           ];

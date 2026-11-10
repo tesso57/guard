@@ -64,6 +64,8 @@ test("extensions can vouch for a tool and a folder in real Pi sessions", async (
       { content: [{ type: "toolCall", id: "folder-call", name: "write", arguments: { path: target, content: "saved note" } }] },
       { content: [{ type: "toolCall", id: "risky-call", name: "write", arguments: { path: join(artifacts, "package.json"), content: "{}" } }] },
       { content: [{ type: "text", text: "done" }] },
+      { content: [{ type: "toolCall", id: "still-trusted-call", name: "write", arguments: { path: target, content: "saved note" } }] },
+      { content: [{ type: "text", text: "done" }] },
     ]);
     const folderLoader = new DefaultResourceLoader({
       cwd: project,
@@ -91,6 +93,34 @@ test("extensions can vouch for a tool and a folder in real Pi sessions", async (
       assert.equal(requests, 0);
       const records = readFileSync(join(agentDir, "guard", "audit.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
       assert.ok(records.some((record) => record.tool === "write" && record.source === "safe" && record.final === "run"));
+
+      const unvouchedFake = createFakeModel([
+        { content: [{ type: "toolCall", id: "unvouched-call", name: "write", arguments: { path: target, content: "must remain unchanged" } }] },
+        { content: [{ type: "text", text: "done" }] },
+      ]);
+      const unvouchedLoader = new DefaultResourceLoader({
+        cwd: project, agentDir,
+        additionalExtensionPaths: [fileURLToPath(new URL("../extensions/index.ts", import.meta.url))],
+        noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+      });
+      await unvouchedLoader.reload();
+      assert.deepEqual(unvouchedLoader.getExtensions().errors, []);
+      const { session: unvouchedSession } = await createAgentSession({ cwd: project, agentDir, model: unvouchedFake.model, sessionManager: SessionManager.inMemory(project), tools: ["write"], resourceLoader: unvouchedLoader });
+      try {
+        await unvouchedSession.bindExtensions({});
+        unvouchedSession.modelRuntime.hasConfiguredAuth = () => true;
+        unvouchedSession.agent.streamFunction = unvouchedFake.stream;
+        await unvouchedSession.prompt("Update the artifact");
+        const result = unvouchedSession.messages.find((message) => message.role === "toolResult");
+        assert.ok(result && result.role === "toolResult" && result.isError, JSON.stringify(result));
+        assert.equal(readFileSync(target, "utf8"), "saved note");
+        assert.equal(requests, 0);
+      } finally { unvouchedSession.dispose(); }
+
+      await folderSession.prompt("Update the trusted artifact again");
+      const lastResult = folderSession.messages.findLast((message) => message.role === "toolResult");
+      assert.ok(lastResult && lastResult.role === "toolResult" && !lastResult.isError, JSON.stringify(lastResult));
+      assert.equal(readFileSync(target, "utf8"), "saved note");
     } finally { folderSession.dispose(); }
 
     if (process.platform !== "win32") {

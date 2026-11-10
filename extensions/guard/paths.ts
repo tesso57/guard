@@ -377,14 +377,19 @@ export function isPiCodePath(p: string): boolean {
 
 /** Folders another extension vouched for (guard:trust-dir), e.g. an artifacts extension's output folder. */
 export type TrustedDir = { path: string; write: boolean; by: string; ignored?: string };
-const trustedDirs: TrustedDir[] = [];
-const trustedDirTargets = new Map<string, string>();
-const trustedDirAliases = new Map<string, Set<string>>();
+export type TrustedDirState = {
+  trustedDirs: TrustedDir[];
+  trustedDirTargets: Map<string, string>;
+  trustedDirAliases: Map<string, Set<string>>;
+};
+export const createTrustedDirState = (): TrustedDirState => ({ trustedDirs: [], trustedDirTargets: new Map(), trustedDirAliases: new Map() });
+const defaultTrustedDirState = createTrustedDirState();
 // Home-level folders that hold credentials, tool configuration or executables on PATH
 const UNTRUSTABLE_HOME_DIRS = new Set([".ssh", ".gnupg", ".aws", ".azure", ".gcloud", ".kube", ".docker", ".config", ".local", ".npm", ".cargo", ".rustup", ".gem", ".bun", ".deno", ".volta", ".nvm", ".pyenv", ".rbenv", "library", "bin"]);
 
 /** Registers a folder; returns why it was refused, if it was. Only folders inside the home directory (or tmp) qualify. */
-export function trustDir(raw: string, write: boolean, by: string): string | undefined {
+export function trustDir(raw: string, write: boolean, by: string, state: TrustedDirState): string | undefined {
+  const { trustedDirs, trustedDirTargets, trustedDirAliases } = state;
   // Trust events may arrive after a path or symlink changed since the last call.
   realCache.clear();
   memoCache.clear();
@@ -423,22 +428,22 @@ export function trustDir(raw: string, write: boolean, by: string): string | unde
   trustedDirs.push(entry);
   return reason;
 }
-export const listTrustedDirs = (): readonly TrustedDir[] => trustedDirs;
+export const listTrustedDirs = (state: TrustedDirState): readonly TrustedDir[] => state.trustedDirs;
 
 /** Return the path relative to a registered spelling of the trusted folder. */
-export function trustedDirRelative(p: string, dir: TrustedDir): string | undefined {
-  const base = [...(trustedDirAliases.get(dir.path) ?? [])].find((alias) => isInsideExact(p, alias));
+export function trustedDirRelative(p: string, dir: TrustedDir, state: TrustedDirState = defaultTrustedDirState): string | undefined {
+  const base = [...(state.trustedDirAliases.get(dir.path) ?? [])].find((alias) => isInsideExact(p, alias));
   return base === undefined ? undefined : relative(base, p);
 }
 
 /** The trusted folder p is in (literally and after resolving symlinks), if any; `write` requires write access. */
-export function trustedDirFor(p: string, write: boolean): TrustedDir | undefined {
+export function trustedDirFor(p: string, write: boolean, state: TrustedDirState = defaultTrustedDirState): TrustedDir | undefined {
   if (p === UNKNOWN_PATH) return undefined;
   const real = realPath(p);
-  return trustedDirs.find((d) => {
+  return state.trustedDirs.find((d) => {
     const realBase = realPath(d.path);
-    const matchesAlias = trustedDirRelative(p, d) !== undefined;
-    return !d.ignored && trustedDirTargets.get(d.path) === realBase && (!write || d.write) && matchesAlias && isInsideExact(real, realBase);
+    const matchesAlias = trustedDirRelative(p, d, state) !== undefined;
+    return !d.ignored && state.trustedDirTargets.get(d.path) === realBase && (!write || d.write) && matchesAlias && isInsideExact(real, realBase);
   });
 }
 
@@ -494,12 +499,12 @@ export function isProtectedHardLink(p: string, roots: string[]): boolean {
  * Where guard may let a read happen without asking: inside the project (unless the project is the home directory
  * itself or one of its ancestors) or in public system directories. Checked on both the literal and the real path.
  */
-export function isFreelyReadable(p: string, cwd: string): boolean {
+export function isFreelyReadable(p: string, cwd: string, state?: TrustedDirState): boolean {
   if (p === UNKNOWN_PATH) return false;
   const real = realPath(p);
   const project = !isHomeOrAncestor(cwd) &&
     (isInsideExact(p, cwd) || isInsideExact(p, realPath(cwd))) && isInsideExact(real, realPath(cwd));
-  const publicPath = PUBLIC_DIRS.some((d) => isInsideExact(p, d) && isInsideExact(real, realPath(d))) || isPiCodePath(p) || !!trustedDirFor(p, false);
+  const publicPath = PUBLIC_DIRS.some((d) => isInsideExact(p, d) && isInsideExact(real, realPath(d))) || isPiCodePath(p) || !!trustedDirFor(p, false, state);
   return (project || publicPath) && !isHardLinked(p);
 }
 

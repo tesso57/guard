@@ -181,6 +181,8 @@ Inside a vouched-for folder, reads are free like reads inside the project, and p
 
 The optional `access` field accepts `"read"` or `"write"` and defaults to `"write"` when omitted. Events with other values are ignored. Grants for overlapping folders are additive: a read-only child grant does not revoke a parent folder's write grant. Re-registering the same folder replaces its previous grant, including when the new registration uses a symlink to that folder.
 
+Folder grants belong to the current guard instance and are not inherited by another guard instance. Extensions should emit their trust events on `session_start`.
+
 ## Commands
 
 | Command | What it does |

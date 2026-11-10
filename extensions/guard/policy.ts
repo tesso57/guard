@@ -11,7 +11,7 @@ import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } fro
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { hasGluedPathValue, innerCommands, INTERPRETER_NAMES, isLongOption, isReadOnlyArgv, isShell, nonFlags, normalizeArgv, type Parsed, parseShell, unwrapCommandWrappers } from "./shell.ts";
 import { readRegularText } from "./files.ts";
-import { containsProtectedRoot, expandGlobFully, trustedDirFor, trustedDirRelative, type TrustedDir, isPiCodePath, PI_CODE_DIRS, gitConfigIsSafe, globHitsOptionLikeName, globMayReach, ignoreFilesReinclude, isFreelyReadable, isHardLinked, isHomeOrAncestor, isInside, isInsideExact, isProtectedHardLink, isRiskyProjectFile, memo, pathLikeTokens, pathVariants, protectedReason, protectedRoots, readFallbackVariants, realPath, resolvePath, secretFilesUnder, sensitiveReason, UNKNOWN_PATH } from "./paths.ts";
+import { containsProtectedRoot, expandGlobFully, trustedDirFor, trustedDirRelative, type TrustedDir, type TrustedDirState, isPiCodePath, PI_CODE_DIRS, gitConfigIsSafe, globHitsOptionLikeName, globMayReach, ignoreFilesReinclude, isFreelyReadable, isHardLinked, isHomeOrAncestor, isInside, isInsideExact, isProtectedHardLink, isRiskyProjectFile, memo, pathLikeTokens, pathVariants, protectedReason, protectedRoots, readFallbackVariants, realPath, resolvePath, secretFilesUnder, sensitiveReason, UNKNOWN_PATH } from "./paths.ts";
 
 export const BUILTIN_TOOLS = new Set(["bash", "edit", "write", "read", "grep", "find", "ls"]);
 const INCOMPLETE_DIRECTORY_COMPARISON = "/__guard_incomplete_directory_comparison__";
@@ -922,7 +922,7 @@ export function sensitive(tool: string, input: any, cwd: string, roots: string[]
 /** Commands that only create empty files or directories; safe when every target is a plain project path. */
 const PLAIN_CREATORS = new Set(["mkdir", "touch"]);
 
-export function safeAllow(tool: string, input: any, cwd: string, opts: { trusted: boolean; touched: Set<string> }, parsed?: Parsed): boolean {
+export function safeAllow(tool: string, input: any, cwd: string, opts: { trusted: boolean; touched: Set<string>; trustedDirs?: TrustedDirState }, parsed?: Parsed): boolean {
   if (tool === "bash") {
     if (!parsed || !parsed.ok || parsed.dynamic.length || parsed.writes.length || !parsed.subcommands.length) return false;
     // Glued option values (-f/etc/x, -bf~/x) are easy to misread; such commands always get a judgement.
@@ -948,9 +948,9 @@ export function safeAllow(tool: string, input: any, cwd: string, opts: { trusted
       if (PLAIN_CREATORS.has(head)) creates = true;
       else if (bashWriteTargets(a).length || !isReadOnlyArgv(a)) return false;
     }
-    if (creates && !writesStayPlain(tool, input, cwd, parsed)) return false;
+    if (creates && !writesStayPlain(tool, input, cwd, parsed, opts.trustedDirs)) return false;
     // Only reads inside the project or in public system directories happen without asking
-    if (!inputPaths(tool, input, cwd, parsed).reads.every((p) => isFreelyReadable(p, cwd))) return false;
+    if (!inputPaths(tool, input, cwd, parsed).reads.every((p) => isFreelyReadable(p, cwd, opts.trustedDirs))) return false;
     const heads = parsed.subcommands.map((a) => normalizeArgv(a).argv[0]);
     // Read-only git still runs commands configured in .git/config, so it needs a trusted repo with a clean config,
     // must run in the project itself (no cd anywhere in the command), and nothing this session may have planted a
@@ -970,8 +970,8 @@ export function safeAllow(tool: string, input: any, cwd: string, opts: { trusted
       const r = realPath(w);
       if (isHardLinked(w)) return false;
       // Folders another extension vouched for (guard:trust-dir) take plain edits like the project
-      const td = trustedDirFor(w, true);
-      if (td) return plainInTrustedDir(w, td);
+      const td = trustedDirFor(w, true, opts.trustedDirs);
+      if (td) return plainInTrustedDir(w, td, opts.trustedDirs);
       // When pi runs in ~ (or above), "the project" would be the whole home directory
       if (isHomeOrAncestor(cwd)) return false;
       // Symlinks that leave the project (docs/notes.md -> ~/.bashrc) are not plain project edits
@@ -991,22 +991,22 @@ export function pathsStayInProject(tool: string, input: any, cwd: string, parsed
   return !isHomeOrAncestor(cwd) && [...reads, ...writes].every((p) => isInsideExact(realPath(p), realCwd));
 }
 
-function plainInTrustedDir(w: string, dir: TrustedDir): boolean {
+function plainInTrustedDir(w: string, dir: TrustedDir, state?: TrustedDirState): boolean {
   const r = realPath(w);
   const realDir = realPath(dir.path);
-  const lexicalPath = trustedDirRelative(w, dir);
+  const lexicalPath = trustedDirRelative(w, dir, state);
   return lexicalPath !== undefined && isInsideExact(r, realDir) && r.toLowerCase() !== realDir.toLowerCase() && !isRiskyProjectFile(relative(realDir, r)) && !isRiskyProjectFile(lexicalPath);
 }
 
-export function writesStayPlain(tool: string, input: any, cwd: string, parsed?: Parsed): boolean {
+export function writesStayPlain(tool: string, input: any, cwd: string, parsed?: Parsed, state?: TrustedDirState): boolean {
   const { writes } = inputPaths(tool, input, cwd, parsed);
   // A hard-linked file may be the same file as something outside the project
   if (writes.some(isHardLinked)) return false;
   const realCwd = realPath(cwd);
   return writes.every((w) => {
     const r = realPath(w);
-    const trusted = trustedDirFor(w, true);
-    if (trusted) return plainInTrustedDir(w, trusted);
+    const trusted = trustedDirFor(w, true, state);
+    if (trusted) return plainInTrustedDir(w, trusted, state);
     return !isHomeOrAncestor(cwd) && isInsideExact(r, realCwd) && r.toLowerCase() !== realCwd.toLowerCase() && !isRiskyProjectFile(r.slice(realCwd.length + 1));
   });
 }
