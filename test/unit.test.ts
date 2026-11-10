@@ -4033,6 +4033,21 @@ ok("int: same push via git -C → rule-deny without API", (await run("bash", { c
   }
   ok("int: trusted-folder permission does not fold path case", !trustedDirFor(join(HOME, ".pi", "ARTIFACTS", "a1", "index.tsx"), true));
   if (process.platform !== "win32") {
+    const permissionDir = join(HOME, ".pi", "permission-target");
+    const permissionAlias = join(HOME, ".pi", "permission-alias");
+    mkdirSync(permissionDir, { recursive: true });
+    symlinkSync(permissionDir, permissionAlias);
+    pi.events.emit("guard:trust-dir", { path: permissionDir, by: "test", access: "write" });
+    pi.events.emit("guard:trust-dir", { path: permissionAlias, by: "test", access: "read" });
+    clearPathCache();
+    ok("int: re-registering the same folder through an alias keeps reads but revokes its previous write shortcut", !!trustedDirFor(join(permissionDir, "file"), false) && !trustedDirFor(join(permissionDir, "file"), true));
+    pi.events.emit("guard:trust-dir", { path: permissionDir, by: "test", access: "write" });
+    clearPathCache();
+    ok("int: re-enabling writes preserves safe access through the earlier alias", safeAllow("write", { path: join(permissionAlias, "note.txt"), content: "x" }, PROJ, { trusted: true, touched: new Set() }));
+    rmSync(permissionAlias);
+    symlinkSync("/usr", permissionAlias);
+    clearPathCache();
+    ok("int: a retained alias cannot escape after its link target changes", !trustedDirFor(join(permissionAlias, "bin"), true));
     const outsideLink = join(mkdtempSync(join(tmpdir(), "guard-trust-escape-")), "outside");
     symlinkSync("/usr", outsideLink);
     clearPathCache();

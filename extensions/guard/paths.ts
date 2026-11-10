@@ -379,6 +379,7 @@ export function isPiCodePath(p: string): boolean {
 export type TrustedDir = { path: string; write: boolean; by: string; ignored?: string };
 const trustedDirs: TrustedDir[] = [];
 const trustedDirTargets = new Map<string, string>();
+const trustedDirAliases = new Map<string, Set<string>>();
 // Home-level folders that hold credentials, tool configuration or executables on PATH
 const UNTRUSTABLE_HOME_DIRS = new Set([".ssh", ".gnupg", ".aws", ".azure", ".gcloud", ".kube", ".docker", ".config", ".local", ".npm", ".cargo", ".rustup", ".gem", ".bun", ".deno", ".volta", ".nvm", ".pyenv", ".rbenv", "library", "bin"]);
 
@@ -399,13 +400,33 @@ export function trustDir(raw: string, write: boolean, by: string): string | unde
     return undefined;
   })();
   const entry: TrustedDir = { path: raw.startsWith("~") || isAbsolute(raw) ? resolvePath(HOME, raw) : raw, write, by, ignored: reason };
-  const i = trustedDirs.findIndex((d) => d.path === entry.path);
-  if (i >= 0) trustedDirs.splice(i, 1);
-  trustedDirTargets.set(entry.path, realPath(entry.path));
+  const target = realPath(entry.path);
+  const aliases = new Set([entry.path, target]);
+  // A new grant for the same physical folder replaces its old permissions,
+  // even if an extension used a different symlink or canonical spelling.
+  for (let i = trustedDirs.length - 1; i >= 0; i--) {
+    const previous = trustedDirs[i];
+    if (previous.path === entry.path || (!entry.ignored && !previous.ignored && trustedDirTargets.get(previous.path) === target)) {
+      if (!entry.ignored && !previous.ignored && trustedDirTargets.get(previous.path) === target) {
+        for (const alias of trustedDirAliases.get(previous.path) ?? []) aliases.add(alias);
+      }
+      trustedDirTargets.delete(previous.path);
+      trustedDirAliases.delete(previous.path);
+      trustedDirs.splice(i, 1);
+    }
+  }
+  trustedDirTargets.set(entry.path, target);
+  trustedDirAliases.set(entry.path, aliases);
   trustedDirs.push(entry);
   return reason;
 }
 export const listTrustedDirs = (): readonly TrustedDir[] => trustedDirs;
+
+/** Return the path relative to a registered spelling of the trusted folder. */
+export function trustedDirRelative(p: string, dir: TrustedDir): string | undefined {
+  const base = [...(trustedDirAliases.get(dir.path) ?? [])].find((alias) => isInsideExact(p, alias));
+  return base === undefined ? undefined : relative(base, p);
+}
 
 /** The trusted folder p is in (literally and after resolving symlinks), if any; `write` requires write access. */
 export function trustedDirFor(p: string, write: boolean): TrustedDir | undefined {
@@ -413,7 +434,8 @@ export function trustedDirFor(p: string, write: boolean): TrustedDir | undefined
   const real = realPath(p);
   return trustedDirs.find((d) => {
     const realBase = realPath(d.path);
-    return !d.ignored && trustedDirTargets.get(d.path) === realBase && (!write || d.write) && (isInsideExact(p, d.path) || isInsideExact(p, realBase)) && isInsideExact(real, realBase);
+    const matchesAlias = trustedDirRelative(p, d) !== undefined;
+    return !d.ignored && trustedDirTargets.get(d.path) === realBase && (!write || d.write) && matchesAlias && isInsideExact(real, realBase);
   });
 }
 

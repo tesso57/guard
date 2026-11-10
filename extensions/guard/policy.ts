@@ -1,6 +1,6 @@
 /**
  * Deterministic checks that run before the model.
- *   hardDeny  : blocks that nothing can override (no rule, no dialog)
+ *   hardDeny  : blocks without a rule shortcut; a repeated call may receive explicit one-time approval
  *   sensitive : access to paths that likely hold secrets, or to guard's own state → confirm
  *   safeAllow : obviously safe → allow without calling the model
  */
@@ -11,7 +11,7 @@ import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } fro
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { hasGluedPathValue, innerCommands, INTERPRETER_NAMES, isLongOption, isReadOnlyArgv, isShell, nonFlags, normalizeArgv, type Parsed, parseShell, unwrapCommandWrappers } from "./shell.ts";
 import { readRegularText } from "./files.ts";
-import { containsProtectedRoot, expandGlobFully, trustedDirFor, isPiCodePath, PI_CODE_DIRS, gitConfigIsSafe, globHitsOptionLikeName, globMayReach, ignoreFilesReinclude, isFreelyReadable, isHardLinked, isHomeOrAncestor, isInside, isInsideExact, isProtectedHardLink, isRiskyProjectFile, memo, pathLikeTokens, pathVariants, protectedReason, protectedRoots, readFallbackVariants, realPath, resolvePath, secretFilesUnder, sensitiveReason, UNKNOWN_PATH } from "./paths.ts";
+import { containsProtectedRoot, expandGlobFully, trustedDirFor, trustedDirRelative, type TrustedDir, isPiCodePath, PI_CODE_DIRS, gitConfigIsSafe, globHitsOptionLikeName, globMayReach, ignoreFilesReinclude, isFreelyReadable, isHardLinked, isHomeOrAncestor, isInside, isInsideExact, isProtectedHardLink, isRiskyProjectFile, memo, pathLikeTokens, pathVariants, protectedReason, protectedRoots, readFallbackVariants, realPath, resolvePath, secretFilesUnder, sensitiveReason, UNKNOWN_PATH } from "./paths.ts";
 
 export const BUILTIN_TOOLS = new Set(["bash", "edit", "write", "read", "grep", "find", "ls"]);
 const INCOMPLETE_DIRECTORY_COMPARISON = "/__guard_incomplete_directory_comparison__";
@@ -971,7 +971,7 @@ export function safeAllow(tool: string, input: any, cwd: string, opts: { trusted
       if (isHardLinked(w)) return false;
       // Folders another extension vouched for (guard:trust-dir) take plain edits like the project
       const td = trustedDirFor(w, true);
-      if (td) return plainInTrustedDir(w, td.path);
+      if (td) return plainInTrustedDir(w, td);
       // When pi runs in ~ (or above), "the project" would be the whole home directory
       if (isHomeOrAncestor(cwd)) return false;
       // Symlinks that leave the project (docs/notes.md -> ~/.bashrc) are not plain project edits
@@ -991,11 +991,11 @@ export function pathsStayInProject(tool: string, input: any, cwd: string, parsed
   return !isHomeOrAncestor(cwd) && [...reads, ...writes].every((p) => isInsideExact(realPath(p), realCwd));
 }
 
-function plainInTrustedDir(w: string, dir: string): boolean {
+function plainInTrustedDir(w: string, dir: TrustedDir): boolean {
   const r = realPath(w);
-  const realDir = realPath(dir);
-  const lexicalBase = isInsideExact(w, dir) ? dir : realDir;
-  return isInsideExact(w, lexicalBase) && isInsideExact(r, realDir) && r.toLowerCase() !== realDir.toLowerCase() && !isRiskyProjectFile(relative(realDir, r)) && !isRiskyProjectFile(relative(lexicalBase, w));
+  const realDir = realPath(dir.path);
+  const lexicalPath = trustedDirRelative(w, dir);
+  return lexicalPath !== undefined && isInsideExact(r, realDir) && r.toLowerCase() !== realDir.toLowerCase() && !isRiskyProjectFile(relative(realDir, r)) && !isRiskyProjectFile(lexicalPath);
 }
 
 export function writesStayPlain(tool: string, input: any, cwd: string, parsed?: Parsed): boolean {
@@ -1006,7 +1006,7 @@ export function writesStayPlain(tool: string, input: any, cwd: string, parsed?: 
   return writes.every((w) => {
     const r = realPath(w);
     const trusted = trustedDirFor(w, true);
-    if (trusted) return plainInTrustedDir(w, trusted.path);
+    if (trusted) return plainInTrustedDir(w, trusted);
     return !isHomeOrAncestor(cwd) && isInsideExact(r, realCwd) && r.toLowerCase() !== realCwd.toLowerCase() && !isRiskyProjectFile(r.slice(realCwd.length + 1));
   });
 }
