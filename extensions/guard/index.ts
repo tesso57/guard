@@ -264,6 +264,7 @@ export default function (pi: ExtensionAPI) {
     store.load(storeCwd, trusted);
     modelMemo.clear();
     verdictCache.clear();
+    blockedOnce.clear();
     for (const warning of store.warnings) warn(ctx, `guard: ${warning}`);
   }
 
@@ -801,6 +802,7 @@ export default function (pi: ExtensionAPI) {
     modelMemo.clear();
     siblingsById.clear();
     verdictCache.clear();
+    blockedOnce.clear();
     store.resetSession();
     promoted.clear();
     restoreState(ctx);
@@ -1125,6 +1127,7 @@ export default function (pi: ExtensionAPI) {
       }
       if (sub === "on" || sub === "off") {
         if (rest.length) return say("usage: /guard on|off", "warning");
+        blockedOnce.clear();
         enabled = sub === "on";
         append(STATE_ENTRY, { enabled });
         restoreState(ctx);
@@ -1141,6 +1144,7 @@ export default function (pi: ExtensionAPI) {
         store.load(storeCwd, trusted);
         modelMemo.clear();
         verdictCache.clear();
+        blockedOnce.clear();
         updateStatus(ctx);
         for (const w of [...loaded.warnings, ...store.warnings]) say(`guard: ${w}`, "warning");
         return say("guard: reloaded settings and rules");

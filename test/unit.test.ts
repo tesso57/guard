@@ -4010,6 +4010,33 @@ ok("int: same push via git -C → rule-deny without API", (await run("bash", { c
     const changedTrust = await run("bash", { command: trustScopedRetry });
     ok("int: a changed trusted-folder policy does not reuse an earlier blocked-call retry", changedTrust?.block === true && !retryDialogOpened);
   } finally { ctx.ui.select = priorSelect; }
+  await run("bash", { command: "echo reset-before-reload-retry" });
+  const reloadScopedRetry = "printf reload-retry >> ~/.pi/agent/guard/rules.jsonl";
+  await run("bash", { command: reloadScopedRetry });
+  await command.handler("reload", ctx);
+  let reloadRetryDialogOpened = false;
+  const selectBeforeReloadRetry = ctx.ui.select;
+  ctx.ui.select = async () => { reloadRetryDialogOpened = true; return "Deny"; };
+  try {
+    const changedSettings = await run("bash", { command: reloadScopedRetry });
+    ok("int: settings reload invalidates an earlier blocked-call retry", changedSettings?.block === true && !reloadRetryDialogOpened);
+  } finally { ctx.ui.select = selectBeforeReloadRetry; }
+  for (const [label, change] of [
+    ["toggle", async () => { await command.handler("off", ctx); await command.handler("on", ctx); }],
+    ["tree change", async () => { await h.session_tree({ type: "session_tree" }, ctx); }],
+  ] as const) {
+    await run("bash", { command: `echo reset-before-${label}` });
+    const retryCommand = `printf ${label} >> ~/.pi/agent/guard/rules.jsonl`;
+    await run("bash", { command: retryCommand });
+    await change();
+    let dialogOpened = false;
+    const previous = ctx.ui.select;
+    ctx.ui.select = async () => { dialogOpened = true; return "Deny"; };
+    try {
+      const result = await run("bash", { command: retryCommand });
+      ok(`int: ${label} invalidates an earlier blocked-call retry`, result?.block === true && !dialogOpened);
+    } finally { ctx.ui.select = previous; }
+  }
   await run("bash", { command: "echo reset-before-retry-mutation" });
   const mutableRetry = { command: "printf override >> ~/.pi/agent/guard/rules.jsonl" };
   await run("bash", mutableRetry);
@@ -4485,11 +4512,12 @@ branch.push({ type: "message", message: { role: "assistant", content: mid } });
 selectScript = [["this session", "npm run typecheck"]];
 await h.tool_call({ type: "tool_call", toolCallId: "m1", toolName: "bash", input: mid[0].arguments }, ctx);
 await h.tool_call({ type: "tool_call", toolCallId: "m2", toolName: "edit", input: mid[1].arguments }, ctx);
-// "sh run.sh" was blocked earlier, so this second time the user is asked (and denies)
+// A prior retry was invalidated by later state changes, so this is a fresh block.
 selectScript = [["Deny"]];
 inputs = [""];
 const m3 = await h.tool_call({ type: "tool_call", toolCallId: "m3", toolName: "bash", input: mid[2].arguments }, ctx);
-ok("int: after a mid-message rule, a sibling-edited file that exfiltrates is blocked again (the user denies the retry)", m3?.block === true && selectScript.length === 0);
+ok("int: after a mid-message rule, a sibling-edited file that exfiltrates is blocked again", m3?.block === true && selectScript.length === 1, JSON.stringify({ m3, remainingDialogs: selectScript.length }));
+selectScript = [];
 ok("int: ... and the re-judgement sees the edited content", calls.some((c) => JSON.stringify(guardContext(c.body)).includes("evil.example")));
 
 // review 3 P1-4: changing a test file after an allowed `npm test` invalidates the cached verdict
