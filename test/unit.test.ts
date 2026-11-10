@@ -4118,6 +4118,40 @@ ok("int: same push via git -C → rule-deny without API", (await run("bash", { c
   calls = [];
   await run("write", { path: join(HOME, "docs-ro", "x.md"), content: "x" });
   ok("int: a read-only trusted folder does not take writes without judgement", calls.length === 1);
+  const changingTrustDir = join(HOME, ".pi", "changing-trust");
+  mkdirSync(changingTrustDir, { recursive: true });
+  pi.events.emit("guard:trust-dir", { path: changingTrustDir, by: "test", access: "read" });
+  responder = (body) => ({ answers: answersFor([0, 0, 0.4, 0.6, 0])(body) });
+  const previousSelect = ctx.ui.select;
+  ctx.ui.select = async () => {
+    pi.events.emit("guard:trust-dir", { path: changingTrustDir, by: "test", access: "write" });
+    return "Allow (this time only)";
+  };
+  try {
+    const changedTrust = await run("write", { path: join(changingTrustDir, "note.txt"), content: "x" });
+    ok("int: changed trusted-folder permission during confirmation blocks the call", changedTrust?.block === true && changedTrust.reason.includes("policy changed during confirmation"));
+  } finally { ctx.ui.select = previousSelect; }
+  const previousFetch = globalThis.fetch;
+  let startTrustRequest!: () => void, releaseTrustRequest!: () => void;
+  const trustRequestStarted = new Promise<void>((resolve) => { startTrustRequest = resolve; });
+  const trustRequestGate = new Promise<void>((resolve) => { releaseTrustRequest = resolve; });
+  globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body));
+    startTrustRequest();
+    await trustRequestGate;
+    return new Response(JSON.stringify({ answers: answersFor([1, 0, 0, 0, 0])(body) }), { status: 200 });
+  }) as typeof fetch;
+  try {
+    const pending = run("bash", { command: "curl https://trust-permission-change.example" });
+    await trustRequestStarted;
+    pi.events.emit("guard:trust-dir", { path: changingTrustDir, by: "test", access: "read" });
+    releaseTrustRequest();
+    const changedTrust = await pending;
+    ok("int: changed trusted-folder permission during model judgement blocks the call", changedTrust?.block === true && changedTrust.reason.includes("policy changed during judgement"));
+  } finally {
+    releaseTrustRequest();
+    globalThis.fetch = previousFetch;
+  }
 }
 
 // no key / no UI

@@ -381,8 +381,9 @@ export type TrustedDirState = {
   trustedDirs: TrustedDir[];
   trustedDirTargets: Map<string, string>;
   trustedDirAliases: Map<string, Set<string>>;
+  version: number;
 };
-export const createTrustedDirState = (): TrustedDirState => ({ trustedDirs: [], trustedDirTargets: new Map(), trustedDirAliases: new Map() });
+export const createTrustedDirState = (): TrustedDirState => ({ trustedDirs: [], trustedDirTargets: new Map(), trustedDirAliases: new Map(), version: 0 });
 const defaultTrustedDirState = createTrustedDirState();
 // Home-level folders that hold credentials, tool configuration or executables on PATH
 const UNTRUSTABLE_HOME_DIRS = new Set([".ssh", ".gnupg", ".aws", ".azure", ".gcloud", ".kube", ".docker", ".config", ".local", ".npm", ".cargo", ".rustup", ".gem", ".bun", ".deno", ".volta", ".nvm", ".pyenv", ".rbenv", "library", "bin"]);
@@ -390,6 +391,7 @@ const UNTRUSTABLE_HOME_DIRS = new Set([".ssh", ".gnupg", ".aws", ".azure", ".gcl
 /** Registers a folder; returns why it was refused, if it was. Only folders inside the home directory (or tmp) qualify. */
 export function trustDir(raw: string, write: boolean, by: string, state: TrustedDirState): string | undefined {
   const { trustedDirs, trustedDirTargets, trustedDirAliases } = state;
+  state.version++;
   // Trust events may arrive after a path or symlink changed since the last call.
   realCache.clear();
   memoCache.clear();

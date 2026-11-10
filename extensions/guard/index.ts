@@ -113,13 +113,14 @@ function callWrites(tool: string, input: any, cwd: string, parsed?: Parsed): boo
 }
 
 /** Snapshot deterministic access checks and the resolved paths they examined. */
-function filesystemPolicyHash(tool: string, input: unknown, cwd: string, sessionDir: string | undefined, parsed?: Parsed, checked?: { hard: string | undefined; sens: string | undefined; uncertainSearch: boolean }): string {
+function filesystemPolicyHash(tool: string, input: unknown, cwd: string, sessionDir: string | undefined, trustedDirs: TrustedDirState, parsed?: Parsed, checked?: { hard: string | undefined; sens: string | undefined; uncertainSearch: boolean }): string {
   const roots = protectedRoots(cwd, sessionDir);
   const paths = inputPaths(tool, input, cwd, parsed);
   return stableHash({
     hard: checked ? checked.hard : hardDeny(tool, input, cwd, roots, parsed),
     sens: checked ? checked.sens : sensitive(tool, input, cwd, roots, parsed),
     uncertainSearch: checked ? checked.uncertainSearch : searchNeedsJudgement(tool, input, cwd, parsed),
+    trustedDirsVersion: trustedDirs.version,
     paths: { reads: paths.reads.map((path) => [path, realPath(path)]), writes: paths.writes.map((path) => [path, realPath(path)]) },
   });
 }
@@ -632,11 +633,11 @@ export default function (pi: ExtensionAPI) {
       return stableHash(context(ctx, callId, tool, parsed, opts.siblings ?? [], peers, opts.historyBoundary)) !== contextHash;
     };
     const changedContext = (): Assessment => ({ ...base, action: "block", source: "error", reasons: ["judgement context changed during judgement"] });
-    const policyHash = filesystemPolicyHash(tool, input, ctx.cwd, ctx.sessionManager.getSessionDir(), parsed, { hard, sens, uncertainSearch });
+    const policyHash = filesystemPolicyHash(tool, input, ctx.cwd, ctx.sessionManager.getSessionDir(), trustedDirs, parsed, { hard, sens, uncertainSearch });
     const judgementStateKey = stableHash([shellKey, policyHash]);
     const policyChanged = () => {
       clearPathCache();
-      return filesystemPolicyHash(tool, input, ctx.cwd, ctx.sessionManager.getSessionDir(), parsed) !== policyHash;
+      return filesystemPolicyHash(tool, input, ctx.cwd, ctx.sessionManager.getSessionDir(), trustedDirs, parsed) !== policyHash;
     };
     const changedPolicy = (): Assessment => ({ ...base, action: "block", source: "error", reasons: ["filesystem policy changed during judgement"] });
     const stateChanged = () => {
@@ -982,7 +983,7 @@ export default function (pi: ExtensionAPI) {
       const dialogParsed = tool === "bash" ? parseShell(String(input?.command ?? "")) : undefined;
       clearPathCache();
       dialogContextHash = stableHash(context(ctx, event.toolCallId, tool, dialogParsed, batch.earlier, batch.peers, batch.historyBoundary));
-      dialogPolicyHash = filesystemPolicyHash(tool, input, ctx.cwd, ctx.sessionManager.getSessionDir(), dialogParsed);
+      dialogPolicyHash = filesystemPolicyHash(tool, input, ctx.cwd, ctx.sessionManager.getSessionDir(), trustedDirs, dialogParsed);
       if (dialogParsed) dialogExecutable = inspectExecutablePath(dialogParsed, ctx.cwd);
     } catch {
       recordAudit(ctx, { ...rec, preview: `${tool} [arguments withheld: confirmation context could not be inspected]`, action: "block", source: "error", reasons: ["could not inspect context before confirmation"], final: "blocked" });
@@ -1063,7 +1064,7 @@ export default function (pi: ExtensionAPI) {
           recordAudit(ctx, { ...rec, action: "block", source: changedHardDeny ? "hard-deny" : "rule-deny", reasons: [changedHardDeny || "deny rule applied after confirmation"], ruleIds: changedHardDeny ? undefined : currentRule?.rules.map((rule) => rule.id), final: "blocked" });
           return onBlocked(changedHardDeny ? `blocked (${changedHardDeny})` : "blocked by the user's deny rule");
         }
-        if (filesystemPolicyHash(tool, input, ctx.cwd, ctx.sessionManager.getSessionDir(), currentParsed) !== dialogPolicyHash) {
+        if (filesystemPolicyHash(tool, input, ctx.cwd, ctx.sessionManager.getSessionDir(), trustedDirs, currentParsed) !== dialogPolicyHash) {
           recordAudit(ctx, { ...rec, preview: `${tool} [arguments withheld: filesystem policy changed during confirmation]`, action: "block", source: "error", reasons: ["filesystem policy changed during confirmation"], final: "blocked" });
           return onBlocked("filesystem policy changed during confirmation");
         }
