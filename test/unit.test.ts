@@ -2148,6 +2148,9 @@ const run = async (toolName: string, input: any) => h.tool_call({ type: "tool_ca
   revokedProxy.revoke();
   const revokedProxyResult = await run("custom-unserializable", revokedProxy.proxy);
   ok("int: nested and revoked proxies are also blocked", nestedProxyResult?.block === true && revokedProxyResult?.block === true && !proxyRead);
+  const complexInput = { values: Array.from({ length: 100_000 }, () => 0) };
+  const complexResult = await run("custom-unserializable", complexInput);
+  ok("int: overly complex tool input is blocked without recording its contents", complexResult?.block === true && complexResult.reason.includes("input could not be inspected") && tail(1)[0]?.preview.includes("withheld"));
   await run("bash", { command: "echo reset-before-abort-error" });
   const savedAbort = ctx.abort;
   ctx.abort = () => { throw new Error("opaque-abort-error"); };
