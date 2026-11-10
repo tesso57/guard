@@ -863,7 +863,7 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     const hash = stableHash([tool, input]);
-    const retryKey = stableHash([hash, ctx.cwd, trustAvailable ? trusted : "unavailable", ctx.sessionManager.getSessionId()]);
+    const retryKey = stableHash([hash, ctx.cwd, trustAvailable ? trusted : "unavailable", ctx.sessionManager.getSessionId(), trustedDirs.version]);
     const batch = siblingsById.get(event.toolCallId) ?? siblingsFromBranch(ctx, event.toolCallId);
     if (!batch.problem) siblingsById.delete(event.toolCallId);
 

@@ -3997,6 +3997,19 @@ ok("int: same push via git -C → rule-deny without API", (await run("bash", { c
     currentProject = savedProject;
     selectScript = [];
   }
+  await run("bash", { command: "echo reset-before-trust-retry" });
+  const trustScopedRetry = "printf trust-retry >> ~/.pi/agent/guard/rules.jsonl";
+  await run("bash", { command: trustScopedRetry });
+  const retryTrustDir = join(HOME, ".pi", "retry-trust");
+  mkdirSync(retryTrustDir, { recursive: true });
+  pi.events.emit("guard:trust-dir", { path: retryTrustDir, by: "test", access: "read" });
+  let retryDialogOpened = false;
+  const priorSelect = ctx.ui.select;
+  ctx.ui.select = async () => { retryDialogOpened = true; return "Deny"; };
+  try {
+    const changedTrust = await run("bash", { command: trustScopedRetry });
+    ok("int: a changed trusted-folder policy does not reuse an earlier blocked-call retry", changedTrust?.block === true && !retryDialogOpened);
+  } finally { ctx.ui.select = priorSelect; }
   await run("bash", { command: "echo reset-before-retry-mutation" });
   const mutableRetry = { command: "printf override >> ~/.pi/agent/guard/rules.jsonl" };
   await run("bash", mutableRetry);
