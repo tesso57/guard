@@ -87,6 +87,8 @@ Commands that change things are blocked whenever they name guard's state or a di
 
 For other tools, any string of 16 Ki characters or more exceeds the deterministic command and path inspection limit and requires confirmation, even when that tool is configured to skip the model.
 
+For calls guard inspects, tool arguments must remain unambiguous JSON data and within the comparison complexity limit. Cyclic, non-JSON, negative-zero or overly complex inputs are blocked; if the input becomes uninspectable while judgement or confirmation is pending, the call is also blocked.
+
 Where guard cannot pin something down, it errs on the side of blocking: wildcards are matched against guard's state as patterns (so a skipped or truncated expansion cannot hide them), commands that change `HOME`, `CDPATH` or `OLDPWD` are blocked, and a changing command whose working directory guard cannot determine is blocked. Patches (`git apply`, `git am`, `patch`) are read to see which files they change; a patch guard cannot read asks first.
 Patterns too complex to evaluate within the wildcard limits are treated as potentially reaching protected paths.
 

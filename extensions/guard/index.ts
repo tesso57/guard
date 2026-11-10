@@ -74,6 +74,38 @@ function stableHash(v: unknown): string {
   return createHash("sha256").update(JSON.stringify(norm(v))).digest("hex");
 }
 
+/** Tool arguments must remain JSON data for comparisons to be reliable. */
+function toolInputHash(tool: string, input: unknown): string {
+  const ancestors = new WeakSet<object>();
+  let remaining = 100_000;
+  const visit = (value: unknown): void => {
+    if (--remaining < 0) throw new Error("tool input is too complex");
+    if (value === null || typeof value === "string" || typeof value === "boolean") return;
+    // JSON.stringify collapses -0 to 0, but a tool can distinguish them.
+    if (typeof value === "number" && Number.isFinite(value) && !Object.is(value, -0)) return;
+    if (typeof value !== "object") throw new Error("tool input is not JSON data");
+    const array = Array.isArray(value);
+    const prototype = Object.getPrototypeOf(value);
+    if (!array && prototype !== Object.prototype && prototype !== null) throw new Error("tool input is not a plain object");
+    if (ancestors.has(value)) throw new Error("tool input contains a cycle");
+    ancestors.add(value);
+    try {
+      const descriptors = Object.getOwnPropertyDescriptors(value);
+      if (Object.getOwnPropertySymbols(value).length) throw new Error("tool input contains symbol keys");
+      if (array) {
+        for (let i = 0; i < value.length; i++) if (!Object.hasOwn(descriptors, String(i))) throw new Error("tool input contains a sparse array");
+      }
+      for (const [key, descriptor] of Object.entries(descriptors)) {
+        if (array && key === "length") continue;
+        if (!descriptor.enumerable || !("value" in descriptor) || (array && (!/^(0|[1-9]\d*)$/.test(key) || Number(key) >= value.length))) throw new Error("tool input has unsupported properties");
+        visit(descriptor.value);
+      }
+    } finally { ancestors.delete(value); }
+  };
+  visit(input);
+  return stableHash([tool, input]);
+}
+
 /** Shell lookup and startup settings can change while the approval dialog is open. */
 function shellEnvironmentHash(): string {
   return stableHash(Object.fromEntries(Object.entries(process.env).filter(([key]) =>
@@ -855,6 +887,19 @@ export default function (pi: ExtensionAPI) {
     if (cfg.disabled || !enabled) return;
     const tool = event.toolName;
     const input: any = event.input;
+    const onBlocked = (reason: string, retry: "ask-user" | "none" = "none") => {
+      consecutiveBlocks++;
+      totalBlocks++;
+      if (consecutiveBlocks >= cfg.escalateConsecutive || totalBlocks >= cfg.escalateTotal) {
+        const message = `guard: too many blocked calls (${consecutiveBlocks} in a row, ${totalBlocks} total). Stopped the agent.`;
+        if (ctx.hasUI) { try { ctx.ui.notify(message, "error"); } catch { /* notification failure must not prevent stopping */ } }
+        else warn(ctx, message);
+        consecutiveBlocks = 0;
+        try { ctx.abort(); } catch { /* the current call must still be blocked */ }
+        return { ...blockResult(reason, retry), terminate: true };
+      }
+      return blockResult(reason, retry);
+    };
     let vouched: string | undefined;
     let trustAvailable = false;
     // Project trust may have changed since the last event. If it cannot be
@@ -865,7 +910,12 @@ export default function (pi: ExtensionAPI) {
       recordAudit(ctx, { session: ctx.sessionManager.getSessionId(), tool, preview: auditPreview(ctx, tool, input), action: "allow", source: "extension", reasons: [`trusted by ${vouched}`], final: "run" });
       return;
     }
-    const hash = stableHash([tool, input]);
+    let hash: string;
+    try { hash = toolInputHash(tool, input); }
+    catch {
+      recordAudit(ctx, { session: ctx.sessionManager.getSessionId(), tool, preview: `${tool} [arguments withheld: input could not be inspected]`, action: "block", source: "error", reasons: ["tool input could not be inspected"], final: "blocked" });
+      return onBlocked("the tool input could not be inspected");
+    }
     const batch = siblingsById.get(event.toolCallId) ?? siblingsFromBranch(ctx, event.toolCallId);
     if (!batch.problem) siblingsById.delete(event.toolCallId);
 
@@ -883,7 +933,8 @@ export default function (pi: ExtensionAPI) {
       const reason = rulesScope ? `cannot read ${rulesScope} rules` : "could not judge: context unavailable";
       a = { action: "confirm", source: "error", reasons: [reason], rememberAllow: false, globalAllow: false };
     }
-    const inputChanged = stableHash([tool, input]) !== hash;
+    let inputChanged = true;
+    try { inputChanged = toolInputHash(tool, input) !== hash; } catch { /* treat uninspectable input as changed */ }
     const judgementAborted = !!ctx.signal?.aborted;
     if (judgementAborted) a = { action: "block", source: "error", reasons: ["judgement was aborted"], rememberAllow: false, globalAllow: false };
     else if (inputChanged) a = { action: "block", source: "error", reasons: ["input changed during judgement"], rememberAllow: false, globalAllow: false };
@@ -927,19 +978,6 @@ export default function (pi: ExtensionAPI) {
           }
         }
       }
-    };
-    const onBlocked = (reason: string, retry: "ask-user" | "none" = "none") => {
-      consecutiveBlocks++;
-      totalBlocks++;
-      if (consecutiveBlocks >= cfg.escalateConsecutive || totalBlocks >= cfg.escalateTotal) {
-        const message = `guard: too many blocked calls (${consecutiveBlocks} in a row, ${totalBlocks} total). Stopped the agent.`;
-        if (ctx.hasUI) { try { ctx.ui.notify(message, "error"); } catch { /* notification failure must not prevent stopping */ } }
-        else warn(ctx, message);
-        consecutiveBlocks = 0;
-        ctx.abort();
-        return { ...blockResult(reason, retry), terminate: true };
-      }
-      return blockResult(reason, retry);
     };
     const onCancelled = (reason: string) => {
       consecutiveBlocks = 0;
@@ -1049,13 +1087,13 @@ export default function (pi: ExtensionAPI) {
     }
     try {
       clearPathCache();
-      rec.preview = stableHash([tool, input]) === hash ? auditPreview(ctx, tool, input) : `${tool} [arguments withheld: input changed during confirmation]`;
+      rec.preview = toolInputHash(tool, input) === hash ? auditPreview(ctx, tool, input) : `${tool} [arguments withheld: input changed during confirmation]`;
     } catch {
       rec.preview = `${tool} [arguments withheld: input could not be inspected]`;
     }
     if (choice.decision === "allow") {
       try {
-        if (stableHash([tool, input]) !== hash) {
+        if (toolInputHash(tool, input) !== hash) {
           recordAudit(ctx, { ...rec, action: "block", source: "error", reasons: ["input changed during confirmation"], final: "blocked" });
           return onBlocked("the input changed during confirmation");
         }
@@ -1119,7 +1157,8 @@ export default function (pi: ExtensionAPI) {
   pi.on("tool_result", async (event, ctx) => {
     const h = judged.get(event.toolCallId);
     judged.delete(event.toolCallId);
-    if (!h || h === stableHash([event.toolName, event.input])) return;
+    if (!h) return;
+    try { if (h === toolInputHash(event.toolName, event.input)) return; } catch { /* report an uninspectable changed input */ }
     recordAudit(ctx, { session: ctx.sessionManager.getSessionId(), tool: event.toolName, preview: auditPreview(ctx, event.toolName, event.input), action: "allow", source: "drift", reasons: ["input changed after judgement"], event: "drift" });
     warn(ctx, `guard: the input of ${event.toolName} was changed by another extension after guard judged it. Load guard last.`);
   });

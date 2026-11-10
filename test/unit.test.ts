@@ -2128,6 +2128,30 @@ let n = 0;
 const run = async (toolName: string, input: any) => h.tool_call({ type: "tool_call", toolCallId: `c${++n}`, toolName, input }, ctx);
 
 {
+  const circular: any = { value: "opaque-circular-input" };
+  circular.self = circular;
+  for (const input of [circular, { count: 1n }, { value: undefined }, { value: Number.NaN }, { value: -0 }, { value: () => "x" }, { [Symbol("hidden")]: "x" }]) {
+    let result: any, threw = false;
+    try { result = await run("custom-unserializable", input); } catch { threw = true; }
+    ok("int: ambiguous or non-JSON tool input is blocked rather than escaping the handler", !threw && result?.block === true && result.reason.includes("input could not be inspected") && !JSON.stringify(tail(1)).includes("opaque-circular-input"));
+  }
+  let getterCalled = false;
+  const accessorInput = Object.defineProperty({}, "value", { enumerable: true, get() { getterCalled = true; return "opaque-getter-value"; } });
+  const accessorResult = await run("custom-unserializable", accessorInput);
+  ok("int: accessor-based tool input is blocked without invoking the getter", accessorResult?.block === true && !getterCalled);
+  await run("bash", { command: "echo reset-before-abort-error" });
+  const savedAbort = ctx.abort;
+  ctx.abort = () => { throw new Error("opaque-abort-error"); };
+  try {
+    let result: any, threw = false;
+    try {
+      for (let i = 0; i < 3; i++) result = await run("bash", { command: `printf abort-${i} >> ~/.pi/agent/guard/rules.jsonl` });
+    } catch { threw = true; }
+    ok("int: abort handler failure cannot prevent escalation from blocking", !threw && result?.block === true && result?.terminate === true && !JSON.stringify(tail(1)).includes("opaque-abort-error"));
+  } finally { ctx.abort = savedAbort; }
+}
+
+{
   const localHandlers: Record<string, Function> = {};
   ext({ on: (name: string, handler: Function) => (localHandlers[name] = handler), registerCommand: () => {}, appendEntry: () => {}, events: { on: () => () => {}, emit: () => {} } } as any);
   const longBranch: any[] = [];
@@ -2486,6 +2510,16 @@ const run = async (toolName: string, input: any) => h.tool_call({ type: "tool_ca
     ctx.ui.select = savedSelect;
   }
   await run("bash", { command: "git status" });
+  const cyclicDuringDialog: any = { command: "guard-dialog-cyclic operation" };
+  ctx.ui.select = async () => {
+    cyclicDuringDialog.self = cyclicDuringDialog;
+    return "Allow (this time only)";
+  };
+  try {
+    const result = await run("bash", cyclicDuringDialog);
+    ok("int: input that becomes cyclic during approval is blocked", result?.block === true && result.reason.includes("could not recheck"));
+  } finally { ctx.ui.select = savedSelect; }
+  await run("bash", { command: "git status" });
   const dialogRules = join(AGENT, "guard", "rules.jsonl");
   const dialogRulesBackup = `${dialogRules}.dialog-test`;
   ctx.ui.select = async () => {
@@ -2677,6 +2711,23 @@ const run = async (toolName: string, input: any) => h.tool_call({ type: "tool_ca
     const mutationResult = await pendingMutation;
     const mutationAudit = JSON.stringify(tail(1)[0]);
     ok("int: input changed during model judgement is blocked and withheld", mutationResult?.block === true && mutationResult.reason.includes("input changed during judgement") && mutationAudit.includes("input changed during judgement") && !mutationAudit.includes("mutation-before") && !mutationAudit.includes("mutation-after"));
+    await run("bash", { command: "git status" });
+    let releaseNonJson!: () => void, markNonJsonStarted!: () => void;
+    const nonJsonStarted = new Promise<void>((resolve) => { markNonJsonStarted = resolve; });
+    const nonJsonGate = new Promise<void>((resolve) => { releaseNonJson = resolve; });
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      markNonJsonStarted();
+      await nonJsonGate;
+      return new Response(JSON.stringify({ answers: answersFor([1, 0, 0, 0, 0])(body) }), { status: 200 });
+    }) as typeof fetch;
+    const nonJsonInput: any = { command: "curl https://non-json-mutation.example" };
+    const pendingNonJson = run("bash", nonJsonInput);
+    await nonJsonStarted;
+    nonJsonInput.unexpected = undefined;
+    releaseNonJson();
+    const nonJsonResult = await pendingNonJson;
+    ok("int: non-JSON input added during judgement is blocked", nonJsonResult?.block === true && nonJsonResult.reason.includes("input changed during judgement"));
     await run("bash", { command: "git status" });
     let releaseShell!: () => void;
     let markShellStarted!: () => void;
