@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -92,6 +92,43 @@ test("extensions can vouch for a tool and a folder in real Pi sessions", async (
       const records = readFileSync(join(agentDir, "guard", "audit.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
       assert.ok(records.some((record) => record.tool === "write" && record.source === "safe" && record.final === "run"));
     } finally { folderSession.dispose(); }
+
+    if (process.platform !== "win32") {
+      const alias = join(dir, ".pi", "artifacts-alias");
+      await symlink(artifacts, alias);
+      const readOnlyFake = createFakeModel([
+        { content: [{ type: "toolCall", id: "read-only-read", name: "read", arguments: { path: target } }] },
+        { content: [{ type: "toolCall", id: "read-only-write", name: "write", arguments: { path: target, content: "must not be written" } }] },
+        { content: [{ type: "text", text: "done" }] },
+      ]);
+      const readOnlyLoader = new DefaultResourceLoader({
+        cwd: project,
+        agentDir,
+        additionalExtensionPaths: [fileURLToPath(new URL("../extensions/index.ts", import.meta.url))],
+        extensionFactories: [(pi) => {
+          pi.on("session_start", () => {
+            pi.events.emit("guard:trust-dir", { path: artifacts, by: "artifacts", access: "write" });
+            pi.events.emit("guard:trust-dir", { path: alias, by: "artifacts", access: "read" });
+          });
+        }],
+        noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+      });
+      await readOnlyLoader.reload();
+      assert.deepEqual(readOnlyLoader.getExtensions().errors, []);
+      const { session: readOnlySession } = await createAgentSession({ cwd: project, agentDir, model: readOnlyFake.model, sessionManager: SessionManager.inMemory(project), tools: ["read", "write"], resourceLoader: readOnlyLoader });
+      try {
+        await readOnlySession.bindExtensions({});
+        readOnlySession.modelRuntime.hasConfiguredAuth = () => true;
+        readOnlySession.agent.streamFunction = readOnlyFake.stream;
+        await readOnlySession.prompt("Read and update the artifact");
+        const results = readOnlySession.messages.filter((message) => message.role === "toolResult");
+        assert.equal(results.length, 2);
+        assert.equal(results[0].isError, false, JSON.stringify(results[0]));
+        assert.equal(results[1].isError, true, JSON.stringify(results[1]));
+        assert.equal(readFileSync(target, "utf8"), "saved note");
+        assert.equal(requests, 0);
+      } finally { readOnlySession.dispose(); }
+    }
   } finally {
     globalThis.fetch = oldFetch;
     for (const key of Object.keys(process.env)) if (isolated(key)) delete process.env[key];
