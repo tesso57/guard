@@ -1,4 +1,4 @@
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { createEventBus, SessionManager } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 type Command = Parameters<ExtensionAPI["registerCommand"]>[1];
@@ -51,6 +51,7 @@ export function createMockPi(responses: Responses = {}) {
     },
   } as unknown as ExtensionCommandContext;
   const pi = {
+    events: createEventBus(),
     appendEntry(customType: string, data?: unknown) { sessionManager.appendCustomEntry(customType, data); },
     sendUserMessage(content: Parameters<ExtensionAPI["sendUserMessage"]>[0], options?: Parameters<ExtensionAPI["sendUserMessage"]>[1]) { userMessages.push({ content, options }); },
     sendMessage(message: Parameters<ExtensionAPI["sendMessage"]>[0], options?: Parameters<ExtensionAPI["sendMessage"]>[1]) { messages.push({ message, options }); },

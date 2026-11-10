@@ -25,14 +25,16 @@ Without a key, guard runs in **rules-only mode**: the deterministic checks and y
 
 | Order | Check | Result |
 |---|---|---|
-| 1 | Hard deny: recursive deletion of `/`, `~` or system directories, `curl … \| sh`, writes to `authorized_keys`, and **any change to guard's rules, pi's state and session logs, or the project resources pi loads (`.pi/`, `.agents/`)** | Block. No rule or dialog can override it |
+| 1 | Hard deny: recursive deletion of `/`, `~` or system directories, `curl … \| sh`, writes to `authorized_keys`, and **any change to guard's rules, pi's state and session logs, or the project resources pi loads (`.pi/`, `.agents/`)** | Block. No rule can override it; only you can, when the agent asks you and retries (see below) |
 | 2 | Deny and ask rules, in any scope | Block / confirm |
 | 3 | Allow rules. For bash, every subcommand must match and the command must have no dynamic parts such as `$()` or variable expansion | Allow, after a light check for exfiltration, actions outside your request, and text aimed at the judge |
 | 4 | Sensitive paths (`~/.ssh`, `.env`, key files, `/proc/*/environ`, …, after resolving symlinks and globs), printing the environment, and content searches across `~` | Confirm |
-| 5 | Safe list, which only covers reads **inside the project** (or public system directories such as `/usr`): read-only bash commands (judged by command **and options**, so `git log --output=…` or `sort -o` are not read-only; read-only `git` only in trusted repositories with safe repository and user Git configuration, and never after `cd`), `mkdir`/`touch` of ordinary project paths, and edits to ordinary files inside the project | Allow, without calling the API |
+| 5 | Safe list, which only covers reads **inside the project** (or public locations such as `/usr` and Pi code directories under `~/.pi/agent`): read-only bash commands (judged by command **and options**, so `git log --output=…` or `sort -o` are not read-only; read-only `git` only in trusted repositories with safe repository and user Git configuration, and never after `cd`), `mkdir`/`touch` of ordinary project paths, and edits to ordinary files inside the project | Allow, without calling the API |
 | 6 | Decisions API | Allow / confirm / block |
 
-By default, the built-in read tools (`read`, `grep`, `find`, `ls`) skip the model only for paths inside the project or public system directories such as `/usr`; elsewhere they are judged like any other call. `read` must name an existing file to use this shortcut. Paths are resolved using pi's path conventions (`file://` URLs, `~`, unicode spaces). Project and home directory aliases such as macOS's `/var` → `/private/var` are recognized, symlinks are followed even when their target does not exist yet, and `..` is applied after symlinks as the kernel does. When pi runs in your home directory (or above), nothing counts as a plain project read or edit.
+The model is told that you have delegated the work and do not want to approve routine steps. Editing or deleting project files, running the project's tests, builds and scripts (including ones the agent just wrote, judged by their contents), `git commit`, and installing declared dependencies are normally allowed. It asks you only for likely harm: damage outside the project, data loss version control cannot undo, sending data elsewhere, code from untrusted sources, weakened security or persistence, and actions on shared or remote systems you did not ask for (push, publish, deploy).
+
+By default, the built-in read tools (`read`, `grep`, `find`, `ls`) skip the model only for paths inside the project or public locations (system directories such as `/usr`, code pi loads under `~/.pi/agent/{install,git,npm,extensions,skills,prompts,themes}`); elsewhere they are judged like any other call. `read` must name an existing file to use this shortcut. Paths are resolved using pi's path conventions (`file://` URLs, `~`, unicode spaces). Project and home directory aliases such as macOS's `/var` → `/private/var` are recognized, symlinks are followed even when their target does not exist yet, and `..` is applied after symlinks as the kernel does. When pi runs in your home directory (or above), nothing counts as a plain project read or edit.
 
 Checks that grant a project or public-directory shortcut require matching path casing, so a differently cased path may need judgement even on a case-insensitive filesystem. Protective checks still treat case variants as equivalent.
 
@@ -51,7 +53,7 @@ Missing, malformed or duplicate required answers require confirmation. If duplic
 
 guard sends the Decisions API:
 
-- your most recent messages, so the model knows what you asked for
+- your most recent messages (3 by default, `contextUserMessages`), so the model knows what you asked for; the newest is marked as your current instruction, and an explicit go-ahead there for the pending action counts as within your request
 - the agent's recent tool calls
 - your past decisions
 - the call being judged
@@ -92,12 +94,16 @@ When another call in the same message may change the file tree (including Git op
 
 Risk is scored on five levels, from 0 to 4. guard looks at the probability of the high-risk levels as well as the weighted average, so a split such as "45% catastrophic, 55% harmless" is still caught.
 
+## When guard blocks a call
+
+The agent is told why, and that it must not work around the check. If it really needs that exact call, it should explain why and ask you; if you agree, it runs the same call again and guard shows you a dialog (allow this time only / deny) instead of blocking. This applies to hard denies and to calls the model judged too dangerous, once per block; nothing is remembered. Calls blocked by your own deny rules stay blocked (remove the rule with `/guard rules`), and without a UI every block stays a block.
+
 ## Approval dialog
 
 ```
 Allow (this time only)
 Allow (this session: npm install …)
-Allow and remember… ▸     → this project / global
+Allow and remember (this project: …)   (or "… ▸ → this project / global" for read-only calls in trusted projects)
 Deny
 Deny and remember… ▸      → this project / global / this session
 ```
@@ -147,6 +153,30 @@ Wildcard reads require confirmation when expansion cannot be inspected completel
 
 Each repository rule must be one static command. Quoted arguments are supported; redirects, wildcards, substitutions and compound commands are rejected so they cannot silently become ineffective rules.
 
+## Tools and folders from other extensions
+
+An extension can tell guard that one of its own tools is safe to run without a judgement, for example a notes extension's `notes_write`, whose arguments are text rather than commands:
+
+```ts
+pi.registerTool({ name: "notes_write", /* ... */ });
+
+pi.on("session_start", () => {
+  pi.events.emit("guard:trust-tool", { tool: "notes_write", by: "notes" });
+});
+```
+
+Emitting in `session_start` works whatever order the extensions load in; without guard installed, nobody listens and nothing happens. Vouched-for tools run without any check and are recorded in the audit log (source `extension`); `/guard rules` lists them. Built-in tools (`bash`, `write`, `edit`, `read`, …) cannot be vouched for, a name only counts once a tool with that name is registered, and tools of project-local extensions (`.pi/extensions`) count only in trusted projects. Only vouch for tools whose effects you are happy to allow unconditionally.
+
+An extension can also vouch for a folder it owns, such as an artifacts extension's output folder:
+
+```ts
+pi.on("session_start", () => {
+  pi.events.emit("guard:trust-dir", { path: "~/.pi/artifacts", by: "artifacts" }); // access: "read" for read-only
+});
+```
+
+Inside a vouched-for folder, reads are free like reads inside the project, and plain `write`/`edit` calls (and `mkdir`/`touch`) run without a judgement. Everything else is judged as usual: running code there, files that tools run later (`package.json`, `Makefile`, …), secrets (`.env`, keys), hard links, and symlinks that leave the folder. Only folders inside the home directory (or the temp directory) are accepted; the home directory itself, the agent directory `~/.pi/agent`, and folders that hold credentials, tool configuration or programs (`~/.ssh`, `~/.aws`, `~/.config`, `~/.local`, `~/bin`, …) are refused. `/guard rules` lists vouched-for folders, including refused ones and why.
+
 ## Commands
 
 | Command | What it does |
@@ -186,7 +216,7 @@ Settings live in `~/.pi/agent/guard/config.json`. Every field is optional.
   "allowRuleTtlDays": 30,
   "dialogTimeoutMs": 600000,
   "verdictCacheMs": 600000,
-  "thresholds": { "confirmScore": 1.5, "blockPHigh": 0.6, "blockPCatastrophic": 0.25, "confirmExfil": 0.3 }
+  "thresholds": { "confirmScore": 2.5, "blockPHigh": 0.7, "blockPCatastrophic": 0.25, "confirmExfil": 0.3 }
 }
 ```
 

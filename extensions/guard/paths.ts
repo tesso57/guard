@@ -1,5 +1,5 @@
 import { existsSync, lstatSync, opendirSync, readlinkSync, statSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, matchesGlob, normalize, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AGENT_DIR } from "./config.ts";
@@ -360,6 +360,63 @@ const PUBLIC_DIRS = [
   "/etc/os-release", "/etc/lsb-release", "/etc/hosts", "/etc/timezone", "/etc/debian_version", "/etc/alpine-release",
 ];
 
+/**
+ * Code under the agent directory: pi's own releases and the packages, extensions, skills, prompts and themes it
+ * loads. Reading it is like reading /usr (writing stays hard-denied). Credentials, settings, sessions and guard's
+ * own state live elsewhere in the agent directory and stay protected.
+ */
+export const PI_CODE_DIRS = ["install", "git", "npm", "extensions", "skills", "prompts", "themes"];
+export function isPiCodePath(p: string): boolean {
+  const real = realPath(p);
+  return PI_CODE_DIRS.some((d) => {
+    const base = join(AGENT_DIR, d);
+    const realBase = realPath(base);
+    return (isInsideExact(p, base) || isInsideExact(p, realBase)) && isInsideExact(real, realBase);
+  });
+}
+
+/** Folders another extension vouched for (guard:trust-dir), e.g. an artifacts extension's output folder. */
+export type TrustedDir = { path: string; write: boolean; by: string; ignored?: string };
+const trustedDirs: TrustedDir[] = [];
+const trustedDirTargets = new Map<string, string>();
+// Home-level folders that hold credentials, tool configuration or executables on PATH
+const UNTRUSTABLE_HOME_DIRS = new Set([".ssh", ".gnupg", ".aws", ".azure", ".gcloud", ".kube", ".docker", ".config", ".local", ".npm", ".cargo", ".rustup", ".gem", ".bun", ".deno", ".volta", ".nvm", ".pyenv", ".rbenv", "library", "bin"]);
+
+/** Registers a folder; returns why it was refused, if it was. Only folders inside the home directory (or tmp) qualify. */
+export function trustDir(raw: string, write: boolean, by: string): string | undefined {
+  const reason = ((): string | undefined => {
+    if (!isAbsolute(raw) && !raw.startsWith("~")) return "not an absolute path";
+    const abs = resolvePath(HOME, raw);
+    const real = realPath(abs);
+    const tmp = normalize(tmpdir());
+    if (isHomeOrAncestor(abs) || isHomeOrAncestor(real)) return "the home directory or above is too broad";
+    const underHome = isInsideExact(abs, HOME) && isInsideExact(real, realPath(HOME));
+    const underTemp = isInsideExact(abs, tmp) && abs !== tmp && isInsideExact(real, realPath(tmp));
+    if (!underHome && !underTemp) return "only folders inside the home or temporary directory can be trusted";
+    const first = relative(underHome ? HOME : tmp, abs).split(sep)[0].toLowerCase();
+    if (UNTRUSTABLE_HOME_DIRS.has(first) || sensitiveReason(abs) || sensitiveReason(real)) return "holds credentials, tool configuration or programs";
+    for (const x of [abs, real]) if (isInside(x, AGENT_DIR) || isInside(AGENT_DIR, x) || isInside(realPath(AGENT_DIR), x)) return "overlaps pi's agent directory";
+    return undefined;
+  })();
+  const entry: TrustedDir = { path: raw.startsWith("~") || isAbsolute(raw) ? resolvePath(HOME, raw) : raw, write, by, ignored: reason };
+  const i = trustedDirs.findIndex((d) => d.path === entry.path);
+  if (i >= 0) trustedDirs.splice(i, 1);
+  trustedDirTargets.set(entry.path, realPath(entry.path));
+  trustedDirs.push(entry);
+  return reason;
+}
+export const listTrustedDirs = (): readonly TrustedDir[] => trustedDirs;
+
+/** The trusted folder p is in (literally and after resolving symlinks), if any; `write` requires write access. */
+export function trustedDirFor(p: string, write: boolean): TrustedDir | undefined {
+  if (p === UNKNOWN_PATH) return undefined;
+  const real = realPath(p);
+  return trustedDirs.find((d) => {
+    const realBase = realPath(d.path);
+    return !d.ignored && trustedDirTargets.get(d.path) === realBase && (!write || d.write) && (isInsideExact(p, d.path) || isInsideExact(p, realBase)) && isInsideExact(real, realBase);
+  });
+}
+
 /** A regular file with more than one hard link may be the same file as something outside the project. */
 export function isHardLinked(p: string): boolean {
   try {
@@ -417,7 +474,7 @@ export function isFreelyReadable(p: string, cwd: string): boolean {
   const real = realPath(p);
   const project = !isHomeOrAncestor(cwd) &&
     (isInsideExact(p, cwd) || isInsideExact(p, realPath(cwd))) && isInsideExact(real, realPath(cwd));
-  const publicPath = PUBLIC_DIRS.some((d) => isInsideExact(p, d) && isInsideExact(real, realPath(d)));
+  const publicPath = PUBLIC_DIRS.some((d) => isInsideExact(p, d) && isInsideExact(real, realPath(d))) || isPiCodePath(p) || !!trustedDirFor(p, false);
   return (project || publicPath) && !isHardLinked(p);
 }
 

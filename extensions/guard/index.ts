@@ -21,8 +21,8 @@ import { predictEdits } from "./edits.ts";
 import { readBoundedText } from "./files.ts";
 import { buildRequest, callDecisions, evaluate, MAX_ATTACHED_FILES, type ModelVerdict } from "./judge.ts";
 import { redact } from "./redact.ts";
-import { clearPathCache, isFreelyReadable, isHardLinked, isInsideExact, pathLikeTokens, pathVariants, protectedReason, protectedRoots, realPath, recentlyChangedFiles, resolvePath, sensitiveReason } from "./paths.ts";
-import { hardDeny, hasUninspectedToolInput, inputPaths, inspectExecutablePath, pathsStayInProject, safeAllow, searchNeedsJudgement, sensitive, usesRipgrepConfig, writesStayPlain } from "./policy.ts";
+import { clearPathCache, isFreelyReadable, listTrustedDirs, trustDir, isHardLinked, isInsideExact, pathLikeTokens, pathVariants, protectedReason, protectedRoots, realPath, recentlyChangedFiles, resolvePath, sensitiveReason } from "./paths.ts";
+import { BUILTIN_TOOLS, hardDeny, hasUninspectedToolInput, inputPaths, inspectExecutablePath, pathsStayInProject, safeAllow, searchNeedsJudgement, sensitive, usesRipgrepConfig, writesStayPlain } from "./policy.ts";
 import { type Decision, deriveDenyPatterns, derivePatterns, describeMatch, globalAllowPatternIsReadOnly, type Match, newId, type Rule, RuleStore, type Scope, supportsAnyInputAllow } from "./rules.ts";
 import { isReadOnlyArgv, normalizeArgv, type Parsed, parseShell } from "./shell.ts";
 import { confirmDialog, displayText, preview } from "./ui.ts";
@@ -190,6 +190,8 @@ export default function (pi: ExtensionAPI) {
   /** True once an allowed call changed files in ways guard cannot list (git checkout, tar x, rsync, ...). */
   let opaqueChanges = false;
   const promoted = new Set<string>();
+  /** Calls guard blocked this session (tool + input); the same call again asks the user instead of blocking. */
+  const blockedOnce = new Set<string>();
   let consecutiveBlocks = 0;
   let totalBlocks = 0;
   let auditState: "unknown" | "ok" | "failed" = "unknown";
@@ -261,6 +263,42 @@ export default function (pi: ExtensionAPI) {
     modelMemo.clear();
     verdictCache.clear();
     for (const warning of store.warnings) warn(ctx, `guard: ${warning}`);
+  }
+
+  /**
+   * Tools other extensions vouch for (`pi.events.emit("guard:trust-tool", { tool, by })`), e.g. a notes extension's
+   * notes_write. They run without judgement. Extensions are code the user installed and run with full privileges anyway;
+   * built-in tools cannot be vouched for, and tools of project-local extensions count only in trusted projects.
+   */
+  const extensionTrust = new Map<string, string>();
+  pi.events.on("guard:trust-tool", (data) => {
+    const d = data as { tool?: unknown; by?: unknown } | undefined;
+    if (typeof d?.tool !== "string" || !d.tool) return;
+    extensionTrust.set(d.tool, typeof d.by === "string" && d.by ? d.by.slice(0, 64) : "an extension");
+  });
+  // Folders another extension vouches for: { path: "~/.pi/artifacts", by: "artifacts", access?: "read" | "write" }
+  pi.events.on("guard:trust-dir", (data) => {
+    const d = data as { path?: unknown; by?: unknown; access?: unknown } | undefined;
+    if (typeof d?.path !== "string" || !d.path) return;
+    trustDir(d.path, d.access !== "read", typeof d.by === "string" && d.by ? d.by.slice(0, 64) : "an extension");
+  });
+  /** Why a vouched-for tool name does not count (undefined when it does). */
+  function trustProblem(tool: string): string | undefined {
+    if (BUILTIN_TOOLS.has(tool)) return "built-in tools cannot be vouched for";
+    try {
+      const info = pi.getAllTools().find((t) => t.name === tool);
+      const src = info?.sourceInfo;
+      if (!info) return "no tool with this name is registered";
+      if (!src || src.path.startsWith("builtin:")) return "built-in tools cannot be vouched for";
+      if (src.scope === "project" && !trusted) return "the tool comes from a project-local extension and this project is not trusted";
+      return undefined;
+    } catch {
+      return "could not read the registered tools";
+    }
+  }
+  function trustedByExtension(tool: string): string | undefined {
+    const by = extensionTrust.get(tool);
+    return by && !trustProblem(tool) ? by : undefined;
   }
 
   /** Other tool calls of the assistant message that contains callId, from the session branch. */
@@ -716,8 +754,12 @@ export default function (pi: ExtensionAPI) {
     return rule;
   }
 
-  function blockResult(reason: string) {
-    return { block: true as const, reason: `guard: ${reason}. Do not retry this call or try to work around the check; choose a safer approach or ask the user.` };
+  function blockResult(reason: string, retry: "ask-user" | "none" = "none") {
+    const next =
+      retry === "ask-user"
+        ? "Do not try to work around the check. If this exact call is really needed, explain to the user why and ask them; if they agree, run the same call again and guard will ask them to confirm it."
+        : "Do not try to work around the check; choose a safer approach or ask the user.";
+    return { block: true as const, reason: `guard: ${reason}. ${next}` };
   }
 
   function updateStatus(ctx: ExtensionContext) {
@@ -740,7 +782,7 @@ export default function (pi: ExtensionAPI) {
     storeCwd = ctx.cwd;
     store.load(storeCwd, trusted);
     store.resetSession();
-    modelMemo.clear(); siblingsById.clear(); judged.clear(); touched.clear(); promoted.clear(); verdictCache.clear();
+    modelMemo.clear(); siblingsById.clear(); judged.clear(); touched.clear(); promoted.clear(); verdictCache.clear(); blockedOnce.clear();
     opaqueChanges = false;
     consecutiveBlocks = totalBlocks = 0;
     for (const w of [...loaded.warnings, ...store.warnings]) warn(ctx, `guard: ${w}`);
@@ -787,7 +829,7 @@ export default function (pi: ExtensionAPI) {
     preflightController = new AbortController();
     const preflightSignal = ctx.signal ? AbortSignal.any([ctx.signal, preflightController.signal]) : preflightController.signal;
     calls.forEach((c, i) => {
-      if (siblingsById.has(c.id)) return;
+      if (siblingsById.has(c.id) || trustedByExtension(c.name)) return;
       const siblings = calls.slice(0, i);
       const peers = calls.filter((_, j) => j !== i);
       siblingsById.set(c.id, { earlier: siblings, peers, historyBoundary });
@@ -807,7 +849,18 @@ export default function (pi: ExtensionAPI) {
     if (cfg.disabled || !enabled) return;
     const tool = event.toolName;
     const input: any = event.input;
+    let vouched: string | undefined;
+    let trustAvailable = false;
+    // Project trust may have changed since the last event. If it cannot be
+    // refreshed, continue through the guarded path instead of taking a shortcut.
+    try { syncProject(ctx); trustAvailable = true; vouched = trustedByExtension(tool); } catch { /* assess will fail closed */ }
+    if (vouched) {
+      siblingsById.delete(event.toolCallId);
+      recordAudit(ctx, { session: ctx.sessionManager.getSessionId(), tool, preview: auditPreview(ctx, tool, input), action: "allow", source: "extension", reasons: [`trusted by ${vouched}`], final: "run" });
+      return;
+    }
     const hash = stableHash([tool, input]);
+    const retryKey = stableHash([hash, ctx.cwd, trustAvailable ? trusted : "unavailable", ctx.sessionManager.getSessionId()]);
     const batch = siblingsById.get(event.toolCallId) ?? siblingsFromBranch(ctx, event.toolCallId);
     if (!batch.problem) siblingsById.delete(event.toolCallId);
 
@@ -819,8 +872,11 @@ export default function (pi: ExtensionAPI) {
       a = batch.problem
         ? { action: "block", source: "error", reasons: [batch.problem], rememberAllow: false, globalAllow: false }
         : await assess(event.toolCallId, tool, input, ctx, { signal: ctx.signal, siblings: batch.earlier, peers: batch.peers, historyBoundary: batch.historyBoundary });
-    } catch (e: any) {
-      a = { action: "confirm", source: "error", reasons: [`could not judge: ${e.message}`], rememberAllow: false, globalAllow: false };
+    } catch (error) {
+      // Context and extension errors can contain credentials or file contents.
+      const rulesScope = error instanceof Error ? /(?:^|; )cannot read (global|project|repository) rules \(/.exec(error.message)?.[1] : undefined;
+      const reason = rulesScope ? `cannot read ${rulesScope} rules` : "could not judge: context unavailable";
+      a = { action: "confirm", source: "error", reasons: [reason], rememberAllow: false, globalAllow: false };
     }
     const inputChanged = stableHash([tool, input]) !== hash;
     const judgementAborted = !!ctx.signal?.aborted;
@@ -860,7 +916,7 @@ export default function (pi: ExtensionAPI) {
         }
       }
     };
-    const onBlocked = (reason: string) => {
+    const onBlocked = (reason: string, retry: "ask-user" | "none" = "none") => {
       consecutiveBlocks++;
       totalBlocks++;
       if (consecutiveBlocks >= cfg.escalateConsecutive || totalBlocks >= cfg.escalateTotal) {
@@ -869,15 +925,23 @@ export default function (pi: ExtensionAPI) {
         else warn(ctx, message);
         consecutiveBlocks = 0;
         ctx.abort();
-        return { ...blockResult(reason), terminate: true };
+        return { ...blockResult(reason, retry), terminate: true };
       }
-      return blockResult(reason);
+      return blockResult(reason, retry);
     };
     const onCancelled = (reason: string) => {
       consecutiveBlocks = 0;
       status(ctx, `guard: ${tool} cancelled`);
       return blockResult(reason);
     };
+
+    // A repeated model or hard-deny block can be approved once, with the same
+    // context and policy rechecks used for every other confirmation.
+    const retryOverride = a.action === "block" && (a.source === "hard-deny" || a.source === "model") && blockedOnce.has(retryKey) && ctx.hasUI;
+    if (retryOverride) {
+      blockedOnce.delete(retryKey);
+      a = { ...a, action: "confirm", rememberAllow: false, globalAllow: false, patterns: undefined };
+    }
 
     if (a.action === "allow") {
       status(ctx, `guard: ${tool} ok (${tag})`);
@@ -893,7 +957,8 @@ export default function (pi: ExtensionAPI) {
       status(ctx, `guard: ${tool} BLOCKED (${tag})`);
       try { ctx.ui.notify(displayText(`guard: blocked ${tool} — ${a.reasons.join("; ")}`), "error"); } catch { /* notification failure must not prevent blocking */ }
       recordAudit(ctx, { ...rec, final: "blocked" });
-      return onBlocked(inputChanged ? "the input changed during judgement" : batch.problem ? batch.problem : shellChangedDuringJudgement ? "the shell environment or executable lookup changed during judgement" : contextChangedDuringJudgement ? "the judgement context changed during judgement" : policyChangedDuringJudgement ? "the filesystem policy changed during judgement" : a.source === "error" && a.reasons[0] === "session changed during judgement" ? "the session changed during judgement" : a.source === "hard-deny" ? `blocked (${a.reasons[0]})` : a.source === "rule-deny" ? "blocked by the user's deny rule" : "blocked as too dangerous");
+      if (a.source === "hard-deny" || a.source === "model") blockedOnce.add(retryKey);
+      return onBlocked(inputChanged ? "the input changed during judgement" : batch.problem ? batch.problem : shellChangedDuringJudgement ? "the shell environment or executable lookup changed during judgement" : contextChangedDuringJudgement ? "the judgement context changed during judgement" : policyChangedDuringJudgement ? "the filesystem policy changed during judgement" : a.source === "error" && a.reasons[0] === "session changed during judgement" ? "the session changed during judgement" : a.source === "hard-deny" ? `blocked (${a.reasons[0]})` : a.source === "rule-deny" ? "blocked by the user's deny rule" : "blocked as too dangerous", (a.source === "hard-deny" || a.source === "model") && ctx.hasUI ? "ask-user" : "none");
     }
 
     status(ctx, `guard: ${tool} needs confirmation (${tag})`);
@@ -902,7 +967,7 @@ export default function (pi: ExtensionAPI) {
       return onBlocked("this call needs the user's confirmation, but no UI is available");
     }
     const v = a.verdict;
-    const head = `${tool}: ${v?.risk !== undefined ? `risk ${v.risk.toFixed(2)}/4` : "confirm"}${v?.category ? ` [${v.category}]` : ""}`;
+    const head = `${retryOverride ? "Previously blocked — " : ""}${tool}: ${v?.risk !== undefined ? `risk ${v.risk.toFixed(2)}/4` : "confirm"}${v?.category ? ` [${v.category}]` : ""}`;
     const dialogEpoch = stateEpoch;
     const dialogConfig = cfg;
     const dialogCwd = ctx.cwd;
@@ -991,9 +1056,10 @@ export default function (pi: ExtensionAPI) {
         syncProject(ctx);
         store.syncSession(ctx.sessionManager.getBranch() as any[]);
         const currentRule = store.find(tool, input, ctx.cwd, currentParsed);
-        if (hard || currentRule?.decision === "deny") {
-          recordAudit(ctx, { ...rec, action: "block", source: hard ? "hard-deny" : "rule-deny", reasons: [hard ?? "deny rule applied after confirmation"], ruleIds: hard ? undefined : currentRule?.rules.map((rule) => rule.id), final: "blocked" });
-          return onBlocked(hard ? `blocked (${hard})` : "blocked by the user's deny rule");
+        const changedHardDeny = hard && !(retryOverride && a.source === "hard-deny" && hard === a.reasons[0]) ? hard : undefined;
+        if (changedHardDeny || currentRule?.decision === "deny") {
+          recordAudit(ctx, { ...rec, action: "block", source: changedHardDeny ? "hard-deny" : "rule-deny", reasons: [changedHardDeny || "deny rule applied after confirmation"], ruleIds: changedHardDeny ? undefined : currentRule?.rules.map((rule) => rule.id), final: "blocked" });
+          return onBlocked(changedHardDeny ? `blocked (${changedHardDeny})` : "blocked by the user's deny rule");
         }
         if (filesystemPolicyHash(tool, input, ctx.cwd, ctx.sessionManager.getSessionDir(), currentParsed) !== dialogPolicyHash) {
           recordAudit(ctx, { ...rec, preview: `${tool} [arguments withheld: filesystem policy changed during confirmation]`, action: "block", source: "error", reasons: ["filesystem policy changed during confirmation"], final: "blocked" });
@@ -1016,7 +1082,7 @@ export default function (pi: ExtensionAPI) {
     if (saved.length) {
       try { ctx.ui.notify(displayText(`guard: saved ${choice.scope} ${choice.decision} rule: ${saved.map((r) => `${describeMatch(r.tool, r.match)} [${r.id}]`).join(", ")} (undo: /guard rules rm <id>)`), "info"); } catch { /* notification failure must not affect the decision */ }
     }
-    recordAudit(ctx, { ...rec, final: choice.decision === "allow" ? "run" : "blocked", choice: `${choice.decision}:${choice.scope}`, ruleIds: [...(rec.ruleIds ?? []), ...saved.map((r) => r.id)] });
+    recordAudit(ctx, { ...rec, ...(retryOverride ? { event: "override" as const } : {}), final: choice.decision === "allow" ? "run" : "blocked", choice: `${choice.decision}:${choice.scope}`, ruleIds: [...(rec.ruleIds ?? []), ...saved.map((r) => r.id)] });
 
     if (choice.decision === "allow") {
       onAllowed();
@@ -1089,9 +1155,16 @@ export default function (pi: ExtensionAPI) {
         if (op === "list") {
           if (rest.length > 1) return say("usage: /guard rules list", "warning");
           const order: Scope[] = ["session", "repo", "project", "global"];
-          const lines = store.all().sort((a, b) => order.indexOf(a.scope) - order.indexOf(b.scope))
-            .map((r) => displayText(`[${r.scope}] ${r.decision.padEnd(5)} ${describeMatch(r.tool, r.match)}  (id ${r.id}, hits ${store.hitCount(r.id)}${r.decision === "allow" && r.expiresAt ? `, expires ${r.expiresAt.slice(0, 10)}` : ""})`).replace(/\n/g, "\\n"));
-          if (!lines.length) return say("guard: no rules");
+          const lines = [
+            ...[...extensionTrust.keys()].map((tool) => {
+              const why = trustProblem(tool);
+              return displayText(`[extension] allow tool ${tool}  (trusted by ${extensionTrust.get(tool)}${why ? `; ignored: ${why}` : ""})`).replace(/\n/g, "\\n");
+            }),
+            ...listTrustedDirs().map((dir) => displayText(`[extension] ${dir.write ? "read/write" : "read"} folder ${dir.path}  (trusted by ${dir.by}${dir.ignored ? `; ignored: ${dir.ignored}` : ""})`).replace(/\n/g, "\\n")),
+            ...store.all().sort((a, b) => order.indexOf(a.scope) - order.indexOf(b.scope))
+              .map((r) => displayText(`[${r.scope}] ${r.decision.padEnd(5)} ${describeMatch(r.tool, r.match)}  (id ${r.id}, hits ${store.hitCount(r.id)}${r.decision === "allow" && r.expiresAt ? `, expires ${r.expiresAt.slice(0, 10)}` : ""})`).replace(/\n/g, "\\n")),
+          ];
+          if (!lines.length) return say("guard: no rules, and no tools or folders vouched for by extensions (guard:trust-tool / guard:trust-dir)");
           if (!ctx.hasUI) return say(lines.join("\n"));
           const pick = await ctx.ui.select("Rules (select one to delete it)", [...lines, "Close"]);
           const id = pick?.match(/\(id ([^,)]+)/)?.[1];

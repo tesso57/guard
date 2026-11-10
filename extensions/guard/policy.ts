@@ -11,9 +11,9 @@ import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } fro
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { hasGluedPathValue, innerCommands, INTERPRETER_NAMES, isLongOption, isReadOnlyArgv, isShell, nonFlags, normalizeArgv, type Parsed, parseShell, unwrapCommandWrappers } from "./shell.ts";
 import { readRegularText } from "./files.ts";
-import { containsProtectedRoot, expandGlobFully, gitConfigIsSafe, globHitsOptionLikeName, globMayReach, ignoreFilesReinclude, isFreelyReadable, isHardLinked, isHomeOrAncestor, isInside, isInsideExact, isProtectedHardLink, isRiskyProjectFile, memo, pathLikeTokens, pathVariants, protectedReason, protectedRoots, readFallbackVariants, realPath, resolvePath, secretFilesUnder, sensitiveReason, UNKNOWN_PATH } from "./paths.ts";
+import { containsProtectedRoot, expandGlobFully, trustedDirFor, isPiCodePath, PI_CODE_DIRS, gitConfigIsSafe, globHitsOptionLikeName, globMayReach, ignoreFilesReinclude, isFreelyReadable, isHardLinked, isHomeOrAncestor, isInside, isInsideExact, isProtectedHardLink, isRiskyProjectFile, memo, pathLikeTokens, pathVariants, protectedReason, protectedRoots, readFallbackVariants, realPath, resolvePath, secretFilesUnder, sensitiveReason, UNKNOWN_PATH } from "./paths.ts";
 
-const BUILTIN_TOOLS = new Set(["bash", "edit", "write", "read", "grep", "find", "ls"]);
+export const BUILTIN_TOOLS = new Set(["bash", "edit", "write", "read", "grep", "find", "ls"]);
 const INCOMPLETE_DIRECTORY_COMPARISON = "/__guard_incomplete_directory_comparison__";
 const BASH_BUILTINS = new Set(["echo", "printf", "pwd", "cd", "pushd", "popd", "dirs", "true", "false", "test", "[", "type", "command", "builtin", "enable", "export", "set", "declare", "unset", "read", "history", "help", "alias", "unalias", "hash", ":"]);
 
@@ -165,6 +165,7 @@ const HARD_DENY_BASH: [RegExp, string][] = [
 ];
 
 /** Spellings of guard's and pi's state that can appear in commands without resolving to a known path. */
+const PI_CODE_MENTION = new RegExp(`[^\\s'"]*\\.pi/agent/(?:${PI_CODE_DIRS.join("|")})(?:/[^\\s'"]*)?(?=$|[\\s'"])`, "g");
 const PROTECTED_MARKERS = ["~/.pi", "$home/.pi", "${home}/.pi", ".pi/agent"];
 
 /**
@@ -861,7 +862,7 @@ export function sensitive(tool: string, input: any, cwd: string, roots: string[]
   for (const p of [...reads, ...writes]) {
     const r = sensitiveReason(p);
     if (r) return r;
-    if (protectedReason(p, outerRoots)) return "reads guard or pi internal state";
+    if (protectedReason(p, outerRoots) && !(isPiCodePath(p) && !writes.includes(p))) return "reads guard or pi internal state";
     if (isHardLinked(p)) return "a hard-linked file may share contents with a path outside the project";
   }
   // pi's grep tool searches hidden files recursively
@@ -894,7 +895,9 @@ export function sensitive(tool: string, input: any, cwd: string, roots: string[]
           return extracts ? "extracts an archive where .pi/ or .agents/ could be created" : "changes permissions recursively where guard's or pi's state lives";
       }
     }
-    const lower = nameScanText(cmd, parsed).toLowerCase();
+    // Mentions of pi's code directories (~/.pi/agent/install/…, git/…, without `..`) are not its internal state; the paths
+    // themselves were resolved and checked above
+    const lower = nameScanText(cmd, parsed).toLowerCase().replace(PI_CODE_MENTION, (w) => (w.includes("..") ? w : ""));
     if (PROTECTED_MARKERS.some((m) => lower.includes(m))) return "reads guard or pi internal state";
     for (const [si, raw] of parsed.subcommands.entries()) {
       // `env` alone prints the environment; it is only a wrapper when a command follows
@@ -962,12 +965,15 @@ export function safeAllow(tool: string, input: any, cwd: string, opts: { trusted
   if (tool === "edit" || tool === "write") {
     const { writes } = inputPaths(tool, input, cwd);
     if (!writes.length) return false;
-    // When pi runs in ~ (or above), "the project" would be the whole home directory
-    if (isHomeOrAncestor(cwd)) return false;
     const realCwd = realPath(cwd);
     return writes.every((w) => {
       const r = realPath(w);
       if (isHardLinked(w)) return false;
+      // Folders another extension vouched for (guard:trust-dir) take plain edits like the project
+      const td = trustedDirFor(w, true);
+      if (td) return plainInTrustedDir(w, td.path);
+      // When pi runs in ~ (or above), "the project" would be the whole home directory
+      if (isHomeOrAncestor(cwd)) return false;
       // Symlinks that leave the project (docs/notes.md -> ~/.bashrc) are not plain project edits
       if (!isInsideExact(r, realCwd) || r.toLowerCase() === realCwd.toLowerCase()) return false;
       const lexicalBase = isInsideExact(w, cwd) ? cwd : realCwd;
@@ -985,14 +991,22 @@ export function pathsStayInProject(tool: string, input: any, cwd: string, parsed
   return !isHomeOrAncestor(cwd) && [...reads, ...writes].every((p) => isInsideExact(realPath(p), realCwd));
 }
 
+function plainInTrustedDir(w: string, dir: string): boolean {
+  const r = realPath(w);
+  const realDir = realPath(dir);
+  const lexicalBase = isInsideExact(w, dir) ? dir : realDir;
+  return isInsideExact(w, lexicalBase) && isInsideExact(r, realDir) && r.toLowerCase() !== realDir.toLowerCase() && !isRiskyProjectFile(relative(realDir, r)) && !isRiskyProjectFile(relative(lexicalBase, w));
+}
+
 export function writesStayPlain(tool: string, input: any, cwd: string, parsed?: Parsed): boolean {
-  if (isHomeOrAncestor(cwd)) return false;
   const { writes } = inputPaths(tool, input, cwd, parsed);
   // A hard-linked file may be the same file as something outside the project
   if (writes.some(isHardLinked)) return false;
   const realCwd = realPath(cwd);
   return writes.every((w) => {
     const r = realPath(w);
-    return isInsideExact(r, realCwd) && r.toLowerCase() !== realCwd.toLowerCase() && !isRiskyProjectFile(r.slice(realCwd.length + 1));
+    const trusted = trustedDirFor(w, true);
+    if (trusted) return plainInTrustedDir(w, trusted.path);
+    return !isHomeOrAncestor(cwd) && isInsideExact(r, realCwd) && r.toLowerCase() !== realCwd.toLowerCase() && !isRiskyProjectFile(r.slice(realCwd.length + 1));
   });
 }
