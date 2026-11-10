@@ -968,7 +968,8 @@ export default function (pi: ExtensionAPI) {
       status(ctx, `guard: ${tool} BLOCKED (${tag})`);
       try { ctx.ui.notify(displayText(`guard: blocked ${tool} — ${a.reasons.join("; ")}`), "error"); } catch { /* notification failure must not prevent blocking */ }
       recordAudit(ctx, { ...rec, final: "blocked" });
-      if (retryRulesVersion !== undefined && (a.source === "hard-deny" || a.source === "model")) blockedOnce.add(retryKey);
+      if (retryRulesVersion !== undefined && (a.source === "hard-deny" || a.source === "model") && ctx.hasUI) blockedOnce.add(retryKey);
+      else blockedOnce.delete(retryKey);
       return onBlocked(inputChanged ? "the input changed during judgement" : batch.problem ? batch.problem : shellChangedDuringJudgement ? "the shell environment or executable lookup changed during judgement" : contextChangedDuringJudgement ? "the judgement context changed during judgement" : policyChangedDuringJudgement ? "the filesystem policy changed during judgement" : a.source === "error" && a.reasons[0] === "session changed during judgement" ? "the session changed during judgement" : a.source === "hard-deny" ? `blocked (${a.reasons[0]})` : a.source === "rule-deny" ? "blocked by the user's deny rule" : "blocked as too dangerous", retryRulesVersion !== undefined && (a.source === "hard-deny" || a.source === "model") && ctx.hasUI ? "ask-user" : "none");
     }
 

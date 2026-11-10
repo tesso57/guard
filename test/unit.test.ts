@@ -4020,6 +4020,18 @@ ok("int: same push via git -C → rule-deny without API", (await run("bash", { c
     const changedTrust = await run("bash", { command: trustScopedRetry });
     ok("int: a changed trusted-folder policy does not reuse an earlier blocked-call retry", changedTrust?.block === true && !retryDialogOpened);
   } finally { ctx.ui.select = priorSelect; }
+  await run("bash", { command: "echo reset-before-headless-retry" });
+  const headlessRetry = "printf headless-retry >> ~/.pi/agent/guard/rules.jsonl";
+  hasUI = false;
+  const headlessBlock = await run("bash", { command: headlessRetry });
+  hasUI = true;
+  let headlessRetryDialogOpened = false;
+  const selectBeforeHeadlessRetry = ctx.ui.select;
+  ctx.ui.select = async () => { headlessRetryDialogOpened = true; return "Deny"; };
+  try {
+    const firstInteractiveBlock = await run("bash", { command: headlessRetry });
+    ok("int: a headless block does not create interactive retry eligibility", headlessBlock?.block === true && firstInteractiveBlock?.block === true && !headlessRetryDialogOpened);
+  } finally { ctx.ui.select = selectBeforeHeadlessRetry; }
   await run("bash", { command: "echo reset-before-reload-retry" });
   const reloadScopedRetry = "printf reload-retry >> ~/.pi/agent/guard/rules.jsonl";
   await run("bash", { command: reloadScopedRetry });
