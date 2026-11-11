@@ -33,3 +33,16 @@ test("unambiguous predictions agree with the real Pi edit tool", async () => {
     assert.equal(predictEdits(content, input), written);
   }
 });
+
+test("edits that leave normalized content unchanged are not predicted as successful", async () => {
+  for (const content of ["before\n", "\uFEFFbefore\r\n"]) {
+    const input = { path: "fixture", edits: [{ oldText: "before", newText: "before" }] };
+    const tool = createEditTool("/tmp", { operations: {
+      access: async () => {},
+      readFile: async () => Buffer.from(content),
+      writeFile: async () => { throw new Error("unexpected write"); },
+    } });
+    await assert.rejects(tool.execute("fixture", input), /No changes made/);
+    assert.equal(predictEdits(content, input), undefined);
+  }
+});

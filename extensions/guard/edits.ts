@@ -47,5 +47,6 @@ export function predictEdits(content: string, input: any): string | undefined {
   if (replacements.some((r, i) => i > 0 && replacements[i - 1].end > r.start)) return undefined;
   let result = base;
   for (const r of replacements.reverse()) result = result.slice(0, r.start) + r.text + result.slice(r.end);
+  if (result === base) return undefined; // Pi rejects edits that make no changes.
   return bom + (crlf ? result.replace(/\n/g, "\r\n") : result);
 }
