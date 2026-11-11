@@ -221,7 +221,7 @@ export default function (pi: ExtensionAPI) {
   };
   /** Earlier calls for context and all other calls for concurrent filesystem risks. */
   const siblingsById = new Map<string, BatchContext>();
-  const judged = new Map<string, string>();
+  const judged = new Map<string, { hash: string; session: string }>();
   const verdictCache = new Map<string, { at: number; a: Assessment }>();
   /** Files written or edited in this session. */
   const touched = new Set<string>();
@@ -962,7 +962,7 @@ export default function (pi: ExtensionAPI) {
       if (!store.hasErrors) retryRulesVersion = store.version;
     } catch { /* no retry shortcut when rules cannot be refreshed */ }
     const retryKey = stableHash([hash, ctx.cwd, trustAvailable ? trusted : "unavailable", session, trustedDirs.version, retryRulesVersion]);
-    judged.set(event.toolCallId, hash);
+    judged.set(event.toolCallId, { hash, session });
     const what = preview(tool, input);
     const risk = a.verdict?.risk;
     const tag = `${a.source}${risk !== undefined ? ` ${risk.toFixed(1)}` : ""}${a.verdict?.category ? ` ${a.verdict.category}` : ""}`;
@@ -1171,13 +1171,13 @@ export default function (pi: ExtensionAPI) {
 
   // Detect input that changed after guard judged it (an extension loaded after guard rewrote it)
   pi.on("tool_result", async (event, ctx) => {
-    const h = judged.get(event.toolCallId);
+    const previous = judged.get(event.toolCallId);
     judged.delete(event.toolCallId);
-    if (!h) return;
+    if (!previous) return;
     let inspectable = true;
-    try { if (h === toolInputHash(event.toolName, event.input)) return; } catch { inspectable = false; }
+    try { if (previous.hash === toolInputHash(event.toolName, event.input)) return; } catch { inspectable = false; }
     const auditText = inspectable ? auditPreview(ctx, event.toolName, event.input) : `${event.toolName} [arguments withheld: input could not be inspected]`;
-    recordAudit(ctx, { session: ctx.sessionManager.getSessionId(), tool: event.toolName, preview: auditText, action: "allow", source: "drift", reasons: ["input changed after judgement"], event: "drift" });
+    recordAudit(ctx, { session: previous.session, tool: event.toolName, preview: auditText, action: "allow", source: "drift", reasons: ["input changed after judgement"], event: "drift" });
     warn(ctx, `guard: the input of ${event.toolName} was changed by another extension after guard judged it. Load guard last.`);
   });
 

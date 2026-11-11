@@ -4574,6 +4574,17 @@ const driftProxy = new Proxy({ command: "echo proxy-drift" }, { get(target, key,
 notes.length = 0;
 await h.tool_result({ type: "tool_result", toolCallId: "proxy-drift", toolName: "bash", input: driftProxy, content: [] }, ctx);
 ok("int: uninspectable proxy drift is not read while preparing its audit", !driftProxyRead && tail(1)[0]?.source === "drift" && tail(1)[0]?.preview.includes("withheld") && notes.some((message) => message.includes("changed by another extension")));
+await h.tool_call({ type: "tool_call", toolCallId: "session-drift", toolName: "bash", input: { command: "echo session-drift" } }, ctx);
+const previousDriftSessionId = ctx.sessionManager.getSessionId;
+ctx.sessionManager.getSessionId = () => { throw new Error("opaque-drift-session-error"); };
+notes.length = 0;
+try {
+  let threw = false;
+  try { await h.tool_result({ type: "tool_result", toolCallId: "session-drift", toolName: "bash", input: { command: "echo changed-drift" }, content: [] }, ctx); }
+  catch { threw = true; }
+  const record = tail(1)[0];
+  ok("int: drift uses the original session if later session lookup fails", !threw && record?.source === "drift" && record.session === "sess-1" && notes.some((message) => message.includes("changed by another extension")) && !JSON.stringify(record).includes("opaque-drift-session-error"));
+} finally { ctx.sessionManager.getSessionId = previousDriftSessionId; }
 
 // A prior opaque change may have altered files the runner loads, even when visible context is unchanged.
 calls = [];
