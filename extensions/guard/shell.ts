@@ -644,30 +644,35 @@ const RG_LONG_VALUES = new Set([
   "encoding", "file", "glob", "iglob", "max-columns", "max-count", "max-depth", "maxdepth", "max-filesize", "path-separator", "regexp",
   "replace", "sort", "sortr", "threads", "type", "type-not", "type-add", "type-clear", "dfa-size-limit", "regex-size-limit",
 ]);
-function inspectRgOptions(a: string[]): { known: boolean; listsFiles: boolean } {
+function inspectRgOptions(a: string[]): { known: boolean; listsFiles: boolean; patternProvided: boolean; operands: string[] } {
   let listsFiles = false;
+  let patternProvided = false;
+  const operands: string[] = [];
+  const invalid = () => ({ known: false, listsFiles: false, patternProvided: false, operands: [] });
   for (let i = 1; i < a.length; i++) {
     const t = a[i];
-    if (t === "--") break;
-    if (!t.startsWith("-") || t === "-") continue;
+    if (t === "--") { operands.push(...a.slice(i + 1)); break; }
+    if (!t.startsWith("-") || t === "-") { operands.push(t); continue; }
     if (t.startsWith("--")) {
       const eq = t.indexOf("=");
       const name = t.slice(2, eq < 0 ? undefined : eq);
       if (RG_LONG_FLAGS.has(name) && eq < 0) { if (name === "files") listsFiles = true; continue; }
-      if (!RG_LONG_VALUES.has(name)) return { known: false, listsFiles: false };
-      if (eq < 0) i++;
+      if (!RG_LONG_VALUES.has(name)) return invalid();
+      if (name === "regexp" || name === "file") patternProvided = true;
+      if (eq < 0) { if (i + 1 >= a.length) return invalid(); i++; }
       continue;
     }
     for (let k = 1; k < t.length; k++) {
       const c = t[k];
       if (RG_SHORT_VALUES.has(c)) {
-        if (k === t.length - 1) i++;
+        if (c === "e") patternProvided = true;
+        if (k === t.length - 1) { if (i + 1 >= a.length) return invalid(); i++; }
         break;
       }
-      if (!RG_SHORT_FLAGS.has(c)) return { known: false, listsFiles: false };
+      if (!RG_SHORT_FLAGS.has(c)) return invalid();
     }
   }
-  return { known: true, listsFiles };
+  return { known: true, listsFiles, patternProvided, operands };
 }
 
 /** `--files` lists paths instead of searching their contents, when it is an actual option. */
@@ -675,6 +680,14 @@ export function rgListsFiles(a: string[]): boolean {
   if (a[0] !== "rg") return false;
   const options = inspectRgOptions(a);
   return options.known && options.listsFiles;
+}
+
+/** Explicit search roots, excluding the pattern and option values; undefined for unknown options. */
+export function rgExplicitPaths(a: string[]): string[] | undefined {
+  if (a[0] !== "rg") return undefined;
+  const options = inspectRgOptions(a);
+  if (!options.known) return undefined;
+  return options.listsFiles || options.patternProvided ? options.operands : options.operands.slice(1);
 }
 
 const READ_ONLY = new Set([

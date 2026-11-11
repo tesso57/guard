@@ -2226,6 +2226,11 @@ const run = async (toolName: string, input: any) => h.tool_call({ type: "tool_ca
   const skipped = await h.tool_call({ type: "tool_call", toolCallId: event.id, toolName: event.name, input: event.arguments }, ctx);
   ok("int: skill reads bypass guard even with a matching deny rule", !!denyId && skipped === undefined && calls.length === 0 && statSync(join(AGENT, "guard", "audit.jsonl")).size === beforeAudit);
   await h.agent_end({ type: "agent_end" }, ctx);
+  const pipedEvent = { type: "toolCall", id: "skill-skip-pipe", name: "bash", arguments: { command: `cat '${skillFile}' | head -n 1` } };
+  await h.message_end({ type: "message_end", message: { role: "assistant", content: [pipedEvent] } }, ctx);
+  const piped = await h.tool_call({ type: "tool_call", toolCallId: pipedEvent.id, toolName: pipedEvent.name, input: pipedEvent.arguments }, ctx);
+  ok("int: read-only skill pipelines also bypass guard", piped === undefined && calls.length === 0 && statSync(join(AGENT, "guard", "audit.jsonl")).size === beforeAudit);
+  await h.agent_end({ type: "agent_end" }, ctx);
   await command.handler(`rules rm ${denyId}`, ctx);
   rmSync(skillDir, { recursive: true });
 }

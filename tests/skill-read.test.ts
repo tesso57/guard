@@ -4,6 +4,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { isSkillRead } from "../extensions/guard/skill-read.ts";
+import { rgExplicitPaths } from "../extensions/guard/shell.ts";
+
+test("ripgrep patterns and option values are not mistaken for search paths", () => {
+  assert.deepEqual(rgExplicitPaths(["rg", "-e", "/skill/SKILL.md"]), []);
+  assert.deepEqual(rgExplicitPaths(["rg", "-g", "*.md", "pattern", "/skill"]), ["/skill"]);
+  assert.deepEqual(rgExplicitPaths(["rg", "-e", "pattern", "/skill"]), ["/skill"]);
+  assert.deepEqual(rgExplicitPaths(["rg", "--files", "/skill"]), ["/skill"]);
+  assert.deepEqual(rgExplicitPaths(["rg", "--", "pattern", "/skill"]), ["/skill"]);
+});
 
 test("only direct read-only access within standard skill directories bypasses guard", () => {
   const cwd = mkdtempSync(join(tmpdir(), "guard-skill-read-"));
@@ -16,6 +25,12 @@ test("only direct read-only access within standard skill directories bypasses gu
     symlinkSync(outside, join(cwd, ".agents", "skills", "example", "outside"));
     assert.equal(isSkillRead("read", { path: skill }, cwd), true);
     assert.equal(isSkillRead("bash", { command: `cat '${skill}'` }, cwd), true);
+    assert.equal(isSkillRead("bash", { command: `cat '${skill}' | head -n 1` }, cwd), true);
+    assert.equal(isSkillRead("bash", { command: `cat '${skill}' | sed -n '1p'` }, cwd), true);
+    assert.equal(isSkillRead("bash", { command: `cat '${skill}' | tee '${outside}'` }, cwd), false);
+    assert.equal(isSkillRead("bash", { command: `cat '${skill}' | head '${outside}'` }, cwd), false);
+    assert.equal(isSkillRead("bash", { command: `rg -e '${skill}'` }, cwd), false, "a pattern is not a search root");
+    assert.equal(isSkillRead("bash", { command: `cat '${skill}' && rg -e '${skill}'` }, cwd), false, "a later rg must not search the working directory implicitly");
     assert.equal(isSkillRead("bash", { command: `cat '${skill}' '${outside}'` }, cwd), false);
     assert.equal(isSkillRead("bash", { command: `cat '${skill}' > '${outside}'` }, cwd), false);
     assert.equal(isSkillRead("bash", { command: `cat '${skill}'; rm '${outside}'` }, cwd), false);
