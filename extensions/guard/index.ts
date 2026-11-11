@@ -93,14 +93,15 @@ function toolInputHash(tool: string, input: unknown): string {
     if (ancestors.has(value)) throw new Error("tool input contains a cycle");
     ancestors.add(value);
     try {
-      const descriptors = Object.getOwnPropertyDescriptors(value);
-      if (Object.getOwnPropertySymbols(value).length) throw new Error("tool input contains symbol keys");
-      if (array) {
-        for (let i = 0; i < value.length; i++) if (!Object.hasOwn(descriptors, String(i))) throw new Error("tool input contains a sparse array");
-      }
-      for (const [key, descriptor] of Object.entries(descriptors)) {
+      if (array && value.length > remaining) throw new Error("tool input is too complex");
+      const keys = Reflect.ownKeys(value);
+      if (keys.length - (array ? 1 : 0) > remaining) throw new Error("tool input is too complex");
+      if (array && keys.length !== value.length + 1) throw new Error("tool input contains a sparse array or extra properties");
+      for (const key of keys) {
+        if (typeof key !== "string") throw new Error("tool input contains symbol keys");
         if (array && key === "length") continue;
-        if (!descriptor.enumerable || !("value" in descriptor) || (array && (!/^(0|[1-9]\d*)$/.test(key) || Number(key) >= value.length))) throw new Error("tool input has unsupported properties");
+        const descriptor = Object.getOwnPropertyDescriptor(value, key);
+        if (!descriptor || !descriptor.enumerable || !("value" in descriptor) || (array && (!/^(0|[1-9]\d*)$/.test(key) || Number(key) >= value.length))) throw new Error("tool input has unsupported properties");
         visit(descriptor.value);
       }
     } finally { ancestors.delete(value); }

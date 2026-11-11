@@ -2158,6 +2158,11 @@ const run = async (toolName: string, input: any) => h.tool_call({ type: "tool_ca
   ok("int: deeply nested tool input is blocked without escaping the handler", deepResult?.block === true && deepResult.reason.includes("input could not be inspected"));
   const sparseResult = await run("custom-unserializable", { values: new Array(2) });
   ok("int: sparse arrays cannot be confused with JSON null values", sparseResult?.block === true && sparseResult.reason.includes("input could not be inspected"));
+  const sparseWithExtra = Object.assign(new Array(2), { 0: "x", extra: "opaque-extra-value" });
+  const sparseWithExtraResult = await run("custom-unserializable", { values: sparseWithExtra });
+  ok("int: an extra property cannot conceal a missing array element", sparseWithExtraResult?.block === true && sparseWithExtraResult.reason.includes("input could not be inspected"));
+  const enormousSparseResult = await run("custom-unserializable", { values: new Array(0xffff_ffff) });
+  ok("int: enormous sparse arrays are rejected without traversing their declared length", enormousSparseResult?.block === true && enormousSparseResult.reason.includes("input could not be inspected"));
   let customMapCalled = false;
   const customArray = ["x"];
   Object.setPrototypeOf(customArray, { map() { customMapCalled = true; return []; } });
