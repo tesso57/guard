@@ -136,7 +136,9 @@ export function loadConfig(): Config & { warnings: string[] } {
   }
   if (Object.keys(thresholds).some((key) => !Object.hasOwn(DEFAULTS.thresholds, key)))
     warnings.push("thresholds contains unknown fields; check field names");
-  const c: Config = { ...DEFAULTS, ...file, thresholds: { ...DEFAULTS.thresholds, ...thresholds } };
+  const known = Object.fromEntries(Object.entries(file).filter(([key]) => Object.hasOwn(DEFAULTS, key)));
+  const knownThresholds = Object.fromEntries(Object.entries(thresholds).filter(([key]) => Object.hasOwn(DEFAULTS.thresholds, key)));
+  const c: Config = { ...DEFAULTS, ...known, thresholds: { ...DEFAULTS.thresholds, ...knownThresholds } };
   const env = process.env;
   if (env.RISK_DISABLE === "1") c.disabled = true;
   if (env.OPENAI_BASE_URL !== undefined) c.baseUrl = env.OPENAI_BASE_URL;

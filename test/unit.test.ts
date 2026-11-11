@@ -1865,6 +1865,13 @@ let oversizedDiffFixture = "";
   writeFileSync(join(AGENT, "guard", "config.json"), JSON.stringify({ "opaque-secret-config-key": true, thresholds: { "opaque-secret-threshold-key": 0 } }));
   const unknownWarnings = loadConfig().warnings.join(" ");
   ok("config: unknown fields warn without exposing field names", unknownWarnings.includes("config.json contains unknown fields") && unknownWarnings.includes("thresholds contains unknown fields") && !unknownWarnings.includes("opaque-secret"));
+  const unknownConfig = loadConfig();
+  ok("config: unknown fields are not retained in the active configuration", !Object.hasOwn(unknownConfig, "opaque-secret-config-key") && !Object.hasOwn(unknownConfig.thresholds, "opaque-secret-threshold-key"));
+  writeFileSync(join(AGENT, "guard", "config.json"), `{"unknown":${"[".repeat(20_000)}0${"]".repeat(20_000)},"model":"configured-model"}`);
+  const deeplyUnknownConfig = loadConfig();
+  let serializedConfig = false;
+  try { JSON.stringify(deeplyUnknownConfig); serializedConfig = true; } catch { /* unexpected deeply nested data */ }
+  ok("config: deeply nested unknown fields cannot disrupt configuration hashing", serializedConfig && deeplyUnknownConfig.model === "configured-model" && deeplyUnknownConfig.warnings.some((warning) => warning.includes("unknown fields")));
   writeFileSync(join(AGENT, "guard", "config.json"), JSON.stringify({ thresholds: { confirmPHigh: 0.9, blockPHigh: 0.5, confirmExfil: 0.8, blockExfil: 0.4 } }));
   const invertedThresholds = loadConfig();
   ok("config: inverted confirmation thresholds warn without changing configured values", invertedThresholds.thresholds.confirmPHigh === 0.9 && invertedThresholds.thresholds.confirmExfil === 0.8 && invertedThresholds.warnings.some((warning) => warning.includes("confirmPHigh equals or exceeds")) && invertedThresholds.warnings.some((warning) => warning.includes("confirmExfil equals or exceeds")));

@@ -232,7 +232,7 @@ Settings live in `~/.pi/agent/guard/config.json`. Every field is optional.
 }
 ```
 
-Invalid values fall back to the default with a warning. An invalid `baseUrl` instead makes model judgement unavailable until corrected, so a misconfigured gateway does not silently send the key to the default endpoint. The URL must be HTTP(S) without embedded credentials, a query or a fragment. Unknown field names also produce a warning; the names and values are omitted from it to avoid exposing secrets. The default thresholds are starting points. If guard asks too often or lets too much through, adjust them while checking real decisions with `/guard log`.
+Invalid values fall back to the default with a warning. An invalid `baseUrl` instead makes model judgement unavailable until corrected, so a misconfigured gateway does not silently send the key to the default endpoint. The URL must be HTTP(S) without embedded credentials, a query or a fragment. Unknown fields are ignored and produce a warning; their names and values are omitted from it to avoid exposing secrets. The default thresholds are starting points. If guard asks too often or lets too much through, adjust them while checking real decisions with `/guard log`.
 
 Guard does not follow HTTP redirects from the Decisions API, so judgement context stays at the configured endpoint. Configure the final endpoint directly if a gateway responds with a redirect.
 
