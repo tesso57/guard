@@ -2574,6 +2574,18 @@ const run = async (toolName: string, input: any) => h.tool_call({ type: "tool_ca
     ok("int: input that becomes cyclic during approval is blocked", result?.block === true && result.reason.includes("could not recheck"));
   } finally { ctx.ui.select = savedSelect; }
   await run("bash", { command: "git status" });
+  const getterDuringDialog: any = { command: "guard-dialog-getter operation" };
+  let dialogGetterRead = false;
+  ctx.ui.select = async () => {
+    Object.defineProperty(getterDuringDialog, "command", { enumerable: true, configurable: true, get() { dialogGetterRead = true; return "opaque-dialog-getter"; } });
+    return "Allow (this time only)";
+  };
+  try {
+    const result = await run("bash", getterDuringDialog);
+    const record = tail(1)[0];
+    ok("int: an accessor introduced during approval is blocked without invoking it", result?.block === true && !dialogGetterRead && record?.preview.includes("withheld") && !JSON.stringify(record).includes("opaque-dialog-getter"));
+  } finally { ctx.ui.select = savedSelect; }
+  await run("bash", { command: "git status" });
   const dialogRules = join(AGENT, "guard", "rules.jsonl");
   const dialogRulesBackup = `${dialogRules}.dialog-test`;
   ctx.ui.select = async () => {
