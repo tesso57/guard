@@ -56,3 +56,12 @@ test("large edit batches fall back to confirmation instead of monopolizing the e
   assert.equal(predictEdits(content, { edits }), undefined);
   assert.equal(predictEdits(content, { edits: edits.slice(0, 10) })?.startsWith("val00000END"), true);
 });
+
+test("predictions do not materialize oversized edited files", () => {
+  const replacement = "x".repeat(600_000);
+  const input = { edits: [{ oldText: "first", newText: replacement }, { oldText: "second", newText: replacement }] };
+  assert.equal(predictEdits("first second", input) === undefined, true);
+  assert.equal(predictEdits("first", { edits: [{ oldText: "first", newText: "x".repeat(999_999) }] })?.length, 999_999);
+  assert.equal(predictEdits("first", { edits: [{ oldText: "first", newText: "x".repeat(1_000_000) }] }), undefined);
+  assert.equal(predictEdits("first", { edits: [{ oldText: "first", newText: "あ".repeat(400_000) }] }), undefined);
+});

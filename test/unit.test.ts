@@ -4654,6 +4654,21 @@ await h.agent_end({ type: "agent_end" }, ctx);
 branch.splice(branch.indexOf(largeBatchEntry), 1);
 rmSync(join(PROJ, "many-edits.sh"));
 
+const multibyteCalls = [
+  { type: "toolCall", id: "multibyte-write", name: "write", arguments: { path: "multibyte.sh", content: "あ".repeat(340_000) } },
+  { type: "toolCall", id: "multibyte-run", name: "bash", arguments: { command: "sh multibyte.sh" } },
+];
+calls = [];
+await h.message_end({ type: "message_end", message: { role: "assistant", content: multibyteCalls } }, ctx);
+const multibyteEntry = { type: "message", message: { role: "assistant", content: multibyteCalls } };
+branch.push(multibyteEntry);
+selectScript = [["Deny"]];
+inputs = [""];
+const multibyteResult = await h.tool_call({ type: "tool_call", toolCallId: "multibyte-run", toolName: "bash", input: multibyteCalls[1].arguments }, ctx);
+ok("int: a concurrent write above the byte limit has unknown contents", multibyteResult?.block === true && selectScript.length === 0 && calls.some((c) => cmdOf(c.body) === "sh multibyte.sh" && JSON.stringify(guardContext(c.body)).includes("contents unknown")));
+await h.agent_end({ type: "agent_end" }, ctx);
+branch.splice(branch.indexOf(multibyteEntry), 1);
+
 // benign script run in the same message still needs confirmation
 responder = (b) => ({ answers: answersFor([0.95, 0.05, 0, 0, 0])(b) });
 const tcs3 = [

@@ -19,7 +19,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { audit, tail, type AuditRecord } from "./audit.ts";
 import { type Config, loadConfig } from "./config.ts";
 import { predictEdits } from "./edits.ts";
-import { readBoundedText } from "./files.ts";
+import { MAX_FILE_BYTES, readBoundedText } from "./files.ts";
 import { buildRequest, callDecisions, evaluate, MAX_ATTACHED_FILES, type ModelVerdict } from "./judge.ts";
 import { redact } from "./redact.ts";
 import { clearPathCache, createTrustedDirState, isFreelyReadable, listTrustedDirs, trustDir, type TrustedDirState, isHardLinked, isInsideExact, pathLikeTokens, pathVariants, protectedReason, protectedRoots, realPath, recentlyChangedFiles, resolvePath, sensitiveReason } from "./paths.ts";
@@ -436,14 +436,14 @@ export default function (pi: ExtensionAPI) {
       concurrentPaths.set(target, [p]);
       if (s.name === "write") {
         const content = String(s.arguments.content ?? "");
-        if (content.length >= 1_000_000) { virtual.delete(p); unknownEdits.add(p); }
+        if (Buffer.byteLength(content, "utf8") >= MAX_FILE_BYTES) { virtual.delete(p); unknownEdits.add(p); }
         else { virtual.set(p, content); unknownEdits.delete(p); }
       }
       if (s.name === "edit") {
         if (concurrentPaths.size > MAX_ATTACHED_FILES) { unknownEdits.add(p); continue; }
         const mayRead = !sensitiveReason(p) && !protectedReason(p, roots) && !isHardLinked(p);
         const before = unknownEdits.has(p) ? undefined : virtual.get(p) ?? (mayRead ? readBoundedText(p) : undefined);
-        const after = before === undefined || before.length >= 1_000_000 ? undefined : predictEdits(before, s.arguments);
+        const after = before === undefined || before.length >= MAX_FILE_BYTES ? undefined : predictEdits(before, s.arguments);
         if (after === undefined) { virtual.delete(p); unknownEdits.add(p); }
         else virtual.set(p, after);
       }
@@ -492,7 +492,7 @@ export default function (pi: ExtensionAPI) {
       const shouldRead = touched.has(p) || fromDisk;
       if (shouldRead && isRegularFile(p)) {
         try {
-          if (statSync(p).size >= 1_000_000) {
+          if (statSync(p).size >= MAX_FILE_BYTES) {
             unreadableFiles.push(p);
             return;
           }

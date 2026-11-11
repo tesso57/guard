@@ -1,9 +1,9 @@
 import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 
-const MAX_BYTES = 1_000_000;
+export const MAX_FILE_BYTES = 1_000_000;
 
 /** Read a regular file without blocking on a special file or exceeding a fixed byte limit. */
-export function readRegularText(path: string, maxBytes = MAX_BYTES, rejectHardLinks = false): string {
+export function readRegularText(path: string, maxBytes = MAX_FILE_BYTES, rejectHardLinks = false): string {
   let fd: number | undefined;
   try {
     // Nonblocking open prevents a path swapped to a FIFO from hanging before fstat.
@@ -36,5 +36,5 @@ export function readRegularText(path: string, maxBytes = MAX_BYTES, rejectHardLi
 
 /** Do not load large or hard-linked files into a judgement. */
 export function readBoundedText(path: string): string | undefined {
-  try { return readRegularText(path, MAX_BYTES, true); } catch { return undefined; }
+  try { return readRegularText(path, MAX_FILE_BYTES, true); } catch { return undefined; }
 }

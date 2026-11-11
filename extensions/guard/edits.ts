@@ -1,3 +1,5 @@
+import { MAX_FILE_BYTES } from "./files.ts";
+
 export type TextEdit = { oldText: string; newText: string };
 // Each edit scans both views; bound total synchronous search work per file.
 const MAX_SEARCH_CHARS = 100_000_000;
@@ -36,6 +38,7 @@ export function predictEdits(content: string, input: any): string | undefined {
   const fuzzyBase = fuzzyComparable(base);
   if (edits.length * (base.length + fuzzyBase.length) > MAX_SEARCH_CHARS) return undefined;
   const replacements: { start: number; end: number; text: string }[] = [];
+  let removed = 0, added = 0;
   for (const edit of edits) {
     const oldText = normalize(edit.oldText);
     if (!oldText) return undefined;
@@ -44,10 +47,16 @@ export function predictEdits(content: string, input: any): string | undefined {
     const fuzzyOld = fuzzyComparable(oldText);
     const fuzzyStart = fuzzyBase.indexOf(fuzzyOld);
     if (!fuzzyOld || fuzzyStart < 0 || fuzzyBase.indexOf(fuzzyOld, fuzzyStart + 1) >= 0) return undefined;
-    replacements.push({ start, end: start + oldText.length, text: normalize(edit.newText) });
+    const text = normalize(edit.newText);
+    added += text.length;
+    removed += oldText.length;
+    // Non-overlapping edits cannot remove more than the original content.
+    if (added >= MAX_FILE_BYTES + base.length) return undefined;
+    replacements.push({ start, end: start + oldText.length, text });
   }
   replacements.sort((a, b) => a.start - b.start);
   if (replacements.some((r, i) => i > 0 && replacements[i - 1].end > r.start)) return undefined;
+  if (base.length - removed + added + bom.length >= MAX_FILE_BYTES) return undefined;
   const parts: string[] = [];
   let cursor = 0;
   for (const replacement of replacements) {
@@ -57,5 +66,6 @@ export function predictEdits(content: string, input: any): string | undefined {
   parts.push(base.slice(cursor));
   const result = parts.join("");
   if (result === base) return undefined; // Pi rejects edits that make no changes.
-  return bom + (crlf ? result.replace(/\n/g, "\r\n") : result);
+  const final = bom + (crlf ? result.replace(/\n/g, "\r\n") : result);
+  return Buffer.byteLength(final, "utf8") < MAX_FILE_BYTES ? final : undefined;
 }
