@@ -263,8 +263,11 @@ ok("paths: read fallback through a narrow-space symlink is sensitive", !!sensiti
   ok("dialog: terminal and bidirectional controls are displayed visibly", !/[\u001b\u202e\r]/.test(deceptive) && deceptive.includes("\\u001b") && deceptive.includes("\\u202e") && deceptive.includes("\\u000d"));
   const displayCalls: string[] = [];
   const displayCtx: any = { ui: { select: async (title: string, options: string[]) => { displayCalls.push(title, ...options); return options[1]; }, input: async () => undefined } };
-  const displayedChoice = await confirmDialog(displayCtx, { ...spec, title: "title\u001b", body: "body\u202e", patterns: [{ kind: "argv", prefix: ["git", "log\u001b"] }], rememberAllow: true });
+  const displayedChoice = await confirmDialog(displayCtx, { ...spec, title: "title\u001b", body: "body\u202e", projectName: "project\u001b\u202e\nname", patterns: [{ kind: "argv", prefix: ["git", "log\u001b"] }], rememberAllow: true });
   ok("dialog: labels are escaped without changing the selected decision", displayedChoice.decision === "allow" && displayedChoice.scope === "session" && displayCalls.every((text) => !/[\u001b\u202e]/.test(text)) && displayCalls.some((text) => text.includes("\\u001b")));
+  const projectCtx: any = { ui: { select: async (_title: string, options: string[]) => options.find((option) => option.startsWith("Allow and remember")) } };
+  const projectChoice = await confirmDialog(projectCtx, { ...spec, projectName: "project\u001b\nname", patterns: [{ kind: "argv", prefix: ["git", "log"] }], rememberAllow: true });
+  ok("dialog: escaped project labels still select the project scope", projectChoice.decision === "allow" && projectChoice.scope === "project");
 }
 
 // ---------- shell ----------
