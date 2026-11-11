@@ -88,6 +88,7 @@ function toolInputHash(tool: string, input: unknown): string {
     if (utilTypes.isProxy(value)) throw new Error("tool input contains a proxy");
     const array = Array.isArray(value);
     const prototype = Object.getPrototypeOf(value);
+    if (array && prototype !== Array.prototype) throw new Error("tool input is not a plain array");
     if (!array && prototype !== Object.prototype && prototype !== null) throw new Error("tool input is not a plain object");
     if (ancestors.has(value)) throw new Error("tool input contains a cycle");
     ancestors.add(value);

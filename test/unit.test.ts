@@ -2158,6 +2158,11 @@ const run = async (toolName: string, input: any) => h.tool_call({ type: "tool_ca
   ok("int: deeply nested tool input is blocked without escaping the handler", deepResult?.block === true && deepResult.reason.includes("input could not be inspected"));
   const sparseResult = await run("custom-unserializable", { values: new Array(2) });
   ok("int: sparse arrays cannot be confused with JSON null values", sparseResult?.block === true && sparseResult.reason.includes("input could not be inspected"));
+  let customMapCalled = false;
+  const customArray = ["x"];
+  Object.setPrototypeOf(customArray, { map() { customMapCalled = true; return []; } });
+  const customArrayResult = await run("custom-unserializable", { values: customArray });
+  ok("int: arrays with custom prototypes are blocked without invoking their methods", customArrayResult?.block === true && customArrayResult.reason.includes("input could not be inspected") && !customMapCalled);
   const previousResponder = responder;
   responder = (body) => ({ answers: answersFor([1, 0, 0, 0, 0])(body) });
   try {
