@@ -223,6 +223,28 @@ ok("paths: read fallback through a narrow-space symlink is sensitive", !!sensiti
   linkSync(secret, join(linkedTree, "ordinary.txt"));
   ok("paths: hard-linked files make a secret scan incomplete", !secretFilesUnder(linkedTree).complete);
   rmSync(secret);
+  const linkedProject = mkdtempSync(join(tmpdir(), "guard-linked-project-"));
+  const first = join(linkedProject, "first.txt"), second = join(linkedProject, "second.txt");
+  writeFileSync(first, "ordinary project content\n");
+  linkSync(first, second);
+  for (const command of ["cat first.txt", "rg ordinary ."]) {
+    clearPathCache();
+    const parsed = P(command);
+    ok(`read: ${command} does not ask merely because a project file has multiple links`, !sensitive("bash", { command }, linkedProject, protectedRoots(linkedProject), parsed) && safeAllow("bash", { command }, linkedProject, O, parsed));
+  }
+  clearPathCache();
+  ok("read: hard-linked project writes still require confirmation", !!sensitive("write", { path: first, content: "change" }, linkedProject, protectedRoots(linkedProject)));
+  const outsideLink = join(mkdtempSync(join(tmpdir(), "guard-outside-link-")), "copy.txt");
+  linkSync(first, outsideLink);
+  clearPathCache();
+  ok("read: a hard link with an unlocated alias still requires confirmation", !!sensitive("bash", { command: "cat first.txt" }, linkedProject, protectedRoots(linkedProject), P("cat first.txt")));
+  rmSync(outsideLink);
+  linkSync(first, join(linkedProject, "alias.pem"));
+  clearPathCache();
+  ok("read: a hard link with a sensitive project alias still requires confirmation", !!sensitive("bash", { command: "cat first.txt" }, linkedProject, protectedRoots(linkedProject), P("cat first.txt")));
+  writeFileSync(join(linkedProject, "visible.pem"), "fixture");
+  clearPathCache();
+  ok("read: known secret files remain sensitive in recursive search", !!sensitive("bash", { command: "rg ordinary ." }, linkedProject, protectedRoots(linkedProject), P("rg ordinary .")));
   const manySecrets = join(PROJ, "many-secrets");
   mkdirSync(manySecrets);
   for (let i = 0; i < 21; i++) writeFileSync(join(manySecrets, `.env.${String(i).padStart(2, "0")}`), "hidden");
@@ -2206,6 +2228,17 @@ const run = async (toolName: string, input: any) => h.tool_call({ type: "tool_ca
   await h.agent_end({ type: "agent_end" }, ctx);
   await command.handler(`rules rm ${denyId}`, ctx);
   rmSync(skillDir, { recursive: true });
+}
+
+{
+  const dir = join(PROJ, "known-project-links");
+  mkdirSync(dir);
+  writeFileSync(join(dir, "first.txt"), "ordinary fixture\n");
+  linkSync(join(dir, "first.txt"), join(dir, "second.txt"));
+  calls = [];
+  const result = await run("bash", { command: "rg ordinary known-project-links" });
+  ok("int: a read-only search with fully located project hard links needs no confirmation or model", result === undefined && calls.length === 0 && tail(1)[0]?.source === "safe");
+  rmSync(dir, { recursive: true });
 }
 
 {

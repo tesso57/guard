@@ -11,7 +11,7 @@ import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } fro
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { hasGluedPathValue, innerCommands, INTERPRETER_NAMES, isLongOption, isReadOnlyArgv, isShell, nonFlags, normalizeArgv, type Parsed, parseShell, rgListsFiles, unwrapCommandWrappers } from "./shell.ts";
 import { readRegularText } from "./files.ts";
-import { containsProtectedRoot, expandGlobFully, trustedDirFor, trustedDirRelative, type TrustedDir, type TrustedDirState, isPiCodePath, PI_CODE_DIRS, gitConfigIsSafe, globHitsOptionLikeName, globMayReach, ignoreFilesReinclude, isFreelyReadable, isHardLinked, isHomeOrAncestor, isInside, isInsideExact, isProtectedHardLink, isRiskyProjectFile, memo, pathLikeTokens, pathVariants, protectedReason, protectedRoots, readFallbackVariants, realPath, resolvePath, secretFilesUnder, sensitiveReason, UNKNOWN_PATH } from "./paths.ts";
+import { containsProtectedRoot, expandGlobFully, trustedDirFor, trustedDirRelative, type TrustedDir, type TrustedDirState, isPiCodePath, PI_CODE_DIRS, gitConfigIsSafe, globHitsOptionLikeName, globMayReach, ignoreFilesReinclude, isFreelyReadable, isHardLinked, isHomeOrAncestor, isInside, isInsideExact, isProjectPath, isProjectHardlinkSafe, isProtectedHardLink, isRiskyProjectFile, memo, pathLikeTokens, pathVariants, protectedReason, protectedRoots, readFallbackVariants, realPath, resolvePath, secretFilesUnder, sensitiveReason, UNKNOWN_PATH } from "./paths.ts";
 
 export const BUILTIN_TOOLS = new Set(["bash", "edit", "write", "read", "grep", "find", "ls"]);
 const INCOMPLETE_DIRECTORY_COMPARISON = "/__guard_incomplete_directory_comparison__";
@@ -789,6 +789,7 @@ const rgSeesHidden = (args: string[]) =>
  * too large to check (then the call is not treated as safe).
  */
 function searchExposure(tool: string, input: any, cwd: string, parsed?: Parsed): { hit?: string; unknown: boolean } {
+  const projectRead = tool === "bash" && !!parsed && parsed.ok && !parsed.dynamic.length && !parsed.writes.length && parsed.subcommands.every(isReadOnlyArgv);
   const check = (roots0: string[], hidden: boolean) => {
     let unknown = false;
     for (const r of roots0) {
@@ -796,11 +797,11 @@ function searchExposure(tool: string, input: any, cwd: string, parsed?: Parsed):
       try {
         if (statSync(real).isFile()) {
           if (sensitiveReason(real)) return { hit: real, unknown };
-          if (isHardLinked(real)) unknown = true;
+          if (isHardLinked(real) && !(projectRead && isProjectHardlinkSafe(real, cwd))) unknown = true;
           continue;
         }
       } catch { unknown = true; continue; }
-      const { files, complete } = secretFilesUnder(real);
+      const { files, complete } = secretFilesUnder(real, projectRead && isProjectPath(real, cwd) ? cwd : undefined);
       if (!complete) unknown = true;
       const hit = files.find((f) => hidden || !relativeHasHidden(real, f));
       if (hit) return { hit, unknown };
@@ -864,6 +865,7 @@ export function sensitive(tool: string, input: any, cwd: string, roots: string[]
     if (executableRisk) return executableRisk;
   }
   const { reads, writes } = inputPaths(tool, input, cwd, parsed);
+  const projectRead = tool === "bash" && !!parsed && parsed.ok && !parsed.dynamic.length && !parsed.writes.length && parsed.subcommands.every(isReadOnlyArgv);
   if (reads.includes(INCOMPLETE_DIRECTORY_COMPARISON)) return "directory comparison could not be inspected completely";
   if (reads.includes(UNKNOWN_PATH)) return "some wildcard read paths could not be inspected completely";
   // The project's own .pi/ holds project files (prompts, guard.json); reading them is fine
@@ -872,7 +874,7 @@ export function sensitive(tool: string, input: any, cwd: string, roots: string[]
     const r = sensitiveReason(p);
     if (r) return r;
     if (protectedReason(p, outerRoots) && !(isPiCodePath(p) && !writes.includes(p))) return "reads guard or pi internal state";
-    if (isHardLinked(p)) return "a hard-linked file may share contents with a path outside the project";
+    if (isHardLinked(p) && !(projectRead && !writes.includes(p) && isProjectHardlinkSafe(p, cwd))) return "a hard-linked file may share contents with a path outside the project";
   }
   // pi's grep tool searches hidden files recursively
   if (tool === "grep" && reads.concat(reads.length ? [] : [cwd]).some((p) => isHomeOrAncestor(p) || isHomeOrAncestor(realPath(p)))) return "searches file contents across the home directory";
@@ -959,7 +961,7 @@ export function safeAllow(tool: string, input: any, cwd: string, opts: { trusted
     }
     if (creates && !writesStayPlain(tool, input, cwd, parsed, opts.trustedDirs)) return false;
     // Only reads inside the project or in public system directories happen without asking
-    if (!inputPaths(tool, input, cwd, parsed).reads.every((p) => isFreelyReadable(p, cwd, opts.trustedDirs))) return false;
+    if (!inputPaths(tool, input, cwd, parsed).reads.every((p) => isFreelyReadable(p, cwd, opts.trustedDirs) || (!creates && isProjectHardlinkSafe(p, cwd)))) return false;
     const heads = parsed.subcommands.map((a) => normalizeArgv(a).argv[0]);
     // Read-only git still runs commands configured in .git/config, so it needs a trusted repo with a clean config,
     // must run in the project itself (no cd anywhere in the command), and nothing this session may have planted a

@@ -502,15 +502,45 @@ export function isProtectedHardLink(p: string, roots: string[]): boolean {
   return protectedFiles.has(`${target.dev}:${target.ino}`);
 }
 
-/**
- * Where guard may let a read happen without asking: inside the project (unless the project is the home directory
- * itself or one of its ancestors) or in public system directories. Checked on both the literal and the real path.
- */
+/** A project path must remain in the project after resolving symlinks. */
+export function isProjectPath(p: string, cwd: string): boolean {
+  const real = realPath(p);
+  return p !== UNKNOWN_PATH && !isHomeOrAncestor(cwd) &&
+    (isInsideExact(p, cwd) || isInsideExact(p, realPath(cwd))) && isInsideExact(real, realPath(cwd));
+}
+
+/** Whether all links to a project file are visible inside the project and none has a sensitive name. */
+export function isProjectHardlinkSafe(p: string, cwd: string): boolean {
+  if (!isProjectPath(p, cwd)) return false;
+  try {
+    const target = statSync(p, { bigint: true });
+    if (!target.isFile() || target.nlink < 2n) return false;
+    const scan = memo(`project-hardlinks:${cwd}`, () => {
+      const links = new Map<string, { count: bigint; sensitive: boolean }>();
+      let uncertain = false;
+      const complete = walkBounded(cwd, (path) => {
+        try {
+          const st = lstatSync(path, { bigint: true });
+          if (!st.isFile() || st.nlink < 2n) return;
+          const key = `${st.dev}:${st.ino}`;
+          const item = links.get(key) ?? { count: 0n, sensitive: false };
+          item.count++;
+          item.sensitive ||= !!sensitiveReason(path);
+          links.set(key, item);
+        } catch { uncertain = true; }
+      }, 12, 20_000, new Set());
+      return { links, complete: complete && !uncertain };
+    });
+    const entry = scan.links.get(`${target.dev}:${target.ino}`);
+    return scan.complete && !!entry && !entry.sensitive && entry.count >= target.nlink;
+  } catch { return false; }
+}
+
+/** Reads inside the project or public directories, without hard-linked files, may skip judgement. */
 export function isFreelyReadable(p: string, cwd: string, state?: TrustedDirState): boolean {
   if (p === UNKNOWN_PATH) return false;
   const real = realPath(p);
-  const project = !isHomeOrAncestor(cwd) &&
-    (isInsideExact(p, cwd) || isInsideExact(p, realPath(cwd))) && isInsideExact(real, realPath(cwd));
+  const project = isProjectPath(p, cwd);
   const publicPath = PUBLIC_DIRS.some((d) => isInsideExact(p, d) && isInsideExact(real, realPath(d))) || isPiCodePath(p) || !!trustedDirFor(p, false, state);
   return (project || publicPath) && !isHardLinked(p);
 }
@@ -728,8 +758,8 @@ export function walkBounded(root: string, fn: (path: string, name: string) => vo
  * `complete` is false when the tree was too large or deep to check; build and dependency directories are included,
  * because `grep -r` reads them too.
  */
-export function secretFilesUnder(root: string): { files: string[]; complete: boolean } {
-  return memo(`secrets:${root}`, () => {
+export function secretFilesUnder(root: string, projectRoot?: string): { files: string[]; complete: boolean } {
+  return memo(`secrets:${root}:${projectRoot ?? ""}`, () => {
     const files: string[] = [];
     if (isHomeOrAncestor(root)) return { files: [root], complete: true };
     let uncertain = false;
@@ -741,7 +771,7 @@ export function secretFilesUnder(root: string): { files: string[]; complete: boo
         } else {
           if (sensitiveOne(p)) files.push(p);
           // A hard link can expose a secret through an innocuous name; its other paths are unknown.
-          if (st.isFile() && st.nlink > 1) uncertain = true;
+          if (st.isFile() && st.nlink > 1 && !(projectRoot && isProjectHardlinkSafe(p, projectRoot))) uncertain = true;
         }
       } catch { uncertain = true; }
     }, 12, 20_000, new Set());
