@@ -1,9 +1,9 @@
 import http from "node:http";
 import fs from "node:fs";
 import { createHash } from "node:crypto";
-import { mkdtempSync as createTempDir, mkdirSync, readFileSync, existsSync, writeFileSync, appendFileSync, symlinkSync, linkSync, readdirSync, rmSync, renameSync, statSync, lstatSync, utimesSync } from "node:fs";
+import { mkdtempSync as createTempDir, mkdirSync, readFileSync, existsSync, writeFileSync, appendFileSync, symlinkSync, linkSync, readdirSync, rmSync, renameSync, statSync, lstatSync, realpathSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
 import { syncBuiltinESMExports } from "node:module";
@@ -1536,6 +1536,26 @@ name: visible
   rmSync(join(ignoreDir, "ignore"));
   writeFileSync(join(repo, ".git", "config"), "[core]\n\texcludesFile = /tmp/custom-git-ignore\n");
   ok("rg: custom Git excludes file is treated as unknown", !!check());
+}
+
+// Exercise the same Git directory resolution against a worktree created by Git itself.
+{
+  const root = mkdtempSync(join(tmpdir(), "guard-real-worktree-"));
+  const repo = join(root, "repo");
+  const linked = join(root, "linked");
+  const gitEnv = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_AUTHOR_NAME: "Guard Test", GIT_AUTHOR_EMAIL: "guard@example.invalid", GIT_COMMITTER_NAME: "Guard Test", GIT_COMMITTER_EMAIL: "guard@example.invalid" };
+  const git = (...args: string[]) => execFileSync("git", args, { env: gitEnv, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  git("init", "--quiet", repo);
+  git("-C", repo, "commit", "--quiet", "--allow-empty", "-m", "fixture");
+  git("-C", repo, "worktree", "add", "--quiet", "-b", "fixture-worktree", linked);
+  const exclude = join(repo, ".git", "info", "exclude");
+  const gitExclude = resolve(linked, git("-C", linked, "rev-parse", "--git-path", "info/exclude").trim());
+  writeFileSync(exclude, "ordinary-ignore\n");
+  clearPathCache();
+  const normal = gitConfigIsSafe(linked) && !ignoreFilesReinclude(linked);
+  writeFileSync(exclude, "!.env\n");
+  clearPathCache();
+  ok("rg: Git-created worktree uses its common exclude file", realpathSync(gitExclude) === realpathSync(exclude) && normal && gitConfigIsSafe(linked) && ignoreFilesReinclude(linked));
 }
 
 // ---------- review 22 ----------
