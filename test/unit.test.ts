@@ -2163,6 +2163,12 @@ const run = async (toolName: string, input: any) => h.tool_call({ type: "tool_ca
   Object.setPrototypeOf(customArray, { map() { customMapCalled = true; return []; } });
   const customArrayResult = await run("custom-unserializable", { values: customArray });
   ok("int: arrays with custom prototypes are blocked without invoking their methods", customArrayResult?.block === true && customArrayResult.reason.includes("input could not be inspected") && !customMapCalled);
+  const hiddenProperty = Object.defineProperty({}, "hidden", { value: "opaque-hidden-value", enumerable: false });
+  const extraArrayProperty = Object.assign(["x"], { extra: "opaque-extra-value" });
+  for (const input of [hiddenProperty, { values: extraArrayProperty }, { value: new Date(0) }]) {
+    const result = await run("custom-unserializable", input);
+    ok("int: tool input with JSON-invisible or non-plain data is blocked", result?.block === true && result.reason.includes("input could not be inspected") && !/opaque-(hidden|extra)-value/.test(JSON.stringify(tail(1))));
+  }
   const previousResponder = responder;
   responder = (body) => ({ answers: answersFor([1, 0, 0, 0, 0])(body) });
   try {
