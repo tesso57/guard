@@ -4636,6 +4636,24 @@ const fuzzyResult = await h.tool_call({ type: "tool_call", toolCallId: "fuzzy2",
 ok("int: running a fuzzy-edited script requires confirmation", fuzzyResult?.block === true && selectScript.length === 0 && calls.some((c) => JSON.stringify(guardContext(c.body)).includes("contents unknown")));
 await h.agent_end({ type: "agent_end" }, ctx);
 
+const largeBatchEdits = Array.from({ length: 3000 }, (_, index) => ({ oldText: `key${String(index).padStart(5, "0")}END`, newText: `val${String(index).padStart(5, "0")}END` }));
+writeFileSync(join(PROJ, "many-edits.sh"), largeBatchEdits.map((edit) => edit.oldText).join("\n"));
+calls = [];
+const largeBatchCalls = [
+  { type: "toolCall", id: "many-edits-edit", name: "edit", arguments: { path: "many-edits.sh", edits: largeBatchEdits } },
+  { type: "toolCall", id: "many-edits-run", name: "bash", arguments: { command: "sh many-edits.sh" } },
+];
+await h.message_end({ type: "message_end", message: { role: "assistant", content: largeBatchCalls } }, ctx);
+const largeBatchEntry = { type: "message", message: { role: "assistant", content: largeBatchCalls } };
+branch.push(largeBatchEntry);
+selectScript = [["Deny"]];
+inputs = [""];
+const largeBatchResult = await h.tool_call({ type: "tool_call", toolCallId: "many-edits-run", toolName: "bash", input: largeBatchCalls[1].arguments }, ctx);
+ok("int: exceeding the edit prediction budget requires confirmation with unknown contents", largeBatchResult?.block === true && selectScript.length === 0 && calls.some((c) => cmdOf(c.body) === "sh many-edits.sh" && JSON.stringify(guardContext(c.body)).includes("contents unknown")));
+await h.agent_end({ type: "agent_end" }, ctx);
+branch.splice(branch.indexOf(largeBatchEntry), 1);
+rmSync(join(PROJ, "many-edits.sh"));
+
 // benign script run in the same message still needs confirmation
 responder = (b) => ({ answers: answersFor([0.95, 0.05, 0, 0, 0])(b) });
 const tcs3 = [
