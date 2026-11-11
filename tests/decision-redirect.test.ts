@@ -8,6 +8,8 @@ import { callDecisions } from "../extensions/guard/judge.ts";
 test("judgement requests do not follow redirects", async () => {
   const previousKey = process.env.GUARD_OPENAI_API_KEY;
   process.env.GUARD_OPENAI_API_KEY = "fixture-key";
+  // Node can enable an environment proxy before this test starts.
+  const restoreProxy = http.setGlobalProxyFromEnv?.({ http_proxy: "http://127.0.0.1:1", https_proxy: "http://127.0.0.1:1", no_proxy: "127.0.0.1,localhost" });
   let forwarded = 0;
   const destination = http.createServer((_req, res) => { forwarded++; res.end('{"answers":[]}'); });
   let location = "";
@@ -30,6 +32,7 @@ test("judgement requests do not follow redirects", async () => {
       assert.equal(forwarded, 0);
     }
   } finally {
+    restoreProxy?.();
     if (previousKey === undefined) delete process.env.GUARD_OPENAI_API_KEY;
     else process.env.GUARD_OPENAI_API_KEY = previousKey;
     for (const server of [source, destination]) {
