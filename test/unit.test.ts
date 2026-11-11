@@ -1514,7 +1514,7 @@ name: visible
   writeFileSync(join(commonGitDir, "info", "exclude"), "!.env\n");
   writeFileSync(join(repo, ".git", "commondir"), commonGitDir);
   clearPathCache();
-  ok("rg: common Git directory exclusions are inspected even when .git is a directory", ignoreFilesReinclude(repo));
+  ok("rg: common Git directory exclusions are inspected even when .git is a directory", gitConfigIsSafe(repo) && ignoreFilesReinclude(repo));
   rmSync(join(repo, ".git", "commondir"));
   const linkedRepo = mkdtempSync(join(tmpdir(), "guard-linked-repo-"));
   const linkedGitDir = join(commonGitDir, "worktrees", "linked");
@@ -1522,7 +1522,10 @@ name: visible
   writeFileSync(join(linkedRepo, ".git"), `gitdir: ${linkedGitDir}\n`);
   writeFileSync(join(linkedGitDir, "commondir"), "../..\n");
   clearPathCache();
-  ok("rg: linked worktrees resolve relative common Git directories", ignoreFilesReinclude(linkedRepo));
+  ok("rg: linked worktrees resolve relative common Git directories", gitConfigIsSafe(linkedRepo) && ignoreFilesReinclude(linkedRepo));
+  writeFileSync(join(commonGitDir, "info", "exclude"), "ordinary-ignore\n");
+  clearPathCache();
+  ok("rg: linked worktrees with ordinary common exclusions remain inspectable", gitConfigIsSafe(linkedRepo) && !ignoreFilesReinclude(linkedRepo));
   const ignoreDir = join(HOME, ".config", "git");
   mkdirSync(ignoreDir, { recursive: true });
   writeFileSync(join(ignoreDir, "ignore"), "!.env\n");
