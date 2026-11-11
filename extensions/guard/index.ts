@@ -887,6 +887,9 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("tool_call", async (event, ctx) => {
+    // Providers may reuse an ID; a blocked or disabled call must not inherit
+    // drift tracking from an earlier allowed call with that ID.
+    judged.delete(event.toolCallId);
     if (cfg.disabled || !enabled) return;
     const tool = event.toolName;
     const input: any = event.input;
@@ -962,7 +965,6 @@ export default function (pi: ExtensionAPI) {
       if (!store.hasErrors) retryRulesVersion = store.version;
     } catch { /* no retry shortcut when rules cannot be refreshed */ }
     const retryKey = stableHash([hash, ctx.cwd, trustAvailable ? trusted : "unavailable", session, trustedDirs.version, retryRulesVersion]);
-    judged.set(event.toolCallId, { hash, session });
     const what = preview(tool, input);
     const risk = a.verdict?.risk;
     const tag = `${a.source}${risk !== undefined ? ` ${risk.toFixed(1)}` : ""}${a.verdict?.category ? ` ${a.verdict.category}` : ""}`;
@@ -972,6 +974,7 @@ export default function (pi: ExtensionAPI) {
     const rec = { session, tool, preview: judgementAborted ? `${tool} [arguments withheld: judgement was aborted]` : inputChanged ? `${tool} [arguments withheld: input changed during judgement]` : batch.problem ? `${tool} [arguments withheld: invalid tool batch]` : shellChangedDuringJudgement ? `${tool} [arguments withheld: shell environment changed during judgement]` : contextChangedDuringJudgement ? `${tool} [arguments withheld: judgement context changed]` : policyChangedDuringJudgement ? `${tool} [arguments withheld: filesystem policy changed]` : auditPreview(ctx, tool, input), action: a.action, source: a.source, reasons: a.auditReasons ?? a.reasons, risk, ruleIds: a.rules?.map((r) => r.id) };
 
     const onAllowed = () => {
+      judged.set(event.toolCallId, { hash, session });
       consecutiveBlocks = 0;
       // Files this call changes; running them later attaches their new contents
       try {
