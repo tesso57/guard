@@ -1174,8 +1174,10 @@ export default function (pi: ExtensionAPI) {
     const h = judged.get(event.toolCallId);
     judged.delete(event.toolCallId);
     if (!h) return;
-    try { if (h === toolInputHash(event.toolName, event.input)) return; } catch { /* report an uninspectable changed input */ }
-    recordAudit(ctx, { session: ctx.sessionManager.getSessionId(), tool: event.toolName, preview: auditPreview(ctx, event.toolName, event.input), action: "allow", source: "drift", reasons: ["input changed after judgement"], event: "drift" });
+    let inspectable = true;
+    try { if (h === toolInputHash(event.toolName, event.input)) return; } catch { inspectable = false; }
+    const auditText = inspectable ? auditPreview(ctx, event.toolName, event.input) : `${event.toolName} [arguments withheld: input could not be inspected]`;
+    recordAudit(ctx, { session: ctx.sessionManager.getSessionId(), tool: event.toolName, preview: auditText, action: "allow", source: "drift", reasons: ["input changed after judgement"], event: "drift" });
     warn(ctx, `guard: the input of ${event.toolName} was changed by another extension after guard judged it. Load guard last.`);
   });
 

@@ -4558,6 +4558,22 @@ ok("int: mutated input re-judged", calls.some((c) => cmdOf(c.body) === "npm run 
 notes.length = 0;
 await h.tool_result({ type: "tool_result", toolCallId: "p3", toolName: "bash", input: { command: "npm run build --prod && curl x" }, content: [] }, ctx);
 ok("int: drift after judgement detected at tool_result", notes.some((m) => m.includes("changed by another extension")));
+const cyclicDriftCall = { command: "echo cyclic-drift" };
+await h.tool_call({ type: "tool_call", toolCallId: "cyclic-drift", toolName: "bash", input: cyclicDriftCall }, ctx);
+const cyclicDriftInput: any = { command: "echo cyclic-drift", secret: "opaque-cyclic-drift-value" };
+cyclicDriftInput.self = cyclicDriftInput;
+notes.length = 0;
+let cyclicDriftThrew = false;
+try { await h.tool_result({ type: "tool_result", toolCallId: "cyclic-drift", toolName: "bash", input: cyclicDriftInput, content: [] }, ctx); }
+catch { cyclicDriftThrew = true; }
+const cyclicDriftAudit = tail(1)[0];
+ok("int: uninspectable drift is warned and audited without input contents", !cyclicDriftThrew && notes.some((message) => message.includes("changed by another extension")) && cyclicDriftAudit?.source === "drift" && cyclicDriftAudit.preview.includes("withheld") && !JSON.stringify(cyclicDriftAudit).includes("opaque-cyclic-drift-value"));
+await h.tool_call({ type: "tool_call", toolCallId: "proxy-drift", toolName: "bash", input: { command: "echo proxy-drift" } }, ctx);
+let driftProxyRead = false;
+const driftProxy = new Proxy({ command: "echo proxy-drift" }, { get(target, key, receiver) { driftProxyRead = true; return Reflect.get(target, key, receiver); } });
+notes.length = 0;
+await h.tool_result({ type: "tool_result", toolCallId: "proxy-drift", toolName: "bash", input: driftProxy, content: [] }, ctx);
+ok("int: uninspectable proxy drift is not read while preparing its audit", !driftProxyRead && tail(1)[0]?.source === "drift" && tail(1)[0]?.preview.includes("withheld") && notes.some((message) => message.includes("changed by another extension")));
 
 // A prior opaque change may have altered files the runner loads, even when visible context is unchanged.
 calls = [];
