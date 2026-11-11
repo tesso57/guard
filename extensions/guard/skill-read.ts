@@ -1,14 +1,14 @@
 import { statSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { types as utilTypes } from "node:util";
 import { AGENT_DIR } from "./config.ts";
 import { clearPathCache, isInsideExact, realPath, resolvePath } from "./paths.ts";
 import { inputPaths, inspectExecutablePath, usesRipgrepConfig } from "./policy.ts";
 import { isReadOnlyArgv, parseShell } from "./shell.ts";
 
-/** Only plain reads of Pi's standard skill locations bypass guard. */
-export function isSkillRead(tool: string, input: unknown, cwd: string): boolean {
+/** Only plain reads of standard skill locations or Pi-registered skill files bypass guard. */
+export function isSkillRead(tool: string, input: unknown, cwd: string, registeredSkills: readonly string[] = []): boolean {
   try {
     if (!input || typeof input !== "object" || utilTypes.isProxy(input)) return false;
     const key = tool === "read" ? "path" : tool === "bash" ? "command" : undefined;
@@ -21,7 +21,8 @@ export function isSkillRead(tool: string, input: unknown, cwd: string): boolean 
       roots.push(join(dir, ".agents", "skills"));
       if (dirname(dir) === dir) break;
     }
-    const inside = (path: string) => roots.some((root) => isInsideExact(realPath(path), realPath(root)) && (isInsideExact(path, root) || isInsideExact(path, realPath(root))));
+    const inside = (path: string) => roots.some((root) => isInsideExact(realPath(path), realPath(root)) && (isInsideExact(path, root) || isInsideExact(path, realPath(root)))) ||
+      registeredSkills.some((skill) => isAbsolute(skill) && realPath(skill) === realPath(path));
     if (tool === "read") {
       const path = resolvePath(cwd, field.value);
       return inside(path) && statSync(path).isFile();

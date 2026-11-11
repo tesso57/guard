@@ -21,6 +21,8 @@ test("only direct read-only access within standard skill directories bypasses gu
     assert.equal(isSkillRead("bash", { command: `cat '${skill}'; rm '${outside}'` }, cwd), false);
     assert.equal(isSkillRead("bash", { command: `cat '${join(cwd, ".agents", "skills", "example", "outside")}'` }, cwd), false);
     assert.equal(isSkillRead("write", { path: skill, content: "changed" }, cwd), false);
+    assert.equal(isSkillRead("read", { path: outside }, cwd, [outside]), true);
+    assert.equal(isSkillRead("read", { path: outside }, cwd, [join(cwd, "different.md")]), false);
     unlinkSync(skill);
     symlinkSync(outside, skill);
     assert.equal(isSkillRead("read", { path: skill }, cwd), false, "a retargeted path must not reuse a cached in-scope result");

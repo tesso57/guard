@@ -343,6 +343,11 @@ export default function (pi: ExtensionAPI) {
     return by && !trustProblem(tool) ? by : undefined;
   }
 
+  function registeredSkillPaths(): string[] {
+    try { return pi.getCommands().filter((command) => command.source === "skill" && typeof command.sourceInfo?.path === "string").map((command) => command.sourceInfo.path); }
+    catch { return []; }
+  }
+
   /** Other tool calls of the assistant message that contains callId, from the session branch. */
   function siblingsFromBranch(ctx: ExtensionContext, callId: string): BatchContext {
     const branch = ctx.sessionManager.getBranch() as any[];
@@ -883,8 +888,9 @@ export default function (pi: ExtensionAPI) {
     syncProject(ctx);
     preflightController = new AbortController();
     const preflightSignal = ctx.signal ? AbortSignal.any([ctx.signal, preflightController.signal]) : preflightController.signal;
+    const skillPaths = registeredSkillPaths();
     calls.forEach((c, i) => {
-      if (siblingsById.has(c.id) || isSkillRead(c.name, c.arguments, ctx.cwd) || trustedByExtension(c.name)) return;
+      if (siblingsById.has(c.id) || isSkillRead(c.name, c.arguments, ctx.cwd, skillPaths) || trustedByExtension(c.name)) return;
       const siblings = calls.slice(0, i);
       const peers = calls.filter((_, j) => j !== i);
       siblingsById.set(c.id, { earlier: siblings, peers, historyBoundary });
@@ -905,7 +911,7 @@ export default function (pi: ExtensionAPI) {
     // drift tracking from an earlier allowed call with that ID.
     judged.delete(event.toolCallId);
     if (cfg.disabled || !enabled) return;
-    if (isSkillRead(event.toolName, event.input, ctx.cwd)) return;
+    if (isSkillRead(event.toolName, event.input, ctx.cwd, registeredSkillPaths())) return;
     const tool = event.toolName;
     const input: any = event.input;
     const onBlocked = (reason: string, retry: "ask-user" | "none" = "none") => {
