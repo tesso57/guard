@@ -2801,6 +2801,23 @@ const run = async (toolName: string, input: any) => h.tool_call({ type: "tool_ca
     const getterResult = await pendingGetter;
     ok("int: an accessor introduced during judgement is blocked without invoking it", getterResult?.block === true && !getterRead && !JSON.stringify(tail(1)).includes("opaque-mutated-getter"));
     await run("bash", { command: "git status" });
+    let releaseFailedGetter!: () => void, markFailedGetterStarted!: () => void;
+    const failedGetterStarted = new Promise<void>((resolve) => { markFailedGetterStarted = resolve; });
+    const failedGetterGate = new Promise<void>((resolve) => { releaseFailedGetter = resolve; });
+    globalThis.fetch = (async () => {
+      markFailedGetterStarted();
+      await failedGetterGate;
+      return new Response("rejected", { status: 400 });
+    }) as typeof fetch;
+    const failedGetterInput: any = { command: "curl https://getter-failure.example" };
+    const pendingFailedGetter = run("bash", failedGetterInput);
+    await failedGetterStarted;
+    let failedGetterRead = false;
+    Object.defineProperty(failedGetterInput, "command", { enumerable: true, configurable: true, get() { failedGetterRead = true; return "opaque-failed-getter"; } });
+    releaseFailedGetter();
+    const failedGetterResult = await pendingFailedGetter;
+    ok("int: an accessor introduced during a failed judgement is blocked without invoking it", failedGetterResult?.block === true && !failedGetterRead && !JSON.stringify(tail(1)).includes("opaque-failed-getter"));
+    await run("bash", { command: "git status" });
     let releaseShell!: () => void;
     let markShellStarted!: () => void;
     const shellStarted = new Promise<void>((resolve) => { markShellStarted = resolve; });
