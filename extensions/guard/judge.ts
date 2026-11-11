@@ -242,6 +242,8 @@ export async function callDecisions(cfg: Config, body: unknown, signal?: AbortSi
       if (requestSignal.aborted) throw requestSignal.reason ?? new Error("aborted");
       const pending = fetch(`${cfg.baseUrl}/decisions`, {
         method: "POST",
+        // Never forward judgement context to a URL selected by the endpoint.
+        redirect: "manual",
         signal: requestSignal,
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
         body: serializedBody,
