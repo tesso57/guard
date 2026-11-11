@@ -1,4 +1,6 @@
 export type TextEdit = { oldText: string; newText: string };
+// Each edit scans both views; bound total synchronous search work per file.
+const MAX_SEARCH_CHARS = 100_000_000;
 
 /** Match Pi's fuzzy equivalence when checking whether an exact edit is unique. */
 function fuzzyComparable(text: string): string {
@@ -32,6 +34,7 @@ export function predictEdits(content: string, input: any): string | undefined {
   const crlf = raw.indexOf("\r\n") >= 0 && raw.indexOf("\r\n") === raw.indexOf("\n") - 1;
   const base = normalize(raw);
   const fuzzyBase = fuzzyComparable(base);
+  if (edits.length * (base.length + fuzzyBase.length) > MAX_SEARCH_CHARS) return undefined;
   const replacements: { start: number; end: number; text: string }[] = [];
   for (const edit of edits) {
     const oldText = normalize(edit.oldText);
@@ -45,8 +48,14 @@ export function predictEdits(content: string, input: any): string | undefined {
   }
   replacements.sort((a, b) => a.start - b.start);
   if (replacements.some((r, i) => i > 0 && replacements[i - 1].end > r.start)) return undefined;
-  let result = base;
-  for (const r of replacements.reverse()) result = result.slice(0, r.start) + r.text + result.slice(r.end);
+  const parts: string[] = [];
+  let cursor = 0;
+  for (const replacement of replacements) {
+    parts.push(base.slice(cursor, replacement.start), replacement.text);
+    cursor = replacement.end;
+  }
+  parts.push(base.slice(cursor));
+  const result = parts.join("");
   if (result === base) return undefined; // Pi rejects edits that make no changes.
   return bom + (crlf ? result.replace(/\n/g, "\r\n") : result);
 }

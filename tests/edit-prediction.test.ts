@@ -46,3 +46,13 @@ test("edits that leave normalized content unchanged are not predicted as success
     assert.equal(predictEdits(content, input), undefined);
   }
 });
+
+test("large edit batches fall back to confirmation instead of monopolizing the event loop", () => {
+  const edits = Array.from({ length: 3000 }, (_, index) => ({
+    oldText: `key${String(index).padStart(5, "0")}END`,
+    newText: `val${String(index).padStart(5, "0")}END`,
+  }));
+  const content = edits.map((edit) => edit.oldText).join("\n");
+  assert.equal(predictEdits(content, { edits }), undefined);
+  assert.equal(predictEdits(content, { edits: edits.slice(0, 10) })?.startsWith("val00000END"), true);
+});

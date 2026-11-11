@@ -70,6 +70,8 @@ As soon as an assistant message ends, guard starts assessing up to its first eig
 
 After the checks, pi can execute calls from the same message concurrently. A confirmation does not make an earlier write finish before a later command runs; request separate agent turns when one operation depends on another's result.
 
+Edit prediction has a bounded search budget. If a large batch exceeds it, guard treats the resulting file contents as unknown and requires confirmation before running the affected file.
+
 A message containing more than 128 tool calls exceeds guard's batch inspection limit. Calls in such a message, or in a message with duplicate or invalid tool call IDs, are blocked rather than assessed with incomplete sibling context; split the work across messages or retry with unique IDs.
 
 After changes guard cannot enumerate, script runners are judged again on each call instead of reusing a cached verdict. Configuring `bash` in `skipModelTools` does not skip the full judgement when the call may run changed files.
