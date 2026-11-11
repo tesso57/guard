@@ -139,6 +139,20 @@ export function globHitsOptionLikeName(cwd: string, pattern: string): boolean {
   return g.truncated || g.list.some((w) => w.startsWith("-"));
 }
 
+/** Resolve a repository's Git directory and its shared worktree directory. */
+function gitDirectories(root: string): { gitdir: string; common: string } {
+  const dotgit = join(root, ".git");
+  let gitdir = dotgit;
+  if (!statSync(dotgit).isDirectory()) {
+    const match = /^gitdir:\s*(.+)$/m.exec(readRegularText(dotgit));
+    if (!match) throw new Error("invalid git directory reference");
+    gitdir = resolve(root, match[1].trim());
+  }
+  const commonFile = join(gitdir, "commondir");
+  const common = existsSync(commonFile) ? resolve(gitdir, readRegularText(commonFile).trim()) : gitdir;
+  return { gitdir, common };
+}
+
 /**
  * Whether ripgrep may search hidden files under root although it skips them by default: ignore files can
  * re-include them with `!` patterns.
@@ -157,18 +171,9 @@ export function ignoreFilesReinclude(root: string): boolean {
     if (home) check(join(process.env.XDG_CONFIG_HOME || join(home, ".config"), "git", "ignore"));
     for (let d = root; ; d = dirname(d)) {
       for (const n of [".ignore", ".rgignore", ".gitignore"]) check(join(d, n));
-      const dotgit = join(d, ".git");
       try {
-        if (statSync(dotgit).isDirectory()) check(join(dotgit, "info", "exclude"));
-        else {
-          const m = /^gitdir:\s*(.+)$/m.exec(readRegularText(dotgit));
-          if (!m) found = true;
-          else {
-            const gitdir = resolve(d, m[1].trim());
-            const common = existsSync(join(gitdir, "commondir")) ? resolve(gitdir, readRegularText(join(gitdir, "commondir")).trim()) : gitdir;
-            check(join(common, "info", "exclude"));
-          }
-        }
+        const { common } = gitDirectories(d);
+        check(join(common, "info", "exclude"));
       } catch (e: any) { if (e?.code !== "ENOENT" && e?.code !== "ENOTDIR") found = true; }
       if (dirname(d) === d || isHomeOrAncestor(d)) break;
     }
@@ -875,14 +880,7 @@ export function gitConfigIsSafe(cwd: string): boolean {
     const dotgit = join(d, ".git");
     if (existsSync(dotgit)) {
       try {
-        let gitdir = dotgit;
-        if (!statSync(dotgit).isDirectory()) {
-          // worktrees and submodules: ".git" is a file pointing at the real git directory
-          const m = /^gitdir:\s*(.+)$/m.exec(readRegularText(dotgit));
-          if (!m) return false;
-          gitdir = resolve(d, m[1].trim());
-        }
-        const common = existsSync(join(gitdir, "commondir")) ? resolve(gitdir, readRegularText(join(gitdir, "commondir")).trim()) : gitdir;
+        const { gitdir, common } = gitDirectories(d);
         // Submodules have their own configs, which `git status` in the parent also honors
         if (existsSync(join(common, "modules")) || existsSync(join(d, ".gitmodules"))) return false;
         // Some hooks run on read-only commands (post-index-change on `git status`); any real hook makes git unsafe
