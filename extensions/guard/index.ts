@@ -589,10 +589,15 @@ export default function (pi: ExtensionAPI) {
   async function assess(callId: string, tool: string, input: any, ctx: ExtensionContext, opts: { signal?: AbortSignal; siblings?: ToolCallLike[]; peers?: ToolCallLike[]; historyBoundary?: number; stateRechecks?: number } = {}): Promise<Assessment> {
     const config = cfg;
     const epoch = stateEpoch;
+    const inputHash = toolInputHash(tool, input);
     clearPathCache();
     const parsed = tool === "bash" ? parseShell(String(input?.command ?? "")) : undefined;
     const roots = protectedRoots(ctx.cwd, ctx.sessionManager.getSessionDir());
     const base = { rememberAllow: false, globalAllow: false };
+    const inputChanged = () => {
+      try { return toolInputHash(tool, input) !== inputHash; } catch { return true; }
+    };
+    const changedInput = (): Assessment => ({ ...base, action: "block", source: "error", reasons: ["input changed during judgement"] });
     const recheck = (): Promise<Assessment> => (opts.stateRechecks ?? 0) >= MAX_STATE_RECHECKS
       ? Promise.resolve({ ...base, action: "block", source: "error", reasons: ["rules or settings changed repeatedly during judgement"] })
       : assess(callId, tool, input, ctx, { ...opts, stateRechecks: (opts.stateRechecks ?? 0) + 1 });
@@ -690,6 +695,7 @@ export default function (pi: ExtensionAPI) {
       if (!process.env.GUARD_OPENAI_API_KEY) return { ...base, action: "allow", source: "rule-allow", reasons: [...reasons, "rules-only mode (no API key)"], auditReasons: [...auditReasons, "rules-only mode (no API key)"], rules: rule.rules };
       try {
         const v = await judgeWithModel(tool, input, ctx, callId, cx, [], true, judgementStateKey, opts.signal);
+        if (inputChanged()) return changedInput();
         if (stateEpoch !== epoch) return sessionChanged();
         if (shellChanged()) return changedShell();
         if (stateChanged()) return recheck();
@@ -699,6 +705,7 @@ export default function (pi: ExtensionAPI) {
         return { ...base, action: v.action, source: "model", reasons: [...v.reasons, "(matches an allow rule, but failed the light check)"], verdict: v, denyPatterns };
       } catch (e: any) {
         if (opts.signal?.aborted) throw e;
+        if (inputChanged()) return changedInput();
         if (stateEpoch !== epoch) return sessionChanged();
         if (shellChanged()) return changedShell();
         if (stateChanged()) return recheck();
@@ -731,6 +738,7 @@ export default function (pi: ExtensionAPI) {
 
     try {
       const v = await judgeWithModel(tool, input, ctx, callId, judgeContext, past, false, judgementStateKey, opts.signal);
+      if (inputChanged()) return changedInput();
       if (stateEpoch !== epoch) return sessionChanged();
       if (shellChanged()) return changedShell();
       if (stateChanged()) return recheck();
@@ -769,6 +777,7 @@ export default function (pi: ExtensionAPI) {
       return a;
     } catch (e: any) {
       if (opts.signal?.aborted) throw e;
+      if (inputChanged()) return changedInput();
       if (stateEpoch !== epoch) return sessionChanged();
       if (shellChanged()) return changedShell();
       if (stateChanged()) return recheck();
@@ -965,7 +974,7 @@ export default function (pi: ExtensionAPI) {
       if (!store.hasErrors) retryRulesVersion = store.version;
     } catch { /* no retry shortcut when rules cannot be refreshed */ }
     const retryKey = stableHash([hash, ctx.cwd, trustAvailable ? trusted : "unavailable", session, trustedDirs.version, retryRulesVersion]);
-    const what = preview(tool, input);
+    const what = inputChanged || judgementAborted || batch.problem ? `${tool} [arguments withheld: input could not be inspected]` : preview(tool, input);
     const risk = a.verdict?.risk;
     const tag = `${a.source}${risk !== undefined ? ` ${risk.toFixed(1)}` : ""}${a.verdict?.category ? ` ${a.verdict.category}` : ""}`;
     const shellChangedDuringJudgement = a.source === "error" && a.reasons[0] === "shell environment or executable lookup changed during judgement";
