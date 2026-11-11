@@ -435,9 +435,13 @@ export default function (pi: ExtensionAPI) {
       }
       concurrentPaths.set(target, [p]);
       if (s.name === "write") {
-        const content = String(s.arguments.content ?? "");
-        if (Buffer.byteLength(content, "utf8") >= MAX_FILE_BYTES) { virtual.delete(p); unknownEdits.add(p); }
-        else { virtual.set(p, content); unknownEdits.delete(p); }
+        const value = s.arguments.content;
+        // Pi coerces JSON primitives to strings, but rejects missing and structured values.
+        if (value === null || typeof value === "string" || typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value))) {
+          const content = String(value);
+          if (Buffer.byteLength(content, "utf8") < MAX_FILE_BYTES) { virtual.set(p, content); unknownEdits.delete(p); }
+          else { virtual.delete(p); unknownEdits.add(p); }
+        } else { virtual.delete(p); unknownEdits.add(p); }
       }
       if (s.name === "edit") {
         if (concurrentPaths.size > MAX_ATTACHED_FILES) { unknownEdits.add(p); continue; }

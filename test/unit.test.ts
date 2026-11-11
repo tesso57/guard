@@ -4669,6 +4669,26 @@ ok("int: a concurrent write above the byte limit has unknown contents", multibyt
 await h.agent_end({ type: "agent_end" }, ctx);
 branch.splice(branch.indexOf(multibyteEntry), 1);
 
+for (const [label, content, expected] of [["null", null, "null"], ["invalid", { toString: "not callable" }, "contents unknown"]] as const) {
+  const path = `coerced-${label}.sh`;
+  const peerCalls = [
+    { type: "toolCall", id: `coerced-${label}-write`, name: "write", arguments: { path, content } },
+    { type: "toolCall", id: `coerced-${label}-run`, name: "bash", arguments: { command: `sh ${path}` } },
+  ];
+  calls = [];
+  await h.message_end({ type: "message_end", message: { role: "assistant", content: peerCalls } }, ctx);
+  const entry = { type: "message", message: { role: "assistant", content: peerCalls } };
+  branch.push(entry);
+  selectScript = [["Deny"]];
+  inputs = [""];
+  const result = await h.tool_call({ type: "tool_call", toolCallId: `coerced-${label}-run`, toolName: "bash", input: peerCalls[1].arguments }, ctx);
+  const request = calls.find((call) => cmdOf(call.body) === `sh ${path}`)?.body;
+  const files = request ? Object.values(guardContext(request).files ?? {}) : [];
+  ok(`int: concurrent ${label} write uses Pi-compatible content or stays unknown`, result?.block === true && selectScript.length === 0 && files.some((value) => typeof value === "string" && value.includes(expected)));
+  await h.agent_end({ type: "agent_end" }, ctx);
+  branch.splice(branch.indexOf(entry), 1);
+}
+
 // benign script run in the same message still needs confirmation
 responder = (b) => ({ answers: answersFor([0.95, 0.05, 0, 0, 0])(b) });
 const tcs3 = [
