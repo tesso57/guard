@@ -4689,6 +4689,21 @@ for (const [label, content, expected] of [["null", null, "null"], ["invalid", { 
   branch.splice(branch.indexOf(entry), 1);
 }
 
+const numericPathCalls = [
+  { type: "toolCall", id: "numeric-path-write", name: "write", arguments: { path: 123, content: "echo numeric-peer\n" } },
+  { type: "toolCall", id: "numeric-path-run", name: "bash", arguments: { command: "sh 123" } },
+];
+calls = [];
+await h.message_end({ type: "message_end", message: { role: "assistant", content: numericPathCalls } }, ctx);
+const numericPathEntry = { type: "message", message: { role: "assistant", content: numericPathCalls } };
+branch.push(numericPathEntry);
+selectScript = [["Deny"]];
+inputs = [""];
+const numericPathResult = await h.tool_call({ type: "tool_call", toolCallId: "numeric-path-run", toolName: "bash", input: numericPathCalls[1].arguments }, ctx);
+ok("int: numeric peer paths use Pi's coerced path and require confirmation", numericPathResult?.block === true && selectScript.length === 0 && calls.some((call) => cmdOf(call.body) === "sh 123" && JSON.stringify(guardContext(call.body)).includes("numeric-peer")));
+await h.agent_end({ type: "agent_end" }, ctx);
+branch.splice(branch.indexOf(numericPathEntry), 1);
+
 // benign script run in the same message still needs confirmation
 responder = (b) => ({ answers: answersFor([0.95, 0.05, 0, 0, 0])(b) });
 const tcs3 = [

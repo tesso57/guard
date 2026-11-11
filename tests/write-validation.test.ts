@@ -13,4 +13,8 @@ test("Pi write validation coerces primitives and rejects structured content", ()
     assert.throws(() => validateToolArguments(tool, { type: "toolCall", id: "fixture", name: "write", arguments: { path: "file", content } }));
   }
   assert.throws(() => validateToolArguments(tool, { type: "toolCall", id: "fixture", name: "write", arguments: { path: "file" } }));
+  for (const [path, expected] of [[123, "123"], [null, "null"], [true, "true"]] as const) {
+    const result = validateToolArguments(tool, { type: "toolCall", id: "fixture", name: "write", arguments: { path, content: "data" } });
+    assert.equal(result.path, expected);
+  }
 });

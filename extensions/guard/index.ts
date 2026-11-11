@@ -23,7 +23,7 @@ import { MAX_FILE_BYTES, readBoundedText } from "./files.ts";
 import { buildRequest, callDecisions, evaluate, MAX_ATTACHED_FILES, type ModelVerdict } from "./judge.ts";
 import { redact } from "./redact.ts";
 import { clearPathCache, createTrustedDirState, isFreelyReadable, listTrustedDirs, trustDir, type TrustedDirState, isHardLinked, isInsideExact, pathLikeTokens, pathVariants, protectedReason, protectedRoots, realPath, recentlyChangedFiles, resolvePath, sensitiveReason } from "./paths.ts";
-import { BUILTIN_TOOLS, hardDeny, hasUninspectedToolInput, inputPaths, inspectExecutablePath, pathsStayInProject, safeAllow, searchNeedsJudgement, sensitive, usesRipgrepConfig, writesStayPlain } from "./policy.ts";
+import { BUILTIN_TOOLS, hardDeny, hasUninspectedToolInput, inputPaths, inspectExecutablePath, pathsStayInProject, piString, safeAllow, searchNeedsJudgement, sensitive, usesRipgrepConfig, writesStayPlain } from "./policy.ts";
 import { type Decision, deriveDenyPatterns, derivePatterns, describeMatch, globalAllowPatternIsReadOnly, type Match, newId, type Rule, RuleStore, type Scope, supportsAnyInputAllow } from "./rules.ts";
 import { isReadOnlyArgv, normalizeArgv, type Parsed, parseShell } from "./shell.ts";
 import { confirmDialog, displayText, preview } from "./ui.ts";
@@ -424,7 +424,8 @@ export default function (pi: ExtensionAPI) {
     const concurrentPaths = new Map<string, string[]>();
     // Only bash assessments attach project files; other tools need history, not edit predictions.
     for (const s of tool === "bash" ? peers : []) {
-      const p = typeof s.arguments?.path === "string" ? resolvePath(ctx.cwd, s.arguments.path) : undefined;
+      const path = piString(s.arguments?.path);
+      const p = path === undefined ? undefined : resolvePath(ctx.cwd, path);
       if (!p || (s.name !== "write" && s.name !== "edit")) continue;
       const target = realPath(p);
       const aliases = concurrentPaths.get(target);
@@ -435,10 +436,8 @@ export default function (pi: ExtensionAPI) {
       }
       concurrentPaths.set(target, [p]);
       if (s.name === "write") {
-        const value = s.arguments.content;
-        // Pi coerces JSON primitives to strings, but rejects missing and structured values.
-        if (value === null || typeof value === "string" || typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value))) {
-          const content = String(value);
+        const content = piString(s.arguments.content);
+        if (content !== undefined) {
           if (Buffer.byteLength(content, "utf8") < MAX_FILE_BYTES) { virtual.set(p, content); unknownEdits.delete(p); }
           else { virtual.delete(p); unknownEdits.add(p); }
         } else { virtual.delete(p); unknownEdits.add(p); }

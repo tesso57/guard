@@ -267,6 +267,12 @@ export function hasUninspectedToolInput(tool: string, input: unknown): boolean {
   return !BUILTIN_TOOLS.has(tool) && allStrings(input).some((value) => value.length >= 16 * 1024);
 }
 
+/** Pi's validator coerces JSON primitives for required string arguments. */
+export function piString(value: unknown): string | undefined {
+  if (value === null || typeof value === "string" || typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value))) return String(value);
+  return undefined;
+}
+
 /**
  * The paths a tool call reads and writes, as absolute paths.
  * For bash, `cd` is followed so `cd ~/.pi && printf x >> agent/guard/rules.jsonl` resolves correctly.
@@ -312,9 +318,11 @@ function computeInputPaths(tool: string, input: any, cwd: string, parsed?: Parse
     return { reads: ps, writes: ps };
   }
   const p: string[] = [];
-  for (const k of ["path", "file_path", "filePath", "file", "dir", "directory"]) if (typeof input?.[k] === "string") {
-    p.push(...pathVariants(cwd, input[k]));
-    if (tool === "read") p.push(...readFallbackVariants(cwd, input[k]));
+  for (const k of ["path", "file_path", "filePath", "file", "dir", "directory"]) {
+    const value = k === "path" && (tool === "write" || tool === "edit") ? piString(input?.[k]) : typeof input?.[k] === "string" ? input[k] : undefined;
+    if (value === undefined) continue;
+    p.push(...pathVariants(cwd, value));
+    if (tool === "read") p.push(...readFallbackVariants(cwd, value));
   }
   if (tool === "edit" || tool === "write") return { reads: [], writes: p };
   return { reads: p, writes: [] };
