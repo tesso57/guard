@@ -1538,6 +1538,20 @@ name: visible
   ok("rg: custom Git excludes file is treated as unknown", !!check());
 }
 
+{
+  const repo = mkdtempSync(join(tmpdir(), "guard-rg-list-"));
+  writeFileSync(join(repo, "visible.pem"), "fixture secret");
+  const inspect = (command: string) => {
+    clearPathCache();
+    const parsed = P(command);
+    return { sensitive: sensitive("bash", { command }, repo, protectedRoots(repo), parsed), safe: safeAllow("bash", { command }, repo, O, parsed) };
+  };
+  ok("rg: listing project files does not inspect their contents", !inspect("rg --files").sensitive && inspect("rg --files").safe);
+  ok("rg: --files used as an option value remains a content search", !!inspect("rg -e --files .").sensitive);
+  ok("rg: --files after -- remains a search pattern", !!inspect("rg -- --files .").sensitive);
+  ok("rg: explicitly naming a sensitive file still requires confirmation", !!inspect("rg --files visible.pem").sensitive);
+}
+
 // Exercise the same Git directory resolution against a worktree created by Git itself.
 {
   const root = mkdtempSync(join(tmpdir(), "guard-real-worktree-"));
@@ -2174,6 +2188,25 @@ branch.push({ type: "message", message: { role: "user", content: "run the tests 
 
 let n = 0;
 const run = async (toolName: string, input: any) => h.tool_call({ type: "tool_call", toolCallId: `c${++n}`, toolName, input }, ctx);
+
+{
+  const skillDir = join(PROJ, ".agents", "skills", "guard-bypass-test");
+  mkdirSync(skillDir, { recursive: true });
+  const skillFile = join(skillDir, "SKILL.md");
+  writeFileSync(skillFile, "skill fixture");
+  await command.handler("rules add deny session cat", ctx);
+  const denyId = branch.findLast((entry) => entry.customType === "guard-rule" && entry.data?.rule?.decision === "deny" && entry.data?.rule?.match?.prefix?.[0] === "cat")?.data?.rule?.id;
+  const beforeAudit = statSync(join(AGENT, "guard", "audit.jsonl")).size;
+  calls = [];
+  const cmd = `cat '${skillFile}'`;
+  const event = { type: "toolCall", id: "skill-skip", name: "bash", arguments: { command: cmd } };
+  await h.message_end({ type: "message_end", message: { role: "assistant", content: [event] } }, ctx);
+  const skipped = await h.tool_call({ type: "tool_call", toolCallId: event.id, toolName: event.name, input: event.arguments }, ctx);
+  ok("int: skill reads bypass guard even with a matching deny rule", !!denyId && skipped === undefined && calls.length === 0 && statSync(join(AGENT, "guard", "audit.jsonl")).size === beforeAudit);
+  await h.agent_end({ type: "agent_end" }, ctx);
+  await command.handler(`rules rm ${denyId}`, ctx);
+  rmSync(skillDir, { recursive: true });
+}
 
 {
   const circular: any = { value: "opaque-circular-input" };

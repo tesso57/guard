@@ -644,16 +644,17 @@ const RG_LONG_VALUES = new Set([
   "encoding", "file", "glob", "iglob", "max-columns", "max-count", "max-depth", "maxdepth", "max-filesize", "path-separator", "regexp",
   "replace", "sort", "sortr", "threads", "type", "type-not", "type-add", "type-clear", "dfa-size-limit", "regex-size-limit",
 ]);
-function rgOptionsAreKnown(a: string[]): boolean {
+function inspectRgOptions(a: string[]): { known: boolean; listsFiles: boolean } {
+  let listsFiles = false;
   for (let i = 1; i < a.length; i++) {
     const t = a[i];
-    if (t === "--") return true;
+    if (t === "--") break;
     if (!t.startsWith("-") || t === "-") continue;
     if (t.startsWith("--")) {
       const eq = t.indexOf("=");
       const name = t.slice(2, eq < 0 ? undefined : eq);
-      if (RG_LONG_FLAGS.has(name) && eq < 0) continue;
-      if (!RG_LONG_VALUES.has(name)) return false;
+      if (RG_LONG_FLAGS.has(name) && eq < 0) { if (name === "files") listsFiles = true; continue; }
+      if (!RG_LONG_VALUES.has(name)) return { known: false, listsFiles: false };
       if (eq < 0) i++;
       continue;
     }
@@ -663,10 +664,17 @@ function rgOptionsAreKnown(a: string[]): boolean {
         if (k === t.length - 1) i++;
         break;
       }
-      if (!RG_SHORT_FLAGS.has(c)) return false;
+      if (!RG_SHORT_FLAGS.has(c)) return { known: false, listsFiles: false };
     }
   }
-  return true;
+  return { known: true, listsFiles };
+}
+
+/** `--files` lists paths instead of searching their contents, when it is an actual option. */
+export function rgListsFiles(a: string[]): boolean {
+  if (a[0] !== "rg") return false;
+  const options = inspectRgOptions(a);
+  return options.known && options.listsFiles;
 }
 
 const READ_ONLY = new Set([
@@ -721,7 +729,7 @@ export function isReadOnlyArgv(raw: string[]): boolean {
       // An allowlist: rg keeps gaining options that run programs (--pre, --hostname-bin) or follow links out (-L)
       // Requiring it first avoids mistaking a pattern or an option value for a flag.
       if (process.env.RIPGREP_CONFIG_PATH && a[1] !== "--no-config") return false;
-      return rgOptionsAreKnown(a);
+      return inspectRgOptions(a).known;
     case "grep":
     case "egrep":
     case "fgrep":

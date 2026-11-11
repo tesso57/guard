@@ -26,6 +26,7 @@ import { clearPathCache, createTrustedDirState, isFreelyReadable, listTrustedDir
 import { BUILTIN_TOOLS, hardDeny, hasUninspectedToolInput, inputPaths, inspectExecutablePath, pathsStayInProject, piString, safeAllow, searchNeedsJudgement, sensitive, usesRipgrepConfig, writesStayPlain } from "./policy.ts";
 import { type Decision, deriveDenyPatterns, derivePatterns, describeMatch, globalAllowPatternIsReadOnly, type Match, newId, type Rule, RuleStore, type Scope, supportsAnyInputAllow } from "./rules.ts";
 import { isReadOnlyArgv, normalizeArgv, type Parsed, parseShell } from "./shell.ts";
+import { isSkillRead } from "./skill-read.ts";
 import { confirmDialog, displayText, preview } from "./ui.ts";
 
 const STATE_ENTRY = "guard-state";
@@ -883,7 +884,7 @@ export default function (pi: ExtensionAPI) {
     preflightController = new AbortController();
     const preflightSignal = ctx.signal ? AbortSignal.any([ctx.signal, preflightController.signal]) : preflightController.signal;
     calls.forEach((c, i) => {
-      if (siblingsById.has(c.id) || trustedByExtension(c.name)) return;
+      if (siblingsById.has(c.id) || isSkillRead(c.name, c.arguments, ctx.cwd) || trustedByExtension(c.name)) return;
       const siblings = calls.slice(0, i);
       const peers = calls.filter((_, j) => j !== i);
       siblingsById.set(c.id, { earlier: siblings, peers, historyBoundary });
@@ -904,6 +905,7 @@ export default function (pi: ExtensionAPI) {
     // drift tracking from an earlier allowed call with that ID.
     judged.delete(event.toolCallId);
     if (cfg.disabled || !enabled) return;
+    if (isSkillRead(event.toolName, event.input, ctx.cwd)) return;
     const tool = event.toolName;
     const input: any = event.input;
     const onBlocked = (reason: string, retry: "ask-user" | "none" = "none") => {
