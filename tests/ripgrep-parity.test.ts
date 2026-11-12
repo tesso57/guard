@@ -49,6 +49,16 @@ test("ripgrep visibility and guard decisions agree on representative searches", 
       if (result.stdout.split("\n").some((line) => line.endsWith("/.env"))) assert.equal(flagged, true, command);
       if (expectSafe) assert.equal(!flagged && safeAllow("bash", { command }, project, { trusted: true, touched: new Set() }, parsed), true, command);
     }
+    writeFileSync(join(project, ".ignore"), "!README.md\n");
+    writeFileSync(join(project, "README.md"), "needle\n");
+    const literalRule = spawnSync("rg", ["--no-config", "-l", "needle", "."], { cwd: project, encoding: "utf8" });
+    assert.equal(literalRule.status, 0);
+    assert.equal(literalRule.stdout.includes(".env"), false);
+    const literalCommand = "rg --no-config needle .";
+    clearPathCache();
+    const literalParsed = parseShell(literalCommand);
+    assert.equal(sensitive("bash", { command: literalCommand }, project, protectedRoots(project), literalParsed), undefined);
+    assert.equal(safeAllow("bash", { command: literalCommand }, project, { trusted: true, touched: new Set() }, literalParsed), true);
     const typeList = spawnSync("rg", ["--no-config", "--type-list"], { cwd: project, encoding: "utf8" });
     assert.equal(typeList.status, 0);
     clearPathCache();

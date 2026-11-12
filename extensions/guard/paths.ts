@@ -163,7 +163,8 @@ export function ignoreFilesReinclude(root: string, ignoreVcs = false, ignoreDot 
     let found = false;
     const check = (p: string) => {
       try {
-        if (/^\s*!/m.test(readRegularText(p))) found = true;
+        const text = readRegularText(p);
+        if (text.split("\n").some((line) => /^\s*!/.test(line) && !/^\s*![A-Za-z0-9_][A-Za-z0-9._-]*\s*$/.test(line))) found = true;
       } catch (e: any) { if (e?.code !== "ENOENT" && e?.code !== "ENOTDIR") found = true; }
     };
     // An unknown Git configuration may redirect core.excludesFile to an arbitrary ignore file.

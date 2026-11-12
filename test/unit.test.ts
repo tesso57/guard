@@ -1670,6 +1670,24 @@ name: visible
 }
 
 {
+  const repo = mkdtempSync(join(tmpdir(), "guard-rg-literal-reinclude-"));
+  writeFileSync(join(repo, ".env"), "needle\n");
+  writeFileSync(join(repo, "README.md"), "needle\n");
+  const inspect = () => {
+    const command = "rg needle .";
+    const parsed = P(command);
+    clearPathCache();
+    return !sensitive("bash", { command }, repo, protectedRoots(repo), parsed) && safeAllow("bash", { command }, repo, O, parsed);
+  };
+  writeFileSync(join(repo, ".ignore"), "!README.md\n");
+  ok("rg: re-including a literal non-hidden name does not expose hidden files", inspect());
+  writeFileSync(join(repo, ".ignore"), "!*.md\n");
+  ok("rg: wildcard re-inclusions remain conservative", !inspect());
+  writeFileSync(join(repo, ".ignore"), "!README.md\n!.env\n");
+  ok("rg: a literal hidden re-inclusion remains sensitive", !inspect());
+}
+
+{
   const repo = mkdtempSync(join(tmpdir(), "guard-rg-hidden-types-"));
   writeFileSync(join(repo, ".env"), "needle\n");
   const inspect = (command: string) => {
