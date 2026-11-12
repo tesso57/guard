@@ -200,25 +200,33 @@ export function inspectBuiltinSearchExecutable(tool: string, cwd: string): { ris
     }
   };
   try {
-    let candidate: string | undefined;
-    let relativeLookup = false;
+    let found = false;
+    let risk: string | undefined;
     let probes = 0;
-    if (existsSync(local)) { inspect(local, false); candidate = local; }
+    const inspectCandidate = (candidate: string, relativeLookup: boolean, requireExecutable: boolean) => {
+      if (!inspect(candidate, requireExecutable)) return;
+      found = true;
+      if (multipleLinks) risk ??= "the built-in search executable has multiple hard links";
+      else if (relativeLookup) risk ??= "the built-in search executable resolves through a relative PATH entry";
+      else if ([candidate, realPath(candidate)].some((p) => roots.some((root) => isInside(p, root))))
+        risk ??= "the built-in search tool resolves to a project, temporary or Pi-managed executable";
+    };
+    if (existsSync(local)) {
+      inspectCandidate(local, false, false);
+      // Pi chooses a present managed path without probing PATH, even if it cannot run.
+      if (!found) risk = "cannot inspect the Pi-managed search executable";
+    }
     else for (const name of names) {
       for (const entry of path.split(delimiter)) {
         if (++probes > 512) return { risk: "built-in search executable lookup exceeds the inspection limit" };
         const next = join(resolve(process.cwd(), entry || "."), name);
-        if (inspect(next, true)) { candidate = next; relativeLookup = !isAbsolute(entry); break; }
+        // An executable may fail to start (for example, its interpreter is missing), so Node can try later entries.
+        inspectCandidate(next, !isAbsolute(entry), true);
       }
-      if (candidate) break;
     }
     const fingerprint = createHash("sha256").update(JSON.stringify(selected)).digest("hex");
-    if (!candidate) return { risk: "the built-in search tool may download an executable", fingerprint };
-    if (multipleLinks) return { risk: "the built-in search executable has multiple hard links", fingerprint };
-    if (relativeLookup) return { risk: "the built-in search executable resolves through a relative PATH entry", fingerprint };
-    if ([candidate, realPath(candidate)].some((p) => roots.some((root) => isInside(p, root))))
-      return { risk: "the built-in search tool resolves to a project, temporary or Pi-managed executable", fingerprint };
-    return { fingerprint };
+    if (!found && !risk) risk = "the built-in search tool may download an executable";
+    return { risk, fingerprint };
   } catch { return { risk: "cannot inspect the built-in search executable" }; }
 }
 

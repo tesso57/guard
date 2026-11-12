@@ -185,6 +185,20 @@ if (process.platform !== "win32") {
   }
 }
 if (process.platform !== "win32") {
+  const first = mkdtempSync(join(process.cwd(), ".guard-search-first-"));
+  const later = mkdtempSync(join(tmpdir(), "guard-search-later-"));
+  const previousPath = process.env.PATH;
+  try {
+    writeFileSync(join(first, "rg"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    process.env.PATH = `${first}:${later}`;
+    const initial = inspectBuiltinSearchExecutable("grep", PROJ);
+    writeFileSync(join(later, "rg"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    const changed = inspectBuiltinSearchExecutable("grep", PROJ);
+    ok("policy: a later search executable changes the lookup fingerprint", initial.fingerprint !== changed.fingerprint);
+    ok("policy: a later temporary search executable requires confirmation", !!changed.risk);
+  } finally { if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath; }
+}
+if (process.platform !== "win32") {
   const dir = mkdtempSync(join(process.cwd(), ".guard-hardlink-path-"));
   const source = join(PROJ, "hardlinked-search-executable");
   const previousPath = process.env.PATH;
