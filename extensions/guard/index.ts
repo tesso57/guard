@@ -112,9 +112,11 @@ function toolInputHash(tool: string, input: unknown): string {
 }
 
 /** Shell lookup, startup and ripgrep configuration can change while judgement is pending. */
-function shellEnvironmentHash(): string {
+function shellEnvironmentHash(parsed?: Parsed): string {
+  const usesRipgrep = !parsed || !parsed.ok || parsed.dynamic.length > 0 || parsed.subcommands.some((raw) =>
+    ["rg", "git", "npm"].includes(normalizeArgv(raw, "deny").argv[0]) || !isReadOnlyArgv(raw));
   return stableHash(Object.fromEntries(Object.entries(process.env).filter(([key]) =>
-    key.toLowerCase() === "path" || ["BASH_ENV", "ENV", "BASHOPTS", "SHELLOPTS", "PS4", "RIPGREP_CONFIG_PATH"].includes(key) || (key.startsWith("BASH_FUNC_") && key.endsWith("%%")),
+    key.toLowerCase() === "path" || ["BASH_ENV", "ENV", "BASHOPTS", "SHELLOPTS", "PS4"].includes(key) || (usesRipgrep && key === "RIPGREP_CONFIG_PATH") || (key.startsWith("BASH_FUNC_") && key.endsWith("%%")),
   )));
 }
 
@@ -686,12 +688,12 @@ export default function (pi: ExtensionAPI) {
     const historyIncomplete = cx.historyIncomplete || past.length !== related.length || allRelated.length > related.length;
     const ruleVersion = store.version;
     const sessionChanged = (): Assessment => ({ ...base, action: "block", source: "error", reasons: ["session changed during judgement"] });
-    const shellEnvironment = parsed ? shellEnvironmentHash() : undefined;
+    const shellEnvironment = parsed ? shellEnvironmentHash(parsed) : undefined;
     const executable = parsed ? inspectExecutablePath(parsed, ctx.cwd) : undefined;
     const shellKey = parsed ? stableHash([shellEnvironment, executable]) : undefined;
     const shellChanged = () => {
       if (!parsed) return false;
-      if (shellEnvironmentHash() !== shellEnvironment) return true;
+      if (shellEnvironmentHash(parsed) !== shellEnvironment) return true;
       clearPathCache();
       const current = inspectExecutablePath(parsed, ctx.cwd);
       return current.risk !== executable?.risk || (executable?.fingerprint !== undefined && current.fingerprint !== executable.fingerprint);
@@ -1089,13 +1091,14 @@ export default function (pi: ExtensionAPI) {
     const dialogConfig = cfg;
     const dialogCwd = ctx.cwd;
     let dialogTrusted: boolean;
-    const dialogShellEnvironment = tool === "bash" ? shellEnvironmentHash() : undefined;
+    let dialogShellEnvironment: string | undefined;
     let dialogExecutable: ReturnType<typeof inspectExecutablePath> | undefined;
     let dialogContextHash: string;
     let dialogPolicyHash: string;
     try {
       dialogTrusted = ctx.isProjectTrusted();
       const dialogParsed = tool === "bash" ? parseShell(String(input?.command ?? "")) : undefined;
+      dialogShellEnvironment = dialogParsed ? shellEnvironmentHash(dialogParsed) : undefined;
       clearPathCache();
       dialogContextHash = stableHash(context(ctx, event.toolCallId, tool, dialogParsed, batch.earlier, batch.peers, batch.historyBoundary));
       dialogPolicyHash = filesystemPolicyHash(tool, input, ctx.cwd, ctx.sessionManager.getSessionDir(), trustedDirs, dialogParsed);
@@ -1160,12 +1163,12 @@ export default function (pi: ExtensionAPI) {
           recordAudit(ctx, { ...rec, action: "block", source: "error", reasons: ["input changed during confirmation"], final: "blocked" });
           return onBlocked("the input changed during confirmation");
         }
-        if (dialogShellEnvironment !== undefined && shellEnvironmentHash() !== dialogShellEnvironment) {
+        const currentParsed = tool === "bash" ? parseShell(String(input?.command ?? "")) : undefined;
+        if (dialogShellEnvironment !== undefined && shellEnvironmentHash(currentParsed) !== dialogShellEnvironment) {
           recordAudit(ctx, { ...rec, preview: `${tool} [arguments withheld: shell environment changed during confirmation]`, action: "block", source: "error", reasons: ["shell environment changed during confirmation"], final: "blocked" });
           return onBlocked("shell environment changed during confirmation");
         }
         clearPathCache();
-        const currentParsed = tool === "bash" ? parseShell(String(input?.command ?? "")) : undefined;
         if (stableHash(context(ctx, event.toolCallId, tool, currentParsed, batch.earlier, batch.peers, batch.historyBoundary)) !== dialogContextHash) {
           recordAudit(ctx, { ...rec, preview: `${tool} [arguments withheld: confirmation context changed]`, action: "block", source: "error", reasons: ["judgement context changed during confirmation"], final: "blocked" });
           return onBlocked("judgement context changed during confirmation");

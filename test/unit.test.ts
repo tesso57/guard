@@ -2918,6 +2918,32 @@ const run = async (toolName: string, input: any) => h.tool_call({ type: "tool_ca
     if (priorRgEnv === undefined) delete process.env.RIPGREP_CONFIG_PATH; else process.env.RIPGREP_CONFIG_PATH = priorRgEnv;
   }
   await run("bash", { command: "git status" });
+  delete process.env.RIPGREP_CONFIG_PATH;
+  ctx.ui.select = async () => {
+    process.env.RIPGREP_CONFIG_PATH = "indirect-rg-config";
+    return "Allow (this time only)";
+  };
+  try {
+    const indirectConfig = await run("bash", { command: "guard-dialog-rg-indirect operation" });
+    ok("int: commands that might invoke ripgrep still recheck its configuration", indirectConfig?.block === true && indirectConfig.reason.includes("shell environment changed"));
+  } finally {
+    ctx.ui.select = savedSelect;
+    if (priorRgEnv === undefined) delete process.env.RIPGREP_CONFIG_PATH; else process.env.RIPGREP_CONFIG_PATH = priorRgEnv;
+  }
+  await run("bash", { command: "git status" });
+  delete process.env.RIPGREP_CONFIG_PATH;
+  ctx.ui.select = async () => {
+    process.env.RIPGREP_CONFIG_PATH = "unrelated-rg-config";
+    return "Allow (this time only)";
+  };
+  try {
+    const unrelatedConfig = await run("bash", { command: "cat .env" });
+    ok("int: ripgrep configuration changes do not invalidate an unrelated read-only command", unrelatedConfig === undefined && tail(1)[0]?.final === "run");
+  } finally {
+    ctx.ui.select = savedSelect;
+    if (priorRgEnv === undefined) delete process.env.RIPGREP_CONFIG_PATH; else process.env.RIPGREP_CONFIG_PATH = priorRgEnv;
+  }
+  await run("bash", { command: "git status" });
   if (process.platform !== "win32") {
     const oldPath = process.env.PATH;
     const dialogBin = join(PROJ, "dialog-executable-bin");
