@@ -171,7 +171,10 @@ test("Pi asks before an ELF with a missing dynamic loader can trigger a download
 
 test("Pi checks ELF library search paths before starting a built-in search", { skip: process.platform !== "linux" }, (t) => {
   const compiler = spawnSync("cc", ["--version"], { encoding: "utf8" });
-  if (compiler.status !== 0) return t.skip("C compiler is unavailable");
+  if (compiler.status !== 0) {
+    assert.notEqual(process.env.GUARD_REQUIRE_RG, "1", "C compiler is required for the ELF behavior test");
+    return t.skip("C compiler is unavailable");
+  }
   const dir = mkdtempSync(join(tmpdir(), "guard-elf-runpath-"));
   const bin = mkdtempSync(join(process.cwd(), ".guard-elf-runpath-"));
   const project = join(dir, "project"), agent = join(dir, "agent"), library = join(project, "lib"), marker = join(dir, "executed");
@@ -190,22 +193,41 @@ test("Pi checks ELF library search paths before starting a built-in search", { s
     compile(library);
     const blocked = invoke();
     assert.equal(blocked.status, 0, blocked.stderr);
-    assert.equal(JSON.parse(blocked.stdout).blocked, true);
+    const blockedOutput = JSON.parse(blocked.stdout);
+    assert.equal(blockedOutput.blocked, true);
+    assert.match(JSON.stringify(blockedOutput.content), /guard/i);
     assert.equal(existsSync(marker), false, "the untrusted runpath must be checked before --version runs");
     compile("$ORIGIN/lib");
     mkdirSync(join(bin, "lib"));
     const compiled = readFileSync(executable);
     const parsed = elfPrograms(compiled.subarray(0, 64), compiled.length, (offset, length) => compiled.subarray(offset, offset + length));
     const dependency = parsed?.dependencies?.find((name) => name && !name.includes("/") && !name.includes("$"));
-    if (dependency) {
+    if (!dependency) {
+      assert.notEqual(process.env.GUARD_REQUIRE_RG, "1", "the ELF fixture must have a dynamic dependency");
+      return t.skip("compiler did not produce a dynamic dependency");
+    }
+    {
       writeFileSync(join(library, "fake-library.so"), "fixture");
       const alias = join(bin, "lib", dependency);
       symlinkSync(join(library, "fake-library.so"), alias);
       const linked = invoke();
       assert.equal(linked.status, 0, linked.stderr);
-      assert.equal(JSON.parse(linked.stdout).blocked, true, "a dependency symlink into the project must require confirmation");
+      const linkedOutput = JSON.parse(linked.stdout);
+      assert.equal(linkedOutput.blocked, true, "a dependency symlink into the project must require confirmation");
+      assert.match(JSON.stringify(linkedOutput.content), /guard/i);
       assert.equal(existsSync(marker), false);
       rmSync(alias);
+      const hwcaps = join(bin, "lib", "glibc-hwcaps", "x86-64-v2");
+      mkdirSync(hwcaps, { recursive: true });
+      const optimized = join(hwcaps, dependency);
+      symlinkSync(join(library, "fake-library.so"), optimized);
+      const optimizedResult = invoke();
+      assert.equal(optimizedResult.status, 0, optimizedResult.stderr);
+      const optimizedOutput = JSON.parse(optimizedResult.stdout);
+      assert.equal(optimizedOutput.blocked, true, "a hardware-specific dependency symlink into the project must require confirmation");
+      assert.match(JSON.stringify(optimizedOutput.content), /guard/i);
+      assert.equal(existsSync(marker), false);
+      rmSync(join(bin, "lib", "glibc-hwcaps"), { recursive: true, force: true });
     }
     const allowed = invoke();
     assert.equal(allowed.status, 0, allowed.stderr);

@@ -341,6 +341,50 @@ if (process.platform !== "win32" && existsSync("/usr/bin/grep")) {
   if (system.nlink > 1 && system.uid === 0 && (system.mode & 0o022) === 0 && !writable)
     ok("policy: an unmodifiable root-owned system executable does not prompt for its hard links", !inspectExecutablePath(P("grep needle file"), PROJ).risk);
 }
+if (process.platform === "darwin" || process.platform === "linux") {
+  const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+  const previousPath = process.env.PATH;
+  const bin = mkdtempSync(join(process.cwd(), ".guard-hwcaps-"));
+  const library = join(bin, "lib"), projectLibrary = join(PROJ, "hwcap-fixture.so");
+  try {
+    const file = Buffer.alloc(512), strings = Buffer.from("\0libc.so.6\0$ORIGIN/lib\0");
+    Buffer.from("7f454c46", "hex").copy(file);
+    file[4] = 2; file[5] = 1; file[6] = 1; file.writeUInt16LE(2, 16);
+    file.writeBigUInt64LE(64n, 32); file.writeUInt16LE(64, 52); file.writeUInt16LE(56, 54); file.writeUInt16LE(2, 56);
+    file.writeUInt32LE(1, 64); file.writeBigUInt64LE(0x400000n, 80); file.writeBigUInt64LE(512n, 96); file.writeBigUInt64LE(512n, 104);
+    file.writeUInt32LE(2, 120); file.writeBigUInt64LE(256n, 128); file.writeBigUInt64LE(80n, 152);
+    for (const [index, tag, value] of [[0, 5n, 0x400180n], [1, 10n, BigInt(strings.length)], [2, 1n, 1n], [3, 29n, 11n]] as const) {
+      file.writeBigUInt64LE(tag, 256 + index * 16); file.writeBigUInt64LE(value, 264 + index * 16);
+    }
+    strings.copy(file, 384);
+    writeFileSync(join(bin, "rg"), file, { mode: 0o755 });
+    mkdirSync(library);
+    process.env.PATH = bin;
+    Object.defineProperty(process, "platform", { value: "linux" });
+    const normal = inspectBuiltinSearchExecutable("grep", PROJ);
+    ok("policy: an ordinary ELF library directory does not require confirmation", !normal.risk);
+    const arch = join(library, "glibc-hwcaps", "x86-64-v2");
+    mkdirSync(arch, { recursive: true });
+    writeFileSync(projectLibrary, "fixture");
+    symlinkSync(projectLibrary, join(arch, "unrelated.so"));
+    clearPathCache();
+    const unrelated = inspectBuiltinSearchExecutable("grep", PROJ);
+    ok("policy: an unrelated hardware-specific library does not require confirmation", !unrelated.risk);
+    symlinkSync(projectLibrary, join(arch, "libc.so.6"));
+    clearPathCache();
+    const linked = inspectBuiltinSearchExecutable("grep", PROJ);
+    ok("policy: a hardware-specific library link into the project requires confirmation", !!linked.risk);
+    ok("policy: a hardware-specific library link changes the lookup fingerprint", unrelated.fingerprint !== linked.fingerprint);
+    rmSync(join(library, "glibc-hwcaps"), { recursive: true });
+    for (let i = 0; i < 129; i++) mkdirSync(join(library, "glibc-hwcaps", `variant-${i}`), { recursive: true });
+    clearPathCache();
+    ok("policy: an oversized hardware-capability directory requires confirmation", !!inspectBuiltinSearchExecutable("grep", PROJ).risk?.includes("inspection limit"));
+  } finally {
+    Object.defineProperty(process, "platform", platform);
+    if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
+    rmSync(projectLibrary, { force: true });
+  }
+}
 if (process.platform !== "win32") {
   const shadow = mkdtempSync(join(tmpdir(), "guard-grep-shadow-"));
   const before = process.env.PATH;

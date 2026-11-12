@@ -297,11 +297,44 @@ export function inspectBuiltinSearchExecutable(tool: string, cwd: string, piVers
       if (!check(path, true)) risk ??= "the built-in search executable has an unverified ELF library search path";
       if (exhausted) return risk;
     }
+    const hardwareDirs = new Map<string, string[]>();
+    const hardwareDirectories = (directory: string): string[] => {
+      const cached = hardwareDirs.get(directory);
+      if (cached) return cached;
+      const root = join(directory, "glibc-hwcaps"), found: string[] = [];
+      hardwareDirs.set(directory, found);
+      if (!check(root)) risk ??= "the built-in search executable has an unverified ELF hardware-capability path";
+      if (exhausted) return found;
+      let handle: ReturnType<typeof opendirSync>;
+      try { handle = opendirSync(root); }
+      catch (error: any) {
+        if (!["ENOENT", "ENOTDIR"].includes(error?.code)) risk ??= "cannot inspect ELF hardware-capability directories";
+        return found;
+      }
+      try {
+        let count = 0;
+        for (;;) {
+          const entry = handle.readSync();
+          if (!entry) break;
+          if (++count > 128) { risk ??= "ELF hardware-capability inspection limit exceeded"; break; }
+          if (entry.isDirectory() || entry.isSymbolicLink()) found.push(join(root, entry.name));
+          else if (!entry.isFile()) risk ??= "cannot inspect an ELF hardware-capability entry";
+          else if (!entry.isFile()) risk ??= "cannot inspect an ELF hardware-capability entry";
+        }
+      } catch { risk ??= "cannot inspect ELF hardware-capability directories"; }
+      finally { try { handle.closeSync(); } catch { risk ??= "cannot inspect ELF hardware-capability directories"; } }
+      return found;
+    };
     for (const dependency of programs.dependencies ?? []) {
       if (!dependency || ((dependency.includes("/") || dependency.includes("$")) && !check(dependency))) risk ??= "the built-in search executable has an unverified ELF dependency";
       if (exhausted) return risk;
       if (dependency && !dependency.includes("/") && !dependency.includes("$")) for (const directory of directories) {
         if (!check(join(directory, dependency))) risk ??= "the built-in search executable has an unverified ELF dependency";
+        if (exhausted) return risk;
+        for (const hardwareDirectory of hardwareDirectories(directory)) {
+          if (!check(join(hardwareDirectory, dependency))) risk ??= "the built-in search executable has an unverified hardware-specific ELF dependency";
+          if (exhausted) return risk;
+        }
         if (exhausted) return risk;
       }
     }
