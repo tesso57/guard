@@ -149,6 +149,15 @@ if (process.platform !== "win32") {
   try {
     const missing = inspectBuiltinSearchExecutable("grep", PROJ);
     ok("policy: a missing built-in search executable may trigger a download", !!missing.risk);
+    for (const value of ["1", "true", "YES"]) {
+      process.env.PI_OFFLINE = value;
+      const offline = inspectBuiltinSearchExecutable("grep", PROJ);
+      ok(`policy: offline mode prevents the built-in search download (${value})`, !offline.risk && offline.fingerprint !== missing.fingerprint);
+      ok(`policy: offline behavior is not assumed for unverified Pi versions (${value})`, !!inspectBuiltinSearchExecutable("grep", PROJ, "0.54.0").risk && !!inspectBuiltinSearchExecutable("grep", PROJ, "1.5.1").risk);
+    }
+    process.env.PI_OFFLINE = "false";
+    ok("policy: an explicitly false offline setting does not prevent downloads", !!inspectBuiltinSearchExecutable("find", PROJ).risk);
+    delete process.env.PI_OFFLINE;
     for (const [tool, binary] of [["grep", "rg"], ["find", "fd"]]) {
       const path = join(dir, binary);
       writeFileSync(path, "#!/bin/sh\nexit 0\n", { mode: 0o755 });

@@ -48,6 +48,10 @@ Listing skill file names with `rg --files` does not require inspecting their con
 
 Pi's built-in `grep` and `find` run `rg` and `fd` (or `fdfind`) respectively, and can download them if absent. A candidate may fail to start, so guard inspects later `PATH` entries and the `fdfind` fallback too. If any candidate is in the project, a temporary directory, or Pi's managed bin directory, is found through a relative `PATH` entry, has unverified hard links, or cannot be verified, guard asks for confirmation even when the model allows the search. On Windows these built-in searches also require confirmation because their executable lookup is not verified. Guard rechecks executable identity while a judgement or confirmation is pending.
 
+For Pi 1.5.0, guard recognizes `PI_OFFLINE=1` (also `true` or `yes`, case-insensitive): when the search executable is absent, Pi reports it as unavailable without downloading it. Other Pi versions retain the confirmation because their offline download behavior has not been verified.
+
+An existing executable can still fail to start, for example if its interpreter is missing; Pi may then attempt a download. The metadata check does not establish that every candidate can start.
+
 Git's compiled-in system configuration path varies between installations. To avoid executing Git before the safety check or guessing that path, guard skips the read-only Git shortcut unless `GIT_CONFIG_NOSYSTEM` is true or `GIT_CONFIG_SYSTEM` explicitly identifies a configuration file that guard can inspect. Other checks and remembered rules still apply.
 The Git hooks directory is inspected up to 1,000 entries; a larger or unreadable directory disables the shortcut because guard cannot establish that it is safe.
 

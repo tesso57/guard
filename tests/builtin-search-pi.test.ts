@@ -81,3 +81,25 @@ test("Pi skips guard for verified built-in searches inside skill directories", {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("offline Pi reports missing search tools without a confirmation or download", { skip: process.platform === "win32" }, () => {
+  const dir = mkdtempSync(join(tmpdir(), "guard-builtin-offline-"));
+  const project = join(dir, "project"), agent = join(dir, "agent"), bin = join(dir, "empty-bin");
+  const skill = join(project, ".agents", "skills", "fixture");
+  try {
+    mkdirSync(skill, { recursive: true }); mkdirSync(bin);
+    writeFileSync(join(skill, "needle"), "needle\n");
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(GUARD_|RISK_|PI_|OPENAI_|BASH_FUNC_)/.test(key) && !["BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "RIPGREP_CONFIG_PATH", "GREP_OPTIONS"].includes(key)));
+    Object.assign(env, { HOME: dir, XDG_CONFIG_HOME: join(dir, "config"), PI_CODING_AGENT_DIR: agent, PI_OFFLINE: "1", GUARD_TEST_PROJECT: project, GUARD_TEST_PATH: skill, PATH: bin });
+    for (const tool of ["grep", "find"]) {
+      env.GUARD_TEST_TOOL = tool;
+      const result = spawnSync(process.execPath, ["--experimental-strip-types", fileURLToPath(new URL("./helpers/builtin-search-child.mjs", import.meta.url))], { env, encoding: "utf8", timeout: 30_000 });
+      assert.equal(result.status, 0, result.stderr);
+      const output = JSON.parse(result.stdout);
+      assert.equal(output.blocked, true, tool);
+      assert.match(JSON.stringify(output.content), /not available/i, tool);
+      assert.doesNotMatch(JSON.stringify(output.content), /guard/i, tool);
+      assert.equal(existsSync(join(agent, "bin")), false, tool);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

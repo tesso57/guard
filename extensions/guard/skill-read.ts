@@ -50,7 +50,8 @@ export function isSkillRead(tool: string, input: unknown, cwd: string, registere
         if (typeof descriptor.value === "number" && !Number.isFinite(descriptor.value)) return false;
       }
       const path = resolvePath(cwd, value || ".");
-      if (!inside(path) || inspectBuiltinSearchExecutable(tool, cwd).risk) return false;
+      const executable = inspectBuiltinSearchExecutable(tool, cwd);
+      if (!inside(path) || executable.risk || !executable.available) return false;
       const stat = statSync(path);
       if (tool === "find") return stat.isDirectory();
       if (stat.isFile()) return stat.nlink <= 1 || isProjectHardlinkSafe(path, cwd);

@@ -9,6 +9,7 @@ import { createHash } from "node:crypto";
 import { accessSync, constants, existsSync, opendirSync, statSync, type Stats } from "node:fs";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import * as piSdk from "@earendil-works/pi-coding-agent";
 import { grepExplicitPaths, hasGluedPathValue, innerCommands, INTERPRETER_NAMES, isLongOption, isReadOnlyArgv, isShell, nonFlags, normalizeArgv, type Parsed, parseShell, rgDisablesConfig, rgExplicitPaths, rgInfoOnly, rgListsFiles, rgListsTypes, rgSimpleIncludeSuffixes, rgVisibility, unwrapCommandWrappers } from "./shell.ts";
 import { readRegularText } from "./files.ts";
 import { AGENT_DIR } from "./config.ts";
@@ -174,16 +175,17 @@ export function executablePathRisk(parsed: Parsed, cwd: string, platform: NodeJS
 }
 
 /** Pi's grep/find resolve and may download executables before running the search. */
-export function inspectBuiltinSearchExecutable(tool: string, cwd: string): { risk?: string; fingerprint?: string } {
+export function inspectBuiltinSearchExecutable(tool: string, cwd: string, piVersion = piSdk.VERSION ?? ""): { risk?: string; fingerprint?: string; available?: boolean } {
   if (tool !== "grep" && tool !== "find") return {};
   if (process.platform === "win32") return { risk: "cannot verify the executable used by the built-in search tool on Windows" };
   const names = tool === "grep" ? ["rg"] : ["fd", "fdfind"];
   const local = join(AGENT_DIR, "bin", names[0]);
   const path = process.env.PATH;
   if (path === undefined) return { risk: "cannot determine the built-in search executable path" };
+  const offline = process.env.PI_OFFLINE ?? "";
   const physicalCwd = realPath(cwd);
   const roots = [cwd, physicalCwd, enclosingRepository(cwd), enclosingRepository(physicalCwd), AGENT_DIR, realPath(AGENT_DIR), "/tmp", "/private/tmp", tmpdir(), realPath(tmpdir())].filter((root): root is string => !!root);
-  const selected: unknown[] = [tool, local, path, process.cwd()];
+  const selected: unknown[] = [tool, local, path, offline, piVersion, process.cwd()];
   let multipleLinks = false;
   const inspect = (candidate: string, requireExecutable: boolean): boolean => {
     try {
@@ -225,8 +227,10 @@ export function inspectBuiltinSearchExecutable(tool: string, cwd: string): { ris
       }
     }
     const fingerprint = createHash("sha256").update(JSON.stringify(selected)).digest("hex");
-    if (!found && !risk) risk = "the built-in search tool may download an executable";
-    return { risk, fingerprint };
+    // Pi 1.5.0 checks PI_OFFLINE before downloading a missing search tool; do not assume that for other versions.
+    const offlinePreventsDownload = piVersion === "1.5.0" && ["1", "true", "yes"].includes(offline.toLowerCase());
+    if (!found && !risk && !offlinePreventsDownload) risk = "the built-in search tool may download an executable";
+    return { risk, fingerprint, available: found };
   } catch { return { risk: "cannot inspect the built-in search executable" }; }
 }
 

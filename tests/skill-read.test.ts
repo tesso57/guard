@@ -91,6 +91,10 @@ test("built-in skill searches bypass guard only with a verified executable and s
       process.env.PATH = parent;
       assert.equal(isSkillRead("grep", { path: dir, pattern: "example" }, cwd), false);
       assert.equal(isSkillRead("find", { path: dir, pattern: "*.md" }, cwd), false);
+      const previousOffline = process.env.PI_OFFLINE;
+      process.env.PI_OFFLINE = "1";
+      try { assert.equal(isSkillRead("find", { path: dir, pattern: "*.md" }, cwd), false, "a missing executable does not bypass guard"); }
+      finally { if (previousOffline === undefined) delete process.env.PI_OFFLINE; else process.env.PI_OFFLINE = previousOffline; }
     }
   } finally {
     if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
