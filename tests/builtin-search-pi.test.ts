@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import test from "node:test";
@@ -271,5 +271,27 @@ test("Pi does not skip a skill search with dynamic-loader injection settings", {
     const audit = readFileSync(join(agent, "guard", "audit.jsonl"), "utf8");
     assert.match(audit, /dynamic loader environment/);
     assert.doesNotMatch(audit, /guard-test-loader/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("Pi blocks an active empty loader-debug output path before it creates a file", { skip: process.platform !== "linux" }, (t) => {
+  const location = spawnSync("which", ["rg"], { encoding: "utf8" });
+  if (location.status !== 0) return t.skip("ripgrep is unavailable");
+  const executable = realpathSync(location.stdout.trim());
+  if (basename(executable) !== "rg") return t.skip("ripgrep executable name cannot be verified");
+  const dir = mkdtempSync(join(tmpdir(), "guard-empty-loader-debug-"));
+  const project = join(dir, "project"), agent = join(dir, "agent"), skill = join(project, ".agents", "skills", "fixture");
+  try {
+    mkdirSync(skill, { recursive: true });
+    writeFileSync(join(skill, "needle"), "needle\n");
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(GUARD_|RISK_|PI_|OPENAI_|BASH_FUNC_|LD_|DYLD_)/.test(key) && !["BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "RIPGREP_CONFIG_PATH", "GREP_OPTIONS"].includes(key)));
+    Object.assign(env, { HOME: dir, XDG_CONFIG_HOME: join(dir, "config"), PI_CODING_AGENT_DIR: agent, GUARD_TEST_PROJECT: project, GUARD_TEST_PATH: skill, GUARD_TEST_TOOL: "grep", GUARD_TEST_EMPTY_DEBUG: "1", PATH: `${dirname(executable)}:/usr/bin:/bin` });
+    const result = spawnSync(process.execPath, ["--experimental-strip-types", fileURLToPath(new URL("./helpers/builtin-search-child.mjs", import.meta.url))], { cwd: project, env, encoding: "utf8", timeout: 30_000 });
+    assert.equal(result.status, 0, result.stderr);
+    const output = JSON.parse(result.stdout);
+    assert.equal(output.blocked, true);
+    assert.match(JSON.stringify(output.content), /guard/i);
+    assert.match(readFileSync(join(agent, "guard", "audit.jsonl"), "utf8"), /dynamic loader environment/);
+    assert.equal(readdirSync(project).some((name) => /^\.\d+$/.test(name)), false);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

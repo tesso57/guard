@@ -7,6 +7,7 @@ const agentDir = process.env.PI_CODING_AGENT_DIR;
 const tool = process.env.GUARD_TEST_TOOL;
 const searchPath = process.env.GUARD_TEST_PATH || ".";
 if (process.env.GUARD_TEST_LOADER_KEY) process.env[process.env.GUARD_TEST_LOADER_KEY] = "/guard-test-loader";
+if (process.env.GUARD_TEST_EMPTY_DEBUG) { process.env.LD_DEBUG_OUTPUT = ""; process.env.LD_DEBUG = "libs"; }
 const fake = createFakeModel([
   { content: [{ type: "toolCall", id: "search", name: tool, arguments: { path: searchPath, pattern: "needle" } }] },
   { content: [{ type: "text", text: "done" }] },

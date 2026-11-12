@@ -30,7 +30,7 @@ export function dynamicLoaderEnvironment(): [string, string][] {
 export function hasDynamicLoaderEnvironment(): boolean {
   return dynamicLoaderEnvironment().some(([key, value]) => {
     if (key === "LD_DEBUG") return false;
-    if (key === "LD_DEBUG_OUTPUT") return !!value && !!process.env.LD_DEBUG;
+    if (key === "LD_DEBUG_OUTPUT") return !!process.env.LD_DEBUG;
     if (key === "LD_PROFILE_OUTPUT") return !!value && !!process.env.LD_PROFILE;
     return value.length > 0 || key.endsWith("_PATH");
   });
@@ -131,7 +131,7 @@ function usesBuiltinControl(parsed: Parsed): boolean {
 }
 
 function changesShellStartup(parsed: Parsed): boolean {
-  const loaderNames = loaderEnvNames().filter((name) => name !== "LD_DEBUG");
+  const loaderNames = loaderEnvNames().filter((name) => name !== "LD_DEBUG" || process.env.LD_DEBUG_OUTPUT !== undefined);
   const relevant = new RegExp(`^(?:(?:${["BASH_ENV", "ENV", "BASHOPTS", "SHELLOPTS", "PS4", ...loaderNames].join("|")})(?:\\[[^\\]]*\\])?(?:\\+?=|$)|BASH_FUNC_.*%%=)`);
   return parsed.subs.some((s) => {
     if (s.assigns.some((assignment) => relevant.test(assignment)) || ((s.argv[0] ?? "").includes("=") && relevant.test(s.argv[0]))) return true;

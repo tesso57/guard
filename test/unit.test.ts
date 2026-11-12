@@ -165,9 +165,14 @@ if (["darwin", "linux", "freebsd", "openbsd", "netbsd", "sunos"].includes(proces
   try { ok("policy: informational loader settings do not require confirmation", !hasDynamicLoaderEnvironment()); }
   finally { if (priorInert === undefined) delete process.env[inertKey]; else process.env[inertKey] = priorInert; }
   if (process.platform === "linux") {
+    const debugCommand = "LD_DEBUG=libs rg needle docs";
+    ok("policy: diagnostics without a debug output file do not require confirmation", !sensitive("bash", { command: debugCommand }, PROJ, roots, P(debugCommand)));
     process.env.LD_DEBUG_OUTPUT = "/guard-test-debug";
     try {
       ok("policy: an inactive loader debug output path does not require confirmation", !hasDynamicLoaderEnvironment());
+      ok("policy: enabling diagnostics with an inherited output path requires confirmation", !!sensitive("bash", { command: debugCommand }, PROJ, roots, P(debugCommand)));
+      process.env.LD_DEBUG_OUTPUT = "";
+      ok("policy: enabling diagnostics with an empty output path requires confirmation", !!sensitive("bash", { command: debugCommand }, PROJ, roots, P(debugCommand)));
       process.env.LD_DEBUG = "libs";
       ok("policy: an active loader debug output path requires confirmation", hasDynamicLoaderEnvironment());
     } finally { delete process.env.LD_DEBUG; delete process.env.LD_DEBUG_OUTPUT; }
