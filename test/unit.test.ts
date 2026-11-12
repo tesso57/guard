@@ -2917,6 +2917,21 @@ const run = async (toolName: string, input: any) => h.tool_call({ type: "tool_ca
     ctx.ui.select = savedSelect;
     if (priorRgEnv === undefined) delete process.env.RIPGREP_CONFIG_PATH; else process.env.RIPGREP_CONFIG_PATH = priorRgEnv;
   }
+  for (const [command, shouldBlock] of [
+    ["rg --no-config needle .env && rg needle .env", true],
+    ["rg --no-config needle .env && rg --no-config needle .env", false],
+  ] as const) {
+    await run("bash", { command: "git status" });
+    delete process.env.RIPGREP_CONFIG_PATH;
+    ctx.ui.select = async () => { process.env.RIPGREP_CONFIG_PATH = "mixed-rg-config"; return "Allow (this time only)"; };
+    try {
+      const result = await run("bash", { command });
+      ok(`int: each ripgrep command controls whether its configuration matters: ${command}`, shouldBlock ? result?.block === true && result.reason.includes("shell environment changed") : result === undefined && tail(1)[0]?.final === "run");
+    } finally {
+      ctx.ui.select = savedSelect;
+      if (priorRgEnv === undefined) delete process.env.RIPGREP_CONFIG_PATH; else process.env.RIPGREP_CONFIG_PATH = priorRgEnv;
+    }
+  }
   await run("bash", { command: "git status" });
   delete process.env.RIPGREP_CONFIG_PATH;
   ctx.ui.select = async () => {
