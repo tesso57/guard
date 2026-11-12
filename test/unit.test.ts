@@ -1672,6 +1672,22 @@ name: visible
   ok("rg: a type-looking search pattern does not include hidden files", !inspect("rg -e '-tsh' ."));
 }
 
+{
+  const repo = mkdtempSync(join(tmpdir(), "guard-rg-unrestricted-"));
+  writeFileSync(join(repo, ".env"), "needle\n");
+  writeFileSync(join(repo, ".ignore"), "!.env\n");
+  writeFileSync(join(repo, "visible.txt"), "needle\n");
+  const inspect = (command: string) => {
+    clearPathCache();
+    const parsed = P(command);
+    return { sensitive: sensitive("bash", { command }, repo, protectedRoots(repo), parsed), safe: safeAllow("bash", { command }, repo, O, parsed) };
+  };
+  for (const command of ["rg -u needle .", "rg --no-ignore needle .", "rg -u -e '-u' ."])
+    ok(`rg: ignoring ignore files alone still excludes hidden files: ${command}`, !inspect(command).sensitive && inspect(command).safe);
+  for (const command of ["rg -uu needle .", "rg -u --unrestricted needle .", "rg -u -tsh needle .", "rg --no-ignore -g .env needle ."])
+    ok(`rg: options that include hidden files remain sensitive: ${command}`, !!inspect(command).sensitive);
+}
+
 // Exercise the same Git directory resolution against a worktree created by Git itself.
 {
   const root = mkdtempSync(join(tmpdir(), "guard-real-worktree-"));

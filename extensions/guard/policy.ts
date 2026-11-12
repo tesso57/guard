@@ -9,7 +9,7 @@ import { createHash } from "node:crypto";
 import { accessSync, constants, existsSync, opendirSync, statSync } from "node:fs";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { hasGluedPathValue, innerCommands, INTERPRETER_NAMES, isLongOption, isReadOnlyArgv, isShell, nonFlags, normalizeArgv, type Parsed, parseShell, rgDisablesConfig, rgExplicitPaths, rgListsFiles, rgSimpleIncludeSuffixes, rgUsesFileTypes, unwrapCommandWrappers } from "./shell.ts";
+import { hasGluedPathValue, innerCommands, INTERPRETER_NAMES, isLongOption, isReadOnlyArgv, isShell, nonFlags, normalizeArgv, type Parsed, parseShell, rgDisablesConfig, rgExplicitPaths, rgListsFiles, rgSimpleIncludeSuffixes, rgVisibility, unwrapCommandWrappers } from "./shell.ts";
 import { readRegularText } from "./files.ts";
 import { containsProtectedRoot, expandGlobFully, trustedDirFor, trustedDirRelative, type TrustedDir, type TrustedDirState, isPiCodePath, PI_CODE_DIRS, gitConfigIsSafe, globHitsOptionLikeName, globMayReach, ignoreFilesReinclude, isFreelyReadable, isHardLinked, isHomeOrAncestor, isInside, isInsideExact, isProjectPath, isProjectHardlinkSafe, isProtectedHardLink, isRiskyProjectFile, memo, pathLikeTokens, pathVariants, protectedReason, protectedRoots, readFallbackVariants, realPath, resolvePath, secretFilesUnder, sensitiveReason, UNKNOWN_PATH } from "./paths.ts";
 
@@ -784,10 +784,6 @@ const recursiveGrep = (args: string[]) =>
     (isLongOption(t, "--directories") && /recurse/.test(t + (args[i + 1] ?? ""))) ||
     (t === "-d" && args[i + 1] === "recurse"),
   );
-/** rg skips hidden and ignored files unless told otherwise. */
-const rgSeesHidden = (a: string[]) =>
-  rgUsesFileTypes(a) || a.slice(1).some((t) => (/^-[A-Za-z0-9.]*[u.]/.test(t) && !t.startsWith("--")) || ["--hidden", "--no-ignore", "--no-ignore-vcs", "--no-ignore-dot", "--glob", "--iglob"].some((o) => isLongOption(t, o)) || t === "-g");
-
 /**
  * What a recursive content search may print: the first secret file it would reach, and whether the search tree was
  * too large to check (then the call is not treated as safe).
@@ -832,7 +828,8 @@ function searchExposure(tool: string, input: any, cwd: string, parsed?: Parsed):
     // rg skips hidden files unless told otherwise, or unless an ignore file re-includes them (`!.env`)
     const roots0 = given.length ? given : bases;
     const suffixes = a[0] === "rg" && !parsed.dynamic.length && !parsed.globs.length ? rgSimpleIncludeSuffixes(a) : undefined;
-    const r = check(roots0, a[0] !== "rg" || rgSeesHidden(a) || roots0.some((x) => ignoreFilesReinclude(realPath(x))), suffixes);
+    const visibility = rgVisibility(a);
+    const r = check(roots0, a[0] !== "rg" || visibility.hidden || (!visibility.ignoresRules && roots0.some((x) => ignoreFilesReinclude(realPath(x)))), suffixes);
     if (r.hit) return r;
     unknown ||= r.unknown;
   }

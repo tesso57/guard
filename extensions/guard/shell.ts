@@ -644,14 +644,17 @@ const RG_LONG_VALUES = new Set([
   "encoding", "file", "glob", "iglob", "max-columns", "max-count", "max-depth", "maxdepth", "max-filesize", "path-separator", "regexp",
   "replace", "sort", "sortr", "threads", "type", "type-not", "type-add", "type-clear", "dfa-size-limit", "regex-size-limit",
 ]);
-function inspectRgOptions(a: string[]): { known: boolean; listsFiles: boolean; noConfig: boolean; patternProvided: boolean; fileTypes: boolean; operands: string[]; globs: string[] } {
+function inspectRgOptions(a: string[]): { known: boolean; listsFiles: boolean; noConfig: boolean; noIgnore: boolean; hidden: boolean; unrestricted: number; patternProvided: boolean; fileTypes: boolean; operands: string[]; globs: string[] } {
   let listsFiles = false;
   let noConfig = false;
+  let noIgnore = false;
+  let hidden = false;
+  let unrestricted = 0;
   let patternProvided = false;
   let fileTypes = false;
   const operands: string[] = [];
   const globs: string[] = [];
-  const invalid = () => ({ known: false, listsFiles: false, noConfig: false, patternProvided: false, fileTypes: false, operands: [], globs: [] });
+  const invalid = () => ({ known: false, listsFiles: false, noConfig: false, noIgnore: false, hidden: false, unrestricted: 0, patternProvided: false, fileTypes: false, operands: [], globs: [] });
   for (let i = 1; i < a.length; i++) {
     const t = a[i];
     if (t === "--") { operands.push(...a.slice(i + 1)); break; }
@@ -659,7 +662,14 @@ function inspectRgOptions(a: string[]): { known: boolean; listsFiles: boolean; n
     if (t.startsWith("--")) {
       const eq = t.indexOf("=");
       const name = t.slice(2, eq < 0 ? undefined : eq);
-      if (RG_LONG_FLAGS.has(name) && eq < 0) { if (name === "files") listsFiles = true; if (name === "no-config") noConfig = true; continue; }
+      if (RG_LONG_FLAGS.has(name) && eq < 0) {
+        if (name === "files") listsFiles = true;
+        if (name === "no-config") noConfig = true;
+        if (name === "no-ignore") noIgnore = true;
+        if (name === "hidden") hidden = true;
+        if (name === "unrestricted") unrestricted++;
+        continue;
+      }
       if (!RG_LONG_VALUES.has(name)) return invalid();
       if (name === "regexp" || name === "file") patternProvided = true;
       if (["type", "type-not", "type-add", "type-clear"].includes(name)) fileTypes = true;
@@ -679,9 +689,11 @@ function inspectRgOptions(a: string[]): { known: boolean; listsFiles: boolean; n
         break;
       }
       if (!RG_SHORT_FLAGS.has(c)) return invalid();
+      if (c === "u") unrestricted++;
+      if (c === ".") hidden = true;
     }
   }
-  return { known: true, listsFiles, noConfig, patternProvided, fileTypes, operands, globs };
+  return { known: true, listsFiles, noConfig, noIgnore, hidden, unrestricted, patternProvided, fileTypes, operands, globs };
 }
 
 /** `--files` lists paths instead of searching their contents, when it is an actual option. */
@@ -714,11 +726,14 @@ export function rgSimpleIncludeSuffixes(a: string[]): string[] | undefined {
   return options.globs.map((glob) => glob.slice(1).toLowerCase());
 }
 
-/** File types may whitelist hidden names such as `.env`; unknown options are conservative. */
-export function rgUsesFileTypes(a: string[]): boolean {
-  if (a[0] !== "rg") return false;
+/** File types and globs may whitelist hidden names; unknown options are conservative. */
+export function rgVisibility(a: string[]): { hidden: boolean; ignoresRules: boolean } {
   const options = inspectRgOptions(a);
-  return !options.known || options.fileTypes;
+  if (a[0] !== "rg" || !options.known) return { hidden: true, ignoresRules: false };
+  return {
+    hidden: options.hidden || options.unrestricted >= 2 || options.fileTypes || options.globs.length > 0,
+    ignoresRules: options.noIgnore || options.unrestricted >= 1,
+  };
 }
 
 const READ_ONLY = new Set([
