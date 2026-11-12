@@ -20,8 +20,12 @@ jobs:
         run: npm run typecheck
       - name: Unused code (knip)
         run: npm run knip
+      - name: Install ripgrep for behavioral tests
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
       - name: Unit tests
         run: npm test
+        env:
+          GUARD_REQUIRE_RG: "1"
       - name: Package contents
         run: npm run check:package
       - name: E2E (real pi, mock model + mock Decisions API)

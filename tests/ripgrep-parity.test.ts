@@ -7,7 +7,10 @@ import test from "node:test";
 
 test("ripgrep visibility and guard decisions agree on representative searches", async (t) => {
   const executable = spawnSync("rg", ["--version"], { stdio: "ignore" });
-  if ((executable.error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return t.skip("ripgrep is not installed");
+  if ((executable.error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") {
+    assert.notEqual(process.env.GUARD_REQUIRE_RG, "1", "ripgrep is required in this test environment");
+    return t.skip("ripgrep is not installed");
+  }
   assert.equal(executable.status, 0, "ripgrep must be runnable");
   const dir = mkdtempSync(join(tmpdir(), "guard-rg-parity-"));
   const home = join(dir, "home"), project = join(dir, "project");
