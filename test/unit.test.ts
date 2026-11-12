@@ -208,6 +208,29 @@ if (process.platform !== "win32") {
     ok("policy: an unknown search executable format requires confirmation", !!inspectBuiltinSearchExecutable("grep", PROJ).risk);
     writeFileSync(join(first, "rg"), Buffer.from(process.platform === "darwin" ? "cafebabe" : "7f454c46", "hex"), { mode: 0o755 });
     ok("policy: a truncated native executable header requires confirmation", !!inspectBuiltinSearchExecutable("grep", PROJ).risk);
+    const emptyNative = Buffer.alloc(64);
+    if (process.platform === "darwin") {
+      Buffer.from("cffaedfe", "hex").copy(emptyNative);
+      emptyNative.writeUInt32LE(2, 12);
+    } else {
+      Buffer.from("7f454c46", "hex").copy(emptyNative);
+      emptyNative[4] = 2; emptyNative[5] = 1; emptyNative[6] = 1;
+      emptyNative.writeUInt16LE(2, 16);
+    }
+    writeFileSync(join(first, "rg"), emptyNative, { mode: 0o755 });
+    ok("policy: a native executable without program information requires confirmation", !!inspectBuiltinSearchExecutable("grep", PROJ).risk);
+    const outsideHeader = Buffer.alloc(64);
+    if (process.platform === "darwin") {
+      Buffer.from("cafebabe", "hex").copy(outsideHeader);
+      outsideHeader.writeUInt32BE(1, 4); outsideHeader.writeUInt32BE(4096, 16); outsideHeader.writeUInt32BE(32, 20);
+    } else {
+      Buffer.from("7f454c46", "hex").copy(outsideHeader);
+      outsideHeader[4] = 2; outsideHeader[5] = 1; outsideHeader[6] = 1;
+      outsideHeader.writeUInt16LE(2, 16); outsideHeader.writeBigUInt64LE(4096n, 32);
+      outsideHeader.writeUInt16LE(64, 52); outsideHeader.writeUInt16LE(56, 54); outsideHeader.writeUInt16LE(1, 56);
+    }
+    writeFileSync(join(first, "rg"), outsideHeader, { mode: 0o755 });
+    ok("policy: native program information outside the file requires confirmation", !!inspectBuiltinSearchExecutable("grep", PROJ).risk);
     const interpreter = join(later, "interpreter");
     writeFileSync(interpreter, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
     writeFileSync(join(first, "rg"), `#!${interpreter}\n`, { mode: 0o755 });
@@ -236,6 +259,8 @@ if (process.platform !== "win32") {
     ok("policy: interpreter cycles require confirmation", !!inspectBuiltinSearchExecutable("grep", PROJ).risk);
     writeFileSync(nested, "exit 0\n", { mode: 0o755 });
     ok("policy: a non-native interpreter without a shebang requires confirmation", !!inspectBuiltinSearchExecutable("grep", PROJ).risk);
+    writeFileSync(nested, emptyNative, { mode: 0o755 });
+    ok("policy: a native interpreter without program information requires confirmation", !!inspectBuiltinSearchExecutable("grep", PROJ).risk);
     writeFileSync(nested, Buffer.from(process.platform === "darwin" ? "7f454c46" : "cafebabe", "hex"), { mode: 0o755 });
     ok("policy: an interpreter for a different operating system requires confirmation", !!inspectBuiltinSearchExecutable("grep", PROJ).risk);
     rmSync(nested);

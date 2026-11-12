@@ -51,27 +51,41 @@ function executablePrefix(path: string, expected: Stats, limit: number): Buffer 
 }
 
 /** Recognize structurally plausible native headers without executing the file. */
-function hasNativeExecutableHeader(header: Buffer): boolean {
-  if (header.length < 4) return false;
+function hasNativeExecutableHeader(header: Buffer, size: number): boolean {
+  if (header.length < 4 || !Number.isSafeInteger(size) || size < 0) return false;
   const magic = header.subarray(0, 4).toString("hex");
   if (["linux", "freebsd", "openbsd", "netbsd", "sunos"].includes(process.platform)) {
     if (magic !== "7f454c46" || header.length < 52 || ![1, 2].includes(header[4]) || ![1, 2].includes(header[5]) || header[6] !== 1) return false;
-    if (header[4] === 2 && header.length < 64) return false;
-    const type = header[5] === 1 ? header.readUInt16LE(16) : header.readUInt16BE(16);
-    return type === 2 || type === 3;
+    const is64 = header[4] === 2, littleEndian = header[5] === 1, headerSize = is64 ? 64 : 52;
+    if (header.length < headerSize) return false;
+    const u16 = (offset: number) => littleEndian ? header.readUInt16LE(offset) : header.readUInt16BE(offset);
+    const offset = is64 ? (littleEndian ? header.readBigUInt64LE(32) : header.readBigUInt64BE(32)) : BigInt(littleEndian ? header.readUInt32LE(28) : header.readUInt32BE(28));
+    const type = u16(16), declaredSize = u16(is64 ? 52 : 40), entrySize = u16(is64 ? 54 : 42), count = u16(is64 ? 56 : 44);
+    return (type === 2 || type === 3) && declaredSize >= headerSize && offset >= BigInt(declaredSize) && entrySize >= (is64 ? 56 : 32) && count > 0 && count !== 0xffff && offset + BigInt(entrySize) * BigInt(count) <= BigInt(size);
   }
   if (process.platform !== "darwin") return false;
   if (["feedface", "cefaedfe", "feedfacf", "cffaedfe"].includes(magic)) {
     if (header.length < (["feedfacf", "cffaedfe"].includes(magic) ? 32 : 28)) return false;
     const littleEndian = magic === "cefaedfe" || magic === "cffaedfe";
-    return (littleEndian ? header.readUInt32LE(12) : header.readUInt32BE(12)) === 2;
+    const u32 = (offset: number) => littleEndian ? header.readUInt32LE(offset) : header.readUInt32BE(offset);
+    const headerSize = ["feedfacf", "cffaedfe"].includes(magic) ? 32 : 28;
+    const count = u32(16), commandsSize = u32(20);
+    return u32(12) === 2 && count > 0 && commandsSize >= count * 8 && headerSize + commandsSize <= size;
   }
   const fat = ["cafebabe", "bebafeca", "cafebabf", "bfbafeca"].includes(magic);
   if (!fat || header.length < 8) return false;
   const littleEndian = magic === "bebafeca" || magic === "bfbafeca";
   const count = littleEndian ? header.readUInt32LE(4) : header.readUInt32BE(4);
   const entrySize = magic === "cafebabf" || magic === "bfbafeca" ? 32 : 20;
-  return count > 0 && count <= Math.floor((header.length - 8) / entrySize);
+  if (count === 0 || count > Math.floor((header.length - 8) / entrySize)) return false;
+  const wide = entrySize === 32, tableEnd = BigInt(8 + count * entrySize);
+  for (let i = 0; i < count; i++) {
+    const base = 8 + i * entrySize;
+    const offset = wide ? (littleEndian ? header.readBigUInt64LE(base + 8) : header.readBigUInt64BE(base + 8)) : BigInt(littleEndian ? header.readUInt32LE(base + 8) : header.readUInt32BE(base + 8));
+    const length = wide ? (littleEndian ? header.readBigUInt64LE(base + 16) : header.readBigUInt64BE(base + 16)) : BigInt(littleEndian ? header.readUInt32LE(base + 12) : header.readUInt32BE(base + 12));
+    if (offset < tableEnd || length === 0n || offset + length > BigInt(size)) return false;
+  }
+  return true;
 }
 const BASH_BUILTINS = new Set(["echo", "printf", "pwd", "cd", "pushd", "popd", "dirs", "true", "false", "test", "[", "type", "command", "builtin", "enable", "export", "set", "declare", "unset", "read", "history", "help", "alias", "unalias", "hash", ":"]);
 
@@ -255,12 +269,12 @@ export function inspectBuiltinSearchExecutable(tool: string, cwd: string, piVers
             selected.push([interpreter, resolved, interpreterStat.dev, interpreterStat.ino, interpreterStat.mode, interpreterStat.nlink, interpreterStat.size, interpreterStat.mtimeMs, interpreterStat.ctimeMs]);
             const prefix = executablePrefix(interpreter, interpreterStat, 512);
             if (prefix.length >= 2 && prefix[0] === 35 && prefix[1] === 33) interpreterRisk = "the built-in search executable uses a nested script interpreter";
-            else if (!hasNativeExecutableHeader(prefix))
+            else if (!hasNativeExecutableHeader(prefix, interpreterStat.size))
               interpreterRisk = "the built-in search interpreter's executable format cannot be verified";
             if (basename(resolved) === "env" || [interpreter, resolved].some((p) => roots.some((root) => isInside(p, root))) ||
                 (interpreterStat.nlink > 1 && !immutableSystemExecutable(interpreter, resolved, interpreterStat)))
               interpreterRisk ??= "the built-in search executable uses an unverified interpreter";
-          } else if (!hasNativeExecutableHeader(header)) interpreterRisk = "the built-in search executable's format cannot be verified";
+          } else if (!hasNativeExecutableHeader(header, st.size)) interpreterRisk = "the built-in search executable's format cannot be verified";
         } catch { interpreterRisk = "cannot verify the built-in search executable's interpreter"; }
       }
       return true;

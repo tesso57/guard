@@ -97,6 +97,22 @@ test("Pi asks before a broken search executable can trigger a download", { skip:
     assert.equal(invalidOutput.blocked, true);
     assert.match(JSON.stringify(invalidOutput.content), /guard/i);
     assert.equal(existsSync(join(agent, "bin")), false);
+    const emptyNative = Buffer.alloc(64);
+    if (process.platform === "darwin") {
+      Buffer.from("cffaedfe", "hex").copy(emptyNative);
+      emptyNative.writeUInt32LE(2, 12);
+    } else {
+      Buffer.from("7f454c46", "hex").copy(emptyNative);
+      emptyNative[4] = 2; emptyNative[5] = 1; emptyNative[6] = 1;
+      emptyNative.writeUInt16LE(2, 16);
+    }
+    writeFileSync(join(bin, "rg"), emptyNative, { mode: 0o755 });
+    const nativeResult = spawnSync(process.execPath, ["--experimental-strip-types", fileURLToPath(new URL("./helpers/builtin-search-child.mjs", import.meta.url))], { env, encoding: "utf8", timeout: 30_000 });
+    assert.equal(nativeResult.status, 0, nativeResult.stderr);
+    const nativeOutput = JSON.parse(nativeResult.stdout);
+    assert.equal(nativeOutput.blocked, true);
+    assert.match(JSON.stringify(nativeOutput.content), /guard/i);
+    assert.equal(existsSync(join(agent, "bin")), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
     rmSync(bin, { recursive: true, force: true });
