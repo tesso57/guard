@@ -716,7 +716,7 @@ export function expandGlobFully(cwd: string, pattern: string): { matches: string
 const SKIP_WALK = new Set(["node_modules", ".git", ".hg", ".svn", "dist", "build", "target", ".venv", "venv", "__pycache__"]);
 
 /** Walks a directory tree with bounded depth and entry count, calling fn for each file. Returns false if cut short. */
-export function walkBounded(root: string, fn: (path: string, name: string) => void, maxDepth = 6, maxEntries = 5000, skip = SKIP_WALK): boolean {
+export function walkBounded(root: string, fn: (path: string, name: string) => void, maxDepth = 6, maxEntries = 5000, skip = SKIP_WALK, descend?: (path: string, name: string) => boolean): boolean {
   let seen = 0;
   let complete = true;
   const visit = (dir: string, depth: number) => {
@@ -742,7 +742,7 @@ export function walkBounded(root: string, fn: (path: string, name: string) => vo
         }
         const p = join(dir, entry.name);
         if (entry.isDirectory()) {
-          if (!skip.has(entry.name)) visit(p, depth + 1);
+          if (!skip.has(entry.name) && (!descend || descend(p, entry.name))) visit(p, depth + 1);
         } else fn(p, entry.name);
       }
     } finally {
@@ -776,7 +776,7 @@ export function secretFilesUnder(root: string, projectRoot?: string, suffixes?: 
           if (st.isFile() && st.nlink > 1 && !(projectRoot && isProjectHardlinkSafe(p, projectRoot))) uncertain = true;
         }
       } catch { uncertain = true; }
-    }, 12, 20_000, new Set());
+    }, 12, 20_000, new Set(), (_path, name) => includeHidden || !name.startsWith("."));
     return { files, complete: complete && !uncertain };
   });
 }

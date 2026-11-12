@@ -1629,6 +1629,20 @@ name: visible
 }
 
 {
+  const repo = mkdtempSync(join(tmpdir(), "guard-rg-hidden-depth-"));
+  const deep = join(repo, ".git", "objects", ...Array(14).fill("nested"));
+  mkdirSync(deep, { recursive: true });
+  writeFileSync(join(repo, "visible.txt"), "needle\n");
+  writeFileSync(join(deep, "item"), "hidden fixture\n");
+  const safe = (command: string) => {
+    clearPathCache();
+    return safeAllow("bash", { command }, repo, O, P(command));
+  };
+  ok("rg: a deep hidden Git directory does not make default search incomplete", safe("rg needle ."));
+  ok("rg: hidden searches remain conservative for deep directories", !safe("rg --hidden needle ."));
+}
+
+{
   const repo = mkdtempSync(join(tmpdir(), "guard-rg-hidden-types-"));
   writeFileSync(join(repo, ".env"), "needle\n");
   const inspect = (command: string) => {
