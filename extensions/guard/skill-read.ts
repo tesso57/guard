@@ -5,7 +5,7 @@ import { types as utilTypes } from "node:util";
 import { AGENT_DIR } from "./config.ts";
 import { clearPathCache, isInsideExact, isProjectHardlinkSafe, isProjectPath, pathVariants, realPath, resolvePath, secretFilesUnder } from "./paths.ts";
 import { inputPaths, inspectExecutablePath, usesRipgrepConfig } from "./policy.ts";
-import { grepExplicitPaths, isReadOnlyArgv, parseShell, rgExplicitPaths, rgReadsStdin } from "./shell.ts";
+import { grepExplicitPaths, isReadOnlyArgv, parseShell, rgExplicitPaths, rgListsFiles, rgReadsStdin } from "./shell.ts";
 
 export type RegisteredSkill = { path: string; target: string };
 
@@ -65,12 +65,17 @@ export function isSkillRead(tool: string, input: unknown, cwd: string, registere
     const otherSubs = parsed.subs.filter((sub) => sub.argv[0] !== "grep");
     const other = otherSubs.length ? inputPaths("bash", input, cwd, { ...parsed, subs: otherSubs, subcommands: otherSubs.map((sub) => sub.argv) }) : { reads: [], writes: [] };
     const paths = [...grepTargets, ...other.reads];
+    const onlyFileLists = parsed.subs.every((sub) => {
+      if (sub.argv[0] === "grep") return grepExplicitPaths(sub.argv, true)?.length === 0;
+      if (sub.argv[0] === "rg") return rgListsFiles(sub.argv) || rgExplicitPaths(sub.argv)?.length === 0;
+      return true;
+    });
     return paths.length > 0 && other.writes.length === 0 && paths.every((path) => {
       if (!inside(path)) return false;
       const stat = statSync(path);
       if (stat.isFile()) return stat.nlink <= 1 || isProjectHardlinkSafe(path, cwd);
       return parsed.subs.some((sub) => ["rg", "grep"].includes(sub.argv[0])) && stat.isDirectory() &&
-        secretFilesUnder(path, isProjectPath(path, cwd) ? cwd : undefined).complete;
+        (onlyFileLists || secretFilesUnder(path, isProjectPath(path, cwd) ? cwd : undefined).complete);
     });
   } catch { return false; }
 }
