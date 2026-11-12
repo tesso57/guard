@@ -35,6 +35,20 @@ function immutableSystemExecutable(candidate: string, actual: string, st: Stats)
   }
   return true;
 }
+
+/** Read a bounded prefix only while the opened file remains the inspected regular file. */
+function executablePrefix(path: string, expected: Stats, limit: number): Buffer {
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
+  try {
+    const before = fstatSync(fd);
+    if (!before.isFile() || before.dev !== expected.dev || before.ino !== expected.ino || before.size !== expected.size || before.mtimeMs !== expected.mtimeMs || before.ctimeMs !== expected.ctimeMs) throw new Error("executable changed");
+    const bytes = Buffer.alloc(limit);
+    const length = readSync(fd, bytes, 0, limit, 0);
+    const after = fstatSync(fd);
+    if (after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs) throw new Error("executable changed during inspection");
+    return bytes.subarray(0, length);
+  } finally { closeSync(fd); }
+}
 const BASH_BUILTINS = new Set(["echo", "printf", "pwd", "cd", "pushd", "popd", "dirs", "true", "false", "test", "[", "type", "command", "builtin", "enable", "export", "set", "declare", "unset", "read", "history", "help", "alias", "unalias", "hash", ":"]);
 
 function printfChanges(args: string[], matches: (name: string) => boolean): boolean {
@@ -199,19 +213,13 @@ export function inspectBuiltinSearchExecutable(tool: string, cwd: string, piVers
       selected.push([candidate, actual, st.dev, st.ino, st.mode, st.nlink, st.size, st.mtimeMs, st.ctimeMs]);
       interpreterRisk = undefined;
       if (st.isFile()) {
-        let fd: number | undefined;
         try {
-          fd = openSync(candidate, constants.O_RDONLY | constants.O_NONBLOCK);
-          const opened = fstatSync(fd);
-          if (!opened.isFile() || opened.dev !== st.dev || opened.ino !== st.ino || opened.size !== st.size || opened.mtimeMs !== st.mtimeMs || opened.ctimeMs !== st.ctimeMs) throw new Error("executable changed");
-          const header = Buffer.alloc(512);
-          const length = readSync(fd, header, 0, header.length, 0);
-          const after = fstatSync(fd);
-          if (after.size !== opened.size || after.mtimeMs !== opened.mtimeMs || after.ctimeMs !== opened.ctimeMs) throw new Error("executable changed during inspection");
+          const header = executablePrefix(candidate, st, 512);
+          const length = header.length;
           if (length >= 2 && header[0] === 35 && header[1] === 33) {
             const end = header.indexOf(10, 2);
-            if (end < 0 && length === header.length) throw new Error("interpreter line is too long");
-            const lineBytes = header.subarray(2, end < 0 ? length : end);
+            if (end < 0) throw new Error("interpreter line is incomplete");
+            const lineBytes = header.subarray(2, end);
             if (!isUtf8(lineBytes)) throw new Error("interpreter path is not UTF-8");
             const line = lineBytes.toString("utf8");
             const interpreter = line.match(/^[ \t]*([^ \t\r]+)(?:[ \t]|$)/)?.[1];
@@ -221,12 +229,13 @@ export function inspectBuiltinSearchExecutable(tool: string, cwd: string, piVers
             const resolved = realPath(interpreter);
             if (!interpreterStat.isFile()) throw new Error("interpreter is not a file");
             selected.push([interpreter, resolved, interpreterStat.dev, interpreterStat.ino, interpreterStat.mode, interpreterStat.nlink, interpreterStat.size, interpreterStat.mtimeMs, interpreterStat.ctimeMs]);
+            const prefix = executablePrefix(interpreter, interpreterStat, 2);
+            if (prefix.length === 2 && prefix[0] === 35 && prefix[1] === 33) interpreterRisk = "the built-in search executable uses a nested script interpreter";
             if (basename(resolved) === "env" || [interpreter, resolved].some((p) => roots.some((root) => isInside(p, root))) ||
                 (interpreterStat.nlink > 1 && !immutableSystemExecutable(interpreter, resolved, interpreterStat)))
-              interpreterRisk = "the built-in search executable uses an unverified interpreter";
+              interpreterRisk ??= "the built-in search executable uses an unverified interpreter";
           }
         } catch { interpreterRisk = "cannot verify the built-in search executable's interpreter"; }
-        finally { if (fd !== undefined) { try { closeSync(fd); } catch { interpreterRisk = "cannot inspect the built-in search executable safely"; } } }
       }
       return true;
     } catch (error: any) {

@@ -73,6 +73,16 @@ test("Pi asks before a broken search executable can trigger a download", { skip:
       assert.equal(existsSync(join(agent, "bin")), false, tool);
       rmSync(join(bin, binary));
     }
+    const nested = join(bin, "nested-interpreter");
+    writeFileSync(nested, "#!/guard-missing-interpreter\n", { mode: 0o755 });
+    writeFileSync(join(bin, "rg"), `#!${nested}\n`, { mode: 0o755 });
+    env.GUARD_TEST_TOOL = "grep";
+    const nestedResult = spawnSync(process.execPath, ["--experimental-strip-types", fileURLToPath(new URL("./helpers/builtin-search-child.mjs", import.meta.url))], { env, encoding: "utf8", timeout: 30_000 });
+    assert.equal(nestedResult.status, 0, nestedResult.stderr);
+    const nestedOutput = JSON.parse(nestedResult.stdout);
+    assert.equal(nestedOutput.blocked, true);
+    assert.match(JSON.stringify(nestedOutput.content), /guard/i);
+    assert.equal(existsSync(join(agent, "bin")), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
     rmSync(bin, { recursive: true, force: true });
