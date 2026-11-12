@@ -13,7 +13,7 @@ test("Pi can read a skill without guard handling the call", async () => {
   const dir = await mkdtemp(join(tmpdir(), "guard-skill-pi-"));
   const project = join(dir, "project"), agentDir = join(dir, "agent"), skillDir = join(project, ".agents", "skills", "fixture");
   const externalSkillDir = join(dir, "external-package", "skills", "registered");
-  const isolated = (key: string) => ["RISK_", "GUARD_", "OPENAI_", "PI_", "BASH_FUNC_"].some((prefix) => key.startsWith(prefix)) || ["HOME", "XDG_CONFIG_HOME", "GREP_OPTIONS", "RIPGREP_CONFIG_PATH", "BASH_ENV", "ENV", "BASHOPTS", "SHELLOPTS"].includes(key);
+  const isolated = (key: string) => ["RISK_", "GUARD_", "OPENAI_", "PI_", "BASH_FUNC_", "LD_", "DYLD_"].some((prefix) => key.startsWith(prefix)) || ["HOME", "XDG_CONFIG_HOME", "GREP_OPTIONS", "RIPGREP_CONFIG_PATH", "BASH_ENV", "ENV", "BASHOPTS", "SHELLOPTS"].includes(key);
   const previous = new Map(Object.entries(process.env).filter(([key]) => isolated(key)));
   for (const key of previous.keys()) delete process.env[key];
   Object.assign(process.env, { HOME: dir, XDG_CONFIG_HOME: join(dir, "config"), PI_CODING_AGENT_DIR: agentDir });

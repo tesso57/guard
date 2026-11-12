@@ -23,7 +23,7 @@ import { MAX_FILE_BYTES, readBoundedText } from "./files.ts";
 import { buildRequest, callDecisions, evaluate, MAX_ATTACHED_FILES, type ModelVerdict } from "./judge.ts";
 import { redact } from "./redact.ts";
 import { clearPathCache, createTrustedDirState, isFreelyReadable, listTrustedDirs, trustDir, type TrustedDirState, isHardLinked, isInsideExact, pathLikeTokens, pathVariants, protectedReason, protectedRoots, realPath, recentlyChangedFiles, resolvePath, sensitiveReason } from "./paths.ts";
-import { BUILTIN_TOOLS, hardDeny, hasUninspectedToolInput, inputPaths, inspectBuiltinSearchExecutable, inspectExecutablePath, pathsStayInProject, piString, safeAllow, searchNeedsJudgement, sensitive, usesGrepOptions, usesRipgrepConfig, writesStayPlain } from "./policy.ts";
+import { BUILTIN_TOOLS, dynamicLoaderEnvironment, hardDeny, hasUninspectedToolInput, inputPaths, inspectBuiltinSearchExecutable, inspectExecutablePath, pathsStayInProject, piString, safeAllow, searchNeedsJudgement, sensitive, usesGrepOptions, usesRipgrepConfig, writesStayPlain } from "./policy.ts";
 import { type Decision, deriveDenyPatterns, derivePatterns, describeMatch, globalAllowPatternIsReadOnly, type Match, newId, type Rule, RuleStore, type Scope, supportsAnyInputAllow } from "./rules.ts";
 import { isReadOnlyArgv, normalizeArgv, type Parsed, parseShell, rgDisablesConfig, rgInfoOnly } from "./shell.ts";
 import { isSkillRead, type RegisteredSkill } from "./skill-read.ts";
@@ -120,9 +120,9 @@ function shellEnvironmentHash(parsed?: Parsed): string {
     return ["git", "npm"].includes(argv[0]) || !isReadOnlyArgv(raw);
   });
   const usesGrep = unknown || parsed.subcommands.some((raw) => ["grep", "egrep", "fgrep", "git", "npm"].includes(normalizeArgv(raw, "deny").argv[0]) || !isReadOnlyArgv(raw));
-  return stableHash(Object.fromEntries(Object.entries(process.env).filter(([key]) =>
+  return stableHash([dynamicLoaderEnvironment(), Object.fromEntries(Object.entries(process.env).filter(([key]) =>
     key.toLowerCase() === "path" || ["BASH_ENV", "ENV", "BASHOPTS", "SHELLOPTS", "PS4"].includes(key) || (usesRipgrep && key === "RIPGREP_CONFIG_PATH") || (usesGrep && key === "GREP_OPTIONS") || (key.startsWith("BASH_FUNC_") && key.endsWith("%%")),
-  )));
+  ))]);
 }
 
 function textOf(content: unknown): string {

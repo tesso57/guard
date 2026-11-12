@@ -20,7 +20,7 @@ process.on("exit", () => {
 
 // Isolate everything: a fake HOME (for ~/.ssh etc.), a fake pi agent dir, and a project dir.
 for (const key of Object.keys(process.env)) {
-  if (["GIT_", "RISK_", "GUARD_", "OPENAI_", "PI_", "BASH_FUNC_"].some((prefix) => key.startsWith(prefix)) || ["RIPGREP_CONFIG_PATH", "GREP_OPTIONS", "CDPATH", "OLDPWD", "BASH_ENV", "ENV", "BASHOPTS", "SHELLOPTS", "PS4", "NODE_OPTIONS"].includes(key) || ["http_proxy", "https_proxy", "all_proxy", "no_proxy"].includes(key.toLowerCase()) || (process.platform !== "win32" && key.toLowerCase() === "path" && key !== "PATH")) delete process.env[key];
+  if (["GIT_", "RISK_", "GUARD_", "OPENAI_", "PI_", "BASH_FUNC_", "LD_", "DYLD_"].some((prefix) => key.startsWith(prefix)) || ["RIPGREP_CONFIG_PATH", "GREP_OPTIONS", "CDPATH", "OLDPWD", "BASH_ENV", "ENV", "BASHOPTS", "SHELLOPTS", "PS4", "NODE_OPTIONS"].includes(key) || ["http_proxy", "https_proxy", "all_proxy", "no_proxy"].includes(key.toLowerCase()) || (process.platform !== "win32" && key.toLowerCase() === "path" && key !== "PATH")) delete process.env[key];
 }
 if (process.platform !== "win32") process.env.PATH = "/usr/bin:/bin";
 // Node 24+ can install a proxy dispatcher before this module runs. Permit only the local mock directly.
@@ -82,7 +82,7 @@ if (http.setGlobalProxyFromEnv) {
 }
 
 const { parseShell, normalizeArgv, isReadOnlyArgv, unwrapCommandWrappers } = await import("../extensions/guard/shell.ts");
-const { enclosingRepository, executablePathRisk, inspectBuiltinSearchExecutable, inspectExecutablePath, hardDeny, sensitive, safeAllow, usesGrepOptions, usesRipgrepConfig, writesStayPlain } = await import("../extensions/guard/policy.ts");
+const { enclosingRepository, executablePathRisk, hasDynamicLoaderEnvironment, inspectBuiltinSearchExecutable, inspectExecutablePath, hardDeny, sensitive, safeAllow, usesGrepOptions, usesRipgrepConfig, writesStayPlain } = await import("../extensions/guard/policy.ts");
 const { clearPathCache, protectedRoots, secretFilesUnder, isInside, isInsideExact, isFreelyReadable, sensitiveReason, walkBounded, ignoreFilesReinclude, expandGlobFully, gitConfigIsSafe } = await import("../extensions/guard/paths.ts");
 const { derivePatterns, deriveDenyPatterns, describeMatch, examples, newId, RuleStore } = await import("../extensions/guard/rules.ts");
 const { evaluate, buildRequest, callDecisions } = await import("../extensions/guard/judge.ts");
@@ -142,6 +142,37 @@ mkdirSync(join(enclosingRepo, "subdir"));
 ok("policy: repository detection includes an enclosing Git repository", enclosingRepository(join(enclosingRepo, "subdir")) === enclosingRepo);
 ok("policy: Windows external commands require confirmation when executable lookup cannot be verified", !!executablePathRisk(P("git status"), PROJ, "win32") && !!executablePathRisk(P("command git status"), PROJ, "win32") && !!executablePathRisk(P("./echo hi"), PROJ, "win32"));
 ok("policy: Windows shell builtins do not require executable lookup", executablePathRisk(P("echo hello"), PROJ, "win32") === undefined);
+if (["darwin", "linux", "freebsd", "openbsd", "netbsd", "sunos"].includes(process.platform)) {
+  const loaderKey = process.platform === "darwin" ? "DYLD_INSERT_LIBRARIES" : "LD_PRELOAD";
+  const previous = process.env[loaderKey];
+  process.env[loaderKey] = "/guard-test-loader";
+  try {
+    ok("policy: inherited dynamic loader settings require confirmation for bash", !!sensitive("bash", { command: "echo hello" }, PROJ, roots, P("echo hello")));
+    ok("policy: inherited dynamic loader settings require confirmation for built-in search", !!inspectBuiltinSearchExecutable("grep", PROJ).risk?.includes("dynamic loader"));
+  } finally { if (previous === undefined) delete process.env[loaderKey]; else process.env[loaderKey] = previous; }
+  for (const inline of [`${loaderKey}=/guard-test-loader rg needle docs`, `env ${loaderKey}=/guard-test-loader rg needle docs`, `export ${loaderKey}=/guard-test-loader; rg needle docs`, `printf -v ${loaderKey} /guard-test-loader; rg needle docs`])
+    ok(`policy: inline dynamic loader settings require confirmation: ${inline}`, !!sensitive("bash", { command: inline }, PROJ, roots, P(inline)));
+  const pattern = `grep -F -e '${loaderKey}=' docs/file.txt`;
+  ok("policy: a dynamic loader variable used as a search pattern is not a setting", !sensitive("bash", { command: pattern }, PROJ, roots, P(pattern)));
+  const searchPathKey = process.platform === "darwin" ? "DYLD_LIBRARY_PATH" : "LD_LIBRARY_PATH";
+  const priorSearchPath = process.env[searchPathKey];
+  process.env[searchPathKey] = "";
+  try { ok("policy: an empty dynamic library search path remains untrusted", !!inspectBuiltinSearchExecutable("grep", PROJ).risk?.includes("dynamic loader")); }
+  finally { if (priorSearchPath === undefined) delete process.env[searchPathKey]; else process.env[searchPathKey] = priorSearchPath; }
+  const inertKey = process.platform === "darwin" ? "DYLD_PRINT_STATISTICS" : "LD_DEBUG";
+  const priorInert = process.env[inertKey];
+  process.env[inertKey] = "1";
+  try { ok("policy: informational loader settings do not require confirmation", !hasDynamicLoaderEnvironment()); }
+  finally { if (priorInert === undefined) delete process.env[inertKey]; else process.env[inertKey] = priorInert; }
+  if (process.platform === "linux") {
+    process.env.LD_DEBUG_OUTPUT = "/guard-test-debug";
+    try {
+      ok("policy: an inactive loader debug output path does not require confirmation", !hasDynamicLoaderEnvironment());
+      process.env.LD_DEBUG = "libs";
+      ok("policy: an active loader debug output path requires confirmation", hasDynamicLoaderEnvironment());
+    } finally { delete process.env.LD_DEBUG; delete process.env.LD_DEBUG_OUTPUT; }
+  }
+}
 if (process.platform !== "win32") {
   const dir = mkdtempSync(join(tmpdir(), "guard-builtin-search-"));
   const before = process.env.PATH;
@@ -2607,6 +2638,19 @@ if (process.platform !== "win32") {
     };
     const changed = await run("grep", { path: "docs", pattern: "needle" });
     ok("int: a built-in search executable change during confirmation blocks the call", changed?.block === true);
+    await run("bash", { command: "echo reset-builtin-loader-counter" });
+    const key = process.platform === "darwin" ? "DYLD_INSERT_LIBRARIES" : "LD_PRELOAD";
+    const previousLoader = process.env[key];
+    let loaderDialogOpened = false;
+    ctx.ui.select = async (_message: string, options: string[]) => {
+      loaderDialogOpened = true;
+      process.env[key] = "opaque-builtin-loader-value";
+      return options.find((option) => option.includes("this time only")) ?? "Deny";
+    };
+    try {
+      const changedLoader = await run("grep", { path: "docs", pattern: "needle" });
+      ok("int: a built-in search loader change during confirmation blocks without leaking values", loaderDialogOpened && changedLoader?.block === true && changedLoader.reason.includes("changed") && !JSON.stringify(tail(1)[0]).includes("opaque-builtin-loader-value"));
+    } finally { if (previousLoader === undefined) delete process.env[key]; else process.env[key] = previousLoader; }
   } finally {
     if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
     ctx.ui.select = previousSelect;
@@ -3142,6 +3186,19 @@ if (process.platform !== "win32") {
   } finally {
     ctx.ui.select = savedSelect;
     if (priorBashEnv === undefined) delete process.env.BASH_ENV; else process.env.BASH_ENV = priorBashEnv;
+  }
+  if (process.platform === "darwin" || process.platform === "linux") {
+    await run("bash", { command: "echo reset-loader-env-counter" });
+    const key = process.platform === "darwin" ? "DYLD_INSERT_LIBRARIES" : "LD_PRELOAD";
+    const previous = process.env[key];
+    ctx.ui.select = async () => { process.env[key] = "opaque-loader-value"; return "Allow (this time only)"; };
+    try {
+      const result = await run("bash", { command: "guard-dialog-loader-env operation" });
+      ok("int: dynamic loader changes during confirmation block without leaking values", result?.block === true && result.reason.includes("shell environment changed") && !JSON.stringify(tail(1)[0]).includes("opaque-loader-value"));
+    } finally {
+      ctx.ui.select = savedSelect;
+      if (previous === undefined) delete process.env[key]; else process.env[key] = previous;
+    }
   }
   await run("bash", { command: "git status" });
   const priorGrepEnv = process.env.GREP_OPTIONS;

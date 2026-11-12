@@ -15,7 +15,7 @@ test("ripgrep visibility and guard decisions agree on representative searches", 
   const dir = mkdtempSync(join(tmpdir(), "guard-rg-parity-"));
   const home = join(dir, "home"), project = join(dir, "project");
   mkdirSync(home); mkdirSync(project);
-  const isolated = (key: string) => ["GIT_", "PI_", "RISK_", "GUARD_", "OPENAI_", "BASH_FUNC_"].some((prefix) => key.startsWith(prefix)) || ["HOME", "XDG_CONFIG_HOME", "RIPGREP_CONFIG_PATH", "GREP_OPTIONS", "BASH_ENV", "ENV", "BASHOPTS", "SHELLOPTS", "PS4"].includes(key);
+  const isolated = (key: string) => ["GIT_", "PI_", "RISK_", "GUARD_", "OPENAI_", "BASH_FUNC_", "LD_", "DYLD_"].some((prefix) => key.startsWith(prefix)) || ["HOME", "XDG_CONFIG_HOME", "RIPGREP_CONFIG_PATH", "GREP_OPTIONS", "BASH_ENV", "ENV", "BASHOPTS", "SHELLOPTS", "PS4"].includes(key);
   const previous = new Map(Object.entries(process.env).filter(([key]) => isolated(key)));
   for (const key of previous.keys()) delete process.env[key];
   Object.assign(process.env, { HOME: home, XDG_CONFIG_HOME: join(home, "config"), PI_CODING_AGENT_DIR: join(dir, "agent"), GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" });

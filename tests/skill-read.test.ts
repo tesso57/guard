@@ -7,7 +7,7 @@ import { isSkillRead } from "../extensions/guard/skill-read.ts";
 import { inspectBuiltinSearchExecutable, searchNeedsJudgement, sensitive } from "../extensions/guard/policy.ts";
 import { isReadOnlyArgv, parseShell, rgExplicitPaths } from "../extensions/guard/shell.ts";
 
-const isolatedEnv = new Map(Object.entries(process.env).filter(([key]) => key.startsWith("BASH_FUNC_") || ["RIPGREP_CONFIG_PATH", "GREP_OPTIONS", "BASH_ENV", "ENV", "BASHOPTS", "SHELLOPTS"].includes(key)));
+const isolatedEnv = new Map(Object.entries(process.env).filter(([key]) => ["BASH_FUNC_", "LD_", "DYLD_"].some((prefix) => key.startsWith(prefix)) || ["RIPGREP_CONFIG_PATH", "GREP_OPTIONS", "BASH_ENV", "ENV", "BASHOPTS", "SHELLOPTS"].includes(key)));
 for (const key of isolatedEnv.keys()) delete process.env[key];
 test.after(() => { for (const [key, value] of isolatedEnv) if (value !== undefined) process.env[key] = value; });
 
@@ -155,6 +155,17 @@ test("only direct read-only access within standard skill directories bypasses gu
     assert.equal(isSkillRead("ls", { path: join(cwd, ".agents", "skills", "example", "outside-dir") }, cwd), false);
     assert.equal(isSkillRead("read", { path: skill }, cwd), true);
     assert.equal(isSkillRead("bash", { command: `cat '${skill}'` }, cwd), true);
+    if (process.platform === "darwin" || process.platform === "linux") {
+      const key = process.platform === "darwin" ? "DYLD_INSERT_LIBRARIES" : "LD_PRELOAD";
+      process.env[key] = "/guard-test-loader";
+      try {
+        assert.equal(isSkillRead("bash", { command: `cat '${skill}'` }, cwd), false);
+        assert.equal(isSkillRead("grep", { path: skill, pattern: "example" }, cwd), false);
+        assert.equal(isSkillRead("find", { path: join(cwd, ".agents", "skills", "example"), pattern: "*.md" }, cwd), false);
+        assert.equal(isSkillRead("read", { path: skill }, cwd), true);
+        assert.equal(isSkillRead("ls", { path: join(cwd, ".agents", "skills", "example") }, cwd), true);
+      } finally { delete process.env[key]; }
+    }
     assert.equal(isSkillRead("bash", { command: `cat '${skill}' | head -n 1` }, cwd), true);
     assert.equal(isSkillRead("bash", { command: `cat '${skill}' | sed -n '1p'` }, cwd), true);
     assert.equal(isSkillRead("bash", { command: `grep -n example '${skill}'` }, cwd), true);

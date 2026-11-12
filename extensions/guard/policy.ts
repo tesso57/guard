@@ -21,6 +21,21 @@ import { containsProtectedRoot, expandGlobFully, trustedDirFor, trustedDirRelati
 export const BUILTIN_TOOLS = new Set(["bash", "edit", "write", "read", "grep", "find", "ls"]);
 const INCOMPLETE_DIRECTORY_COMPARISON = "/__guard_incomplete_directory_comparison__";
 
+const LINUX_LOADER_ENV = ["LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "LD_DEBUG", "LD_DEBUG_OUTPUT", "LD_PROFILE", "LD_PROFILE_OUTPUT", "LD_ORIGIN_PATH"];
+const MAC_LOADER_ENV = ["DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH", "DYLD_FALLBACK_LIBRARY_PATH", "DYLD_FALLBACK_FRAMEWORK_PATH", "DYLD_ROOT_PATH", "DYLD_IMAGE_SUFFIX", "DYLD_VERSIONED_LIBRARY_PATH", "DYLD_VERSIONED_FRAMEWORK_PATH", "DYLD_SHARED_CACHE_DIR", "DYLD_SHARED_CACHE_DONT_VALIDATE", "DYLD_SHARED_REGION"];
+const loaderEnvNames = () => process.platform === "darwin" ? MAC_LOADER_ENV : ["linux", "freebsd", "openbsd", "netbsd", "sunos"].includes(process.platform) ? LINUX_LOADER_ENV : [];
+export function dynamicLoaderEnvironment(): [string, string][] {
+  return loaderEnvNames().flatMap((key) => process.env[key] === undefined ? [] : [[key, process.env[key]!]]);
+}
+export function hasDynamicLoaderEnvironment(): boolean {
+  return dynamicLoaderEnvironment().some(([key, value]) => {
+    if (key === "LD_DEBUG") return false;
+    if (key === "LD_DEBUG_OUTPUT") return !!value && !!process.env.LD_DEBUG;
+    if (key === "LD_PROFILE_OUTPUT") return !!value && !!process.env.LD_PROFILE;
+    return value.length > 0 || key.endsWith("_PATH");
+  });
+}
+
 /** An unmodifiable root-owned system binary cannot be rewritten through a project hard link. */
 function immutableSystemExecutable(candidate: string, actual: string, st: Stats): boolean {
   const roots = ["/bin", "/sbin", "/usr/bin", "/usr/sbin", "/lib", "/lib64", "/usr/lib", "/usr/lib64"];
@@ -116,7 +131,8 @@ function usesBuiltinControl(parsed: Parsed): boolean {
 }
 
 function changesShellStartup(parsed: Parsed): boolean {
-  const relevant = /^(?:(?:BASH_ENV|ENV|BASHOPTS|SHELLOPTS|PS4)(?:\[[^\]]*\])?(?:\+?=|$)|BASH_FUNC_.*%%=)/;
+  const loaderNames = loaderEnvNames().filter((name) => name !== "LD_DEBUG");
+  const relevant = new RegExp(`^(?:(?:${["BASH_ENV", "ENV", "BASHOPTS", "SHELLOPTS", "PS4", ...loaderNames].join("|")})(?:\\[[^\\]]*\\])?(?:\\+?=|$)|BASH_FUNC_.*%%=)`);
   return parsed.subs.some((s) => {
     if (s.assigns.some((assignment) => relevant.test(assignment)) || ((s.argv[0] ?? "").includes("=") && relevant.test(s.argv[0]))) return true;
     let changes = false;
@@ -233,15 +249,17 @@ export function executablePathRisk(parsed: Parsed, cwd: string, platform: NodeJS
 /** Pi's grep/find resolve and may download executables before running the search. */
 export function inspectBuiltinSearchExecutable(tool: string, cwd: string, piVersion = piSdk.VERSION ?? ""): { risk?: string; fingerprint?: string; available?: boolean } {
   if (tool !== "grep" && tool !== "find") return {};
-  if (process.platform === "win32") return { risk: "cannot verify the executable used by the built-in search tool on Windows" };
+  const loaderEnvironment = dynamicLoaderEnvironment();
+  const earlyFingerprint = createHash("sha256").update(JSON.stringify([tool, process.env.PATH, process.env.PI_OFFLINE, piVersion, loaderEnvironment])).digest("hex");
+  if (process.platform === "win32") return { risk: "cannot verify the executable used by the built-in search tool on Windows", fingerprint: earlyFingerprint };
   const names = tool === "grep" ? ["rg"] : ["fd", "fdfind"];
   const local = join(AGENT_DIR, "bin", names[0]);
   const path = process.env.PATH;
-  if (path === undefined) return { risk: "cannot determine the built-in search executable path" };
+  if (path === undefined) return { risk: "cannot determine the built-in search executable path", fingerprint: earlyFingerprint };
   const offline = process.env.PI_OFFLINE ?? "";
   const physicalCwd = realPath(cwd);
   const roots = [cwd, physicalCwd, enclosingRepository(cwd), enclosingRepository(physicalCwd), AGENT_DIR, realPath(AGENT_DIR), "/tmp", "/private/tmp", tmpdir(), realPath(tmpdir())].filter((root): root is string => !!root);
-  const selected: unknown[] = [tool, local, path, offline, piVersion, process.cwd()];
+  const selected: unknown[] = [tool, local, path, offline, piVersion, process.cwd(), loaderEnvironment];
   let multipleLinks = false;
   let interpreterRisk: string | undefined;
   let nativeReadBudget = 1_048_576;
@@ -328,7 +346,7 @@ export function inspectBuiltinSearchExecutable(tool: string, cwd: string, piVers
   };
   try {
     let found = false;
-    let risk: string | undefined;
+    let risk: string | undefined = hasDynamicLoaderEnvironment() ? "dynamic loader environment may load external code" : undefined;
     let probes = 0;
     const inspectCandidate = (candidate: string, relativeLookup: boolean, requireExecutable: boolean) => {
       if (!inspect(candidate, requireExecutable)) return;
@@ -1081,10 +1099,11 @@ export function usesGrepOptions(parsed?: Parsed): boolean {
 }
 
 export function sensitive(tool: string, input: any, cwd: string, roots: string[], parsed?: Parsed): string | undefined {
+  if (tool === "bash" && hasDynamicLoaderEnvironment()) return "dynamic loader environment may load external code";
   if (tool === "bash" && (process.env.BASH_ENV || process.env.ENV || process.env.BASHOPTS || process.env.SHELLOPTS || Object.keys(process.env).some((key) => key.startsWith("BASH_FUNC_") && key.endsWith("%%"))))
     return "shell startup settings, options or imported functions may run code or alter parsing";
   if (tool === "bash" && parsed && changesShellStartup(parsed))
-    return "the command changes shell startup or tracing settings";
+    return "the command changes shell startup or tracing settings, or dynamic loader settings";
   if (tool === "bash" && parsed && usesShellNameref(parsed))
     return "indirect shell variable references may change execution settings";
   if (tool === "bash" && parsed && usesBuiltinControl(parsed))

@@ -4,7 +4,7 @@ import { dirname, isAbsolute, join } from "node:path";
 import { types as utilTypes } from "node:util";
 import { AGENT_DIR } from "./config.ts";
 import { clearPathCache, isInsideExact, isProjectHardlinkSafe, isProjectPath, pathVariants, realPath, resolvePath, secretFilesUnder } from "./paths.ts";
-import { inputPaths, inspectBuiltinSearchExecutable, inspectExecutablePath, usesRipgrepConfig } from "./policy.ts";
+import { hasDynamicLoaderEnvironment, inputPaths, inspectBuiltinSearchExecutable, inspectExecutablePath, usesRipgrepConfig } from "./policy.ts";
 import { grepExplicitPaths, isReadOnlyArgv, parseShell, rgExplicitPaths, rgListsFiles, rgReadsStdin, rgUsesPatternFile } from "./shell.ts";
 
 export type RegisteredSkill = { path: string; target: string };
@@ -57,7 +57,7 @@ export function isSkillRead(tool: string, input: unknown, cwd: string, registere
       if (stat.isFile()) return stat.nlink <= 1 || isProjectHardlinkSafe(path, cwd);
       return stat.isDirectory() && secretFilesUnder(path, isProjectPath(path, cwd) ? cwd : undefined).complete;
     }
-    if (process.env.BASH_ENV || process.env.ENV || process.env.BASHOPTS || process.env.SHELLOPTS || Object.keys(process.env).some((name) => name.startsWith("BASH_FUNC_") && name.endsWith("%%"))) return false;
+    if (hasDynamicLoaderEnvironment() || process.env.BASH_ENV || process.env.ENV || process.env.BASHOPTS || process.env.SHELLOPTS || Object.keys(process.env).some((name) => name.startsWith("BASH_FUNC_") && name.endsWith("%%"))) return false;
     const parsed = parseShell(value);
     if (!parsed.ok || parsed.dynamic.length || parsed.globs.length || parsed.writes.length || parsed.heredocBodies.length || !parsed.subs.length) return false;
     const grepTargets: string[] = [];

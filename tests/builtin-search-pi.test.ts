@@ -14,7 +14,7 @@ test("Pi does not run a shadowed built-in search executable before confirmation"
     mkdirSync(project); mkdirSync(bin);
     writeFileSync(join(project, "file.txt"), "needle\n");
     for (const binary of ["rg", "fd"]) writeFileSync(join(bin, binary), "#!/bin/sh\nprintf executed > \"$GUARD_TEST_MARKER\"\n", { mode: 0o755 });
-    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(GUARD_|RISK_|PI_|OPENAI_|BASH_FUNC_)/.test(key) && !["BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "RIPGREP_CONFIG_PATH", "GREP_OPTIONS"].includes(key)));
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(GUARD_|RISK_|PI_|OPENAI_|BASH_FUNC_|LD_|DYLD_)/.test(key) && !["BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "RIPGREP_CONFIG_PATH", "GREP_OPTIONS"].includes(key)));
     Object.assign(env, { HOME: dir, XDG_CONFIG_HOME: join(dir, "config"), PI_CODING_AGENT_DIR: agent, GUARD_TEST_PROJECT: project, GUARD_TEST_MARKER: marker, PATH: `${bin}:/usr/bin:/bin` });
     for (const tool of ["grep", "find"]) {
       env.GUARD_TEST_TOOL = tool;
@@ -35,7 +35,7 @@ test("Pi cannot fall through a broken trusted candidate to an untrusted search e
   try {
     mkdirSync(project); mkdirSync(later);
     writeFileSync(join(project, "file.txt"), "needle\n");
-    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(GUARD_|RISK_|PI_|OPENAI_|BASH_FUNC_)/.test(key) && !["BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "RIPGREP_CONFIG_PATH", "GREP_OPTIONS"].includes(key)));
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(GUARD_|RISK_|PI_|OPENAI_|BASH_FUNC_|LD_|DYLD_)/.test(key) && !["BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "RIPGREP_CONFIG_PATH", "GREP_OPTIONS"].includes(key)));
     Object.assign(env, { HOME: dir, XDG_CONFIG_HOME: join(dir, "config"), PI_CODING_AGENT_DIR: agent, GUARD_TEST_PROJECT: project, GUARD_TEST_MARKER: marker, PATH: `${first}:${later}:/usr/bin:/bin` });
     for (const [tool, primary, fallback] of [["grep", "rg", "rg"], ["find", "fd", "fdfind"]]) {
       writeFileSync(join(first, primary), "#!/guard-missing-interpreter\n", { mode: 0o755 });
@@ -61,7 +61,7 @@ test("Pi asks before a broken search executable can trigger a download", { skip:
   try {
     mkdirSync(project);
     writeFileSync(join(project, "file.txt"), "needle\n");
-    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(GUARD_|RISK_|PI_|OPENAI_|BASH_FUNC_)/.test(key) && !["BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "RIPGREP_CONFIG_PATH", "GREP_OPTIONS"].includes(key)));
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(GUARD_|RISK_|PI_|OPENAI_|BASH_FUNC_|LD_|DYLD_)/.test(key) && !["BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "RIPGREP_CONFIG_PATH", "GREP_OPTIONS"].includes(key)));
     Object.assign(env, { HOME: dir, XDG_CONFIG_HOME: join(dir, "config"), PI_CODING_AGENT_DIR: agent, GUARD_TEST_PROJECT: project, PATH: bin });
     for (const [tool, binary] of [["grep", "rg"], ["find", "fd"]]) {
       writeFileSync(join(bin, binary), "#!/guard-missing-interpreter\n", { mode: 0o755 });
@@ -144,7 +144,7 @@ test("Pi asks before an ELF with a missing dynamic loader can trigger a download
     const executable = join(bin, "rg");
     writeFileSync(executable, original, { mode: 0o755 });
     assert.equal((spawnSync(executable, ["--version"]).error as NodeJS.ErrnoException | undefined)?.code, "ENOENT");
-    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(GUARD_|RISK_|PI_|OPENAI_|BASH_FUNC_)/.test(key) && !["BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "RIPGREP_CONFIG_PATH", "GREP_OPTIONS"].includes(key)));
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(GUARD_|RISK_|PI_|OPENAI_|BASH_FUNC_|LD_|DYLD_)/.test(key) && !["BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "RIPGREP_CONFIG_PATH", "GREP_OPTIONS"].includes(key)));
     Object.assign(env, { HOME: dir, XDG_CONFIG_HOME: join(dir, "config"), PI_CODING_AGENT_DIR: agent, GUARD_TEST_PROJECT: project, GUARD_TEST_TOOL: "grep", PATH: bin });
     const result = spawnSync(process.execPath, ["--experimental-strip-types", fileURLToPath(new URL("./helpers/builtin-search-child.mjs", import.meta.url))], { env, encoding: "utf8", timeout: 30_000 });
     assert.equal(result.status, 0, result.stderr);
@@ -189,7 +189,7 @@ test("Pi asks before a Mach-O with an untrusted loader can trigger a download", 
     mkdirSync(project);
     writeFileSync(join(project, "file.txt"), "needle\n");
     writeFileSync(join(bin, "rg"), file, { mode: 0o755 });
-    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(GUARD_|RISK_|PI_|OPENAI_|BASH_FUNC_)/.test(key) && !["BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "RIPGREP_CONFIG_PATH", "GREP_OPTIONS"].includes(key)));
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(GUARD_|RISK_|PI_|OPENAI_|BASH_FUNC_|LD_|DYLD_)/.test(key) && !["BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "RIPGREP_CONFIG_PATH", "GREP_OPTIONS"].includes(key)));
     Object.assign(env, { HOME: dir, XDG_CONFIG_HOME: join(dir, "config"), PI_CODING_AGENT_DIR: agent, GUARD_TEST_PROJECT: project, GUARD_TEST_TOOL: "grep", PATH: bin });
     const result = spawnSync(process.execPath, ["--experimental-strip-types", fileURLToPath(new URL("./helpers/builtin-search-child.mjs", import.meta.url))], { env, encoding: "utf8", timeout: 30_000 });
     assert.equal(result.status, 0, result.stderr);
@@ -206,7 +206,7 @@ test("Pi skips guard for verified built-in searches inside skill directories", {
   try {
     mkdirSync(skill, { recursive: true });
     writeFileSync(join(skill, "needle"), "needle\n");
-    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(GUARD_|RISK_|PI_|OPENAI_|BASH_FUNC_)/.test(key) && !["BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "RIPGREP_CONFIG_PATH", "GREP_OPTIONS"].includes(key)));
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(GUARD_|RISK_|PI_|OPENAI_|BASH_FUNC_|LD_|DYLD_)/.test(key) && !["BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "RIPGREP_CONFIG_PATH", "GREP_OPTIONS"].includes(key)));
     Object.assign(env, { HOME: dir, XDG_CONFIG_HOME: join(dir, "config"), PI_CODING_AGENT_DIR: agent, GUARD_TEST_PROJECT: project, GUARD_TEST_PATH: skill, GUARD_TEST_DENY: "1" });
     let exercised = 0;
     for (const [tool, binary] of [["grep", "rg"], ["find", "fd"]]) {
@@ -236,7 +236,7 @@ test("offline Pi reports missing search tools without a confirmation or download
   try {
     mkdirSync(skill, { recursive: true }); mkdirSync(bin);
     writeFileSync(join(skill, "needle"), "needle\n");
-    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(GUARD_|RISK_|PI_|OPENAI_|BASH_FUNC_)/.test(key) && !["BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "RIPGREP_CONFIG_PATH", "GREP_OPTIONS"].includes(key)));
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(GUARD_|RISK_|PI_|OPENAI_|BASH_FUNC_|LD_|DYLD_)/.test(key) && !["BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "RIPGREP_CONFIG_PATH", "GREP_OPTIONS"].includes(key)));
     Object.assign(env, { HOME: dir, XDG_CONFIG_HOME: join(dir, "config"), PI_CODING_AGENT_DIR: agent, PI_OFFLINE: "1", GUARD_TEST_PROJECT: project, GUARD_TEST_PATH: skill, PATH: bin });
     for (const tool of ["grep", "find"]) {
       env.GUARD_TEST_TOOL = tool;
@@ -248,5 +248,28 @@ test("offline Pi reports missing search tools without a confirmation or download
       assert.doesNotMatch(JSON.stringify(output.content), /guard/i, tool);
       assert.equal(existsSync(join(agent, "bin")), false, tool);
     }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("Pi does not skip a skill search with dynamic-loader injection settings", { skip: process.platform !== "darwin" && process.platform !== "linux" }, (t) => {
+  const location = spawnSync("which", ["rg"], { encoding: "utf8" });
+  if (location.status !== 0) return t.skip("ripgrep is unavailable");
+  const executable = realpathSync(location.stdout.trim());
+  if (basename(executable) !== "rg") return t.skip("ripgrep executable name cannot be verified");
+  const dir = mkdtempSync(join(tmpdir(), "guard-builtin-loader-env-"));
+  const project = join(dir, "project"), agent = join(dir, "agent"), skill = join(project, ".agents", "skills", "fixture");
+  try {
+    mkdirSync(skill, { recursive: true });
+    writeFileSync(join(skill, "needle"), "needle\n");
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(GUARD_|RISK_|PI_|OPENAI_|BASH_FUNC_|LD_|DYLD_)/.test(key) && !["BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "RIPGREP_CONFIG_PATH", "GREP_OPTIONS"].includes(key)));
+    Object.assign(env, { HOME: dir, XDG_CONFIG_HOME: join(dir, "config"), PI_CODING_AGENT_DIR: agent, GUARD_TEST_PROJECT: project, GUARD_TEST_PATH: skill, GUARD_TEST_TOOL: "grep", GUARD_TEST_LOADER_KEY: process.platform === "darwin" ? "DYLD_INSERT_LIBRARIES" : "LD_PRELOAD", PATH: `${dirname(executable)}:/usr/bin:/bin` });
+    const result = spawnSync(process.execPath, ["--experimental-strip-types", fileURLToPath(new URL("./helpers/builtin-search-child.mjs", import.meta.url))], { env, encoding: "utf8", timeout: 30_000 });
+    assert.equal(result.status, 0, result.stderr);
+    const output = JSON.parse(result.stdout);
+    assert.equal(output.blocked, true);
+    assert.match(JSON.stringify(output.content), /guard/i);
+    const audit = readFileSync(join(agent, "guard", "audit.jsonl"), "utf8");
+    assert.match(audit, /dynamic loader environment/);
+    assert.doesNotMatch(audit, /guard-test-loader/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
