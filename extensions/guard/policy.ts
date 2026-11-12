@@ -122,11 +122,13 @@ export function inspectExecutablePath(parsed: Parsed, cwd: string, platform: Nod
     if (!head || s.argv[0]?.includes("/") || BASH_BUILTINS.has(head)) continue;
     if (shellPath === undefined) return { risk: "cannot determine the shell executable search path" };
     if (unknown && pathEntries.some((entry) => !entry || !isAbsolute(entry))) return { risk: "cannot determine the executable search directory" };
-    for (const base of bases) {
+    // egrep/fgrep can be shell wrappers that resolve grep through PATH.
+    const executables = head === "egrep" || head === "fgrep" ? [head, "grep"] : [head];
+    for (const executable of executables) for (const base of bases) {
       let found = false;
       for (const entry of pathEntries) {
         if (++probes > 512) return { risk: "executable search exceeds the inspection limit" };
-        const candidate = join(resolve(base, entry || "."), head);
+        const candidate = join(resolve(base, entry || "."), executable);
         let st;
         try {
           accessSync(candidate, constants.X_OK);
@@ -137,12 +139,12 @@ export function inspectExecutablePath(parsed: Parsed, cwd: string, platform: Nod
           return { risk: "cannot inspect the executable search path" };
         }
         const actual = realPath(candidate);
-        selected.push([head, base, candidate, actual, st.dev, st.ino, st.mode, st.size, st.mtimeMs, st.ctimeMs]);
+        selected.push([executable, base, candidate, actual, st.dev, st.ino, st.mode, st.size, st.mtimeMs, st.ctimeMs]);
         if ([candidate, actual].some((path) => unsafeRoots.some((root) => isInside(path, root)))) risk ??= "a command resolves to a project, temporary or Pi-managed executable";
         found = true;
         break; // Bash uses the first executable it finds.
       }
-      if (!found) selected.push([head, base, null]);
+      if (!found) selected.push([executable, base, null]);
     }
   }
   return { risk, fingerprint: createHash("sha256").update(JSON.stringify(selected)).digest("hex") };

@@ -82,7 +82,7 @@ if (http.setGlobalProxyFromEnv) {
 }
 
 const { parseShell, normalizeArgv, isReadOnlyArgv, unwrapCommandWrappers } = await import("../extensions/guard/shell.ts");
-const { enclosingRepository, executablePathRisk, hardDeny, sensitive, safeAllow, usesGrepOptions, usesRipgrepConfig, writesStayPlain } = await import("../extensions/guard/policy.ts");
+const { enclosingRepository, executablePathRisk, inspectExecutablePath, hardDeny, sensitive, safeAllow, usesGrepOptions, usesRipgrepConfig, writesStayPlain } = await import("../extensions/guard/policy.ts");
 const { clearPathCache, protectedRoots, secretFilesUnder, isInside, isInsideExact, isFreelyReadable, sensitiveReason, walkBounded, ignoreFilesReinclude, expandGlobFully, gitConfigIsSafe } = await import("../extensions/guard/paths.ts");
 const { derivePatterns, deriveDenyPatterns, describeMatch, examples, newId, RuleStore } = await import("../extensions/guard/rules.ts");
 const { evaluate, buildRequest, callDecisions } = await import("../extensions/guard/judge.ts");
@@ -142,6 +142,19 @@ mkdirSync(join(enclosingRepo, "subdir"));
 ok("policy: repository detection includes an enclosing Git repository", enclosingRepository(join(enclosingRepo, "subdir")) === enclosingRepo);
 ok("policy: Windows external commands require confirmation when executable lookup cannot be verified", !!executablePathRisk(P("git status"), PROJ, "win32") && !!executablePathRisk(P("command git status"), PROJ, "win32") && !!executablePathRisk(P("./echo hi"), PROJ, "win32"));
 ok("policy: Windows shell builtins do not require executable lookup", executablePathRisk(P("echo hello"), PROJ, "win32") === undefined);
+if (process.platform !== "win32") {
+  const shadow = mkdtempSync(join(tmpdir(), "guard-grep-shadow-"));
+  const before = process.env.PATH;
+  process.env.PATH = `${shadow}:/usr/bin:/bin`;
+  try {
+    const initial = inspectExecutablePath(P("egrep needle file"), PROJ);
+    writeFileSync(join(shadow, "grep"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    const changed = inspectExecutablePath(P("egrep needle file"), PROJ);
+    ok("policy: egrep executable fingerprint changes when grep is shadowed", initial.fingerprint !== changed.fingerprint && !!changed.risk);
+    for (const name of ["egrep", "fgrep"])
+      ok(`policy: ${name} cannot inherit a shadowed grep executable`, !!executablePathRisk(P(`${name} needle file`), PROJ));
+  } finally { if (before === undefined) delete process.env.PATH; else process.env.PATH = before; }
+}
 const quotedRule = { kind: "argv-exact" as const, argv: ["printf", "two words", "it's", "", "$HOME"] };
 const quotedDescription = describeMatch("bash", quotedRule);
 ok("rules: displayed command preserves argument boundaries and shell metacharacters", JSON.stringify(P(quotedDescription).subcommands[0]) === JSON.stringify(quotedRule.argv));
