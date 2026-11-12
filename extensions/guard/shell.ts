@@ -27,6 +27,8 @@ export type Parsed = {
   subs: Sub[];
   /** argv of every subcommand (same order as subs). */
   subcommands: string[][];
+  /** Unquoted shell operators between commands, in encounter order. */
+  operators: string[];
   /** All output redirect targets, except /dev/null and friends. */
   writes: string[];
   /** Tokens that contain unquoted glob characters (* ? [). */
@@ -60,7 +62,7 @@ const FD_DUP = /(\d+|-)(?=$|[\s;&|<>()])/y;
 const FD_DIGITS = /(\d+|-)/y;
 
 export function parseShell(cmd: string, depth = 0): Parsed {
-  if (cmd.length > MAX_COMMAND) return { ok: false, subs: [], subcommands: [], writes: [], globs: [], dynamic: ["command too long to analyze"], substitutions: [], heredocBodies: [] };
+  if (cmd.length > MAX_COMMAND) return { ok: false, subs: [], subcommands: [], operators: [], writes: [], globs: [], dynamic: ["command too long to analyze"], substitutions: [], heredocBodies: [] };
   const substitutions: string[] = [];
   const nestedBodies: string[] = [];
   // arithDepth[i]: how deep position i is inside "(( ))" or the old "$[ ]" arithmetic (computed once, so the lexer
@@ -77,6 +79,7 @@ export function parseShell(cmd: string, depth = 0): Parsed {
   const dynamic: string[] = [];
   const globs: string[] = [];
   const subs: Sub[] = [];
+  const operators: string[] = [];
   let cur: Sub = { argv: [], assigns: [], writes: [], reads: [], heredocs: [] };
   /** Here-documents whose bodies start after the current line. */
   const pendingDocs: { sub: Sub; delim: string; stripTabs: boolean; quoted: boolean }[] = [];
@@ -196,6 +199,7 @@ export function parseShell(cmd: string, depth = 0): Parsed {
     }
     if (c === "\n" || c === ";") {
       endCmd();
+      operators.push(c);
       if (c === "\n" && pendingDocs.length) {
         // Here-document bodies follow the line that opened them; they are data for the command, not words
         let pos = i + 1;
@@ -241,6 +245,7 @@ export function parseShell(cmd: string, depth = 0): Parsed {
         continue;
       }
       endCmd();
+      operators.push(n === c ? c + n : c === "|" && n === "&" ? "|&" : c);
       if (n === c || (c === "|" && n === "&")) i++;
       continue;
     }
@@ -409,11 +414,13 @@ export function parseShell(cmd: string, depth = 0): Parsed {
   // Bare assignments (`HOME=x;`) are kept: they change what later commands mean
   const kept = subs.filter((s) => s.argv.length || s.assigns.length || s.writes.length || s.reads.length);
   if (kept.length > 128) dyn("too many subcommands to analyze");
+  while (operators.length >= kept.length && (operators.at(-1) === ";" || operators.at(-1) === "\n")) operators.pop();
   for (const s of kept) s.writes = s.writes.filter((w) => !HARMLESS_DEVICES.test(w));
   return {
     ok,
     subs: kept,
     subcommands: kept.map((s) => s.argv),
+    operators,
     writes: kept.flatMap((s) => s.writes),
     globs,
     dynamic,
@@ -634,7 +641,7 @@ const GREP_LONG_FLAGS = new Set(["extended-regexp", "fixed-strings", "basic-rege
 const GREP_LONG_VALUES = new Set(["regexp", "after-context", "before-context", "context", "max-count"]);
 
 /** Parse only common grep options; unknown options stay on the guarded path. */
-export function grepExplicitPaths(argv: string[]): string[] | undefined {
+export function grepExplicitPaths(argv: string[], allowStdin = false): string[] | undefined {
   if (argv[0] !== "grep") return undefined;
   const operands: string[] = [];
   let patternProvided = false;
@@ -662,8 +669,9 @@ export function grepExplicitPaths(argv: string[]): string[] | undefined {
       if (!GREP_FLAGS.has(flag)) return undefined;
     }
   }
+  if (!patternProvided && operands.length === 0) return undefined;
   const paths = patternProvided ? operands : operands.slice(1);
-  return paths.length && !paths.includes("-") ? paths : undefined;
+  return !paths.includes("-") && (paths.length > 0 || allowStdin) ? paths : undefined;
 }
 
 const RG_SHORT_FLAGS = new Set([..."abcFhHiIlnNoOpqsSuUvwxy0".split(""), "."]);

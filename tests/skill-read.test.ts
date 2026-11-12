@@ -30,6 +30,14 @@ test("only direct read-only access within standard skill directories bypasses gu
     assert.equal(isSkillRead("bash", { command: `grep -n example '${skill}'` }, cwd), true);
     assert.equal(isSkillRead("bash", { command: `grep -n 'example/path' '${skill}'` }, cwd), true);
     assert.equal(isSkillRead("bash", { command: `grep -n -e 'https://example.test/path' '${skill}' | head -n 1` }, cwd), true);
+    assert.equal(isSkillRead("bash", { command: `cat '${skill}' | grep example` }, cwd), true);
+    assert.equal(isSkillRead("bash", { command: `cat '${skill}' | grep example | head -n 1` }, cwd), true);
+    assert.equal(isSkillRead("bash", { command: `cat '${skill}' | grep example\n` }, cwd), true);
+    assert.equal(isSkillRead("bash", { command: `cat '${skill}' && grep example` }, cwd), false);
+    assert.equal(isSkillRead("bash", { command: `grep example | cat '${skill}'` }, cwd), false);
+    assert.equal(isSkillRead("bash", { command: `cat '${skill}' | grep example '${outside}'` }, cwd), false);
+    writeFileSync(join(cwd, ".agents", "skills", "example", "1"), "fixture");
+    assert.equal(isSkillRead("bash", { command: "head -n 1 | grep example" }, join(cwd, ".agents", "skills", "example")), false, "an option value is not a pipeline source");
     assert.equal(isSkillRead("bash", { command: `grep -r example '${join(cwd, ".agents", "skills", "example")}'` }, cwd), true);
     assert.equal(isSkillRead("bash", { command: `grep -f '${outside}' '${skill}'` }, cwd), false);
     assert.equal(isSkillRead("bash", { command: `grep -if '${outside}' '${skill}'` }, cwd), false);

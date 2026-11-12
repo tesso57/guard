@@ -25,7 +25,7 @@ test("Pi can read a skill without guard handling the call", async () => {
     await writeFile(join(externalSkillDir, "SKILL.md"), "---\nname: registered\ndescription: Test skill\n---\nregistered-skill-fixture\n");
     const fake = createFakeModel([
       { content: [{ type: "toolCall", id: "skill", name: "read", arguments: { path: ".agents/skills/fixture/SKILL.md" } }] },
-      { content: [{ type: "toolCall", id: "skill-grep", name: "bash", arguments: { command: "grep -n -e 'https://example.test/path' .agents/skills/fixture/SKILL.md" } }] },
+      { content: [{ type: "toolCall", id: "skill-grep", name: "bash", arguments: { command: "cat .agents/skills/fixture/SKILL.md | grep -n -e 'https://example.test/path'" } }] },
       { content: [{ type: "toolCall", id: "registered-skill", name: "read", arguments: { path: join(externalSkillDir, "SKILL.md") } }] },
       { content: [{ type: "toolCall", id: "retargeted-skill", name: "read", arguments: { path: join(externalSkillDir, "SKILL.md") } }] },
       { content: [{ type: "text", text: "done" }] },

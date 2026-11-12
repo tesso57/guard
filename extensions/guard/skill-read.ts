@@ -33,13 +33,16 @@ export function isSkillRead(tool: string, input: unknown, cwd: string, registere
     const parsed = parseShell(field.value);
     if (!parsed.ok || parsed.dynamic.length || parsed.globs.length || parsed.writes.length || parsed.heredocBodies.length || !parsed.subs.length) return false;
     const grepTargets: string[] = [];
-    for (const sub of parsed.subs) {
+    const pipeline = parsed.subs.length > 1 && parsed.operators.length === parsed.subs.length - 1 && parsed.operators.every((operator) => operator === "|");
+    let pipedGrep = false;
+    for (const [index, sub] of parsed.subs.entries()) {
       if (sub.assigns.length || sub.reads.length || sub.heredocs.length || !["cat", "head", "tail", "sed", "rg", "grep"].includes(sub.argv[0]) || !isReadOnlyArgv(sub.argv)) return false;
       if (sub.argv.slice(1).some((arg) => arg === "-" || /^-f/.test(arg) || /^--file(?:=|$)/.test(arg))) return false;
       if (sub.argv[0] === "grep" && (process.env.GREP_OPTIONS || sub.argv.slice(1).some((arg) => /^-[^-]*f/.test(arg)))) return false;
       if (sub.argv[0] === "grep") {
-        const paths = grepExplicitPaths(sub.argv);
+        const paths = grepExplicitPaths(sub.argv, pipeline && index > 0);
         if (!paths) return false;
+        if (!paths.length) pipedGrep = true;
         grepTargets.push(...paths.flatMap((path) => pathVariants(cwd, path.startsWith("-") ? `./${path}` : path)));
       }
       if (sub.argv[0] === "rg") {
@@ -48,6 +51,12 @@ export function isSkillRead(tool: string, input: unknown, cwd: string, registere
       }
     }
     if (usesRipgrepConfig(parsed) || inspectExecutablePath(parsed, cwd).risk) return false;
+    if (pipedGrep) {
+      const first = parsed.subs[0];
+      if (!["cat", "grep", "rg"].includes(first.argv[0])) return false;
+      const source = inputPaths("bash", { command: `${field.value}\0source` }, cwd, { ...parsed, subs: [first], subcommands: [first.argv] });
+      if (!source.reads.length || source.writes.length || !source.reads.every(inside)) return false;
+    }
     const otherSubs = parsed.subs.filter((sub) => sub.argv[0] !== "grep");
     const other = otherSubs.length ? inputPaths("bash", input, cwd, { ...parsed, subs: otherSubs, subcommands: otherSubs.map((sub) => sub.argv) }) : { reads: [], writes: [] };
     const paths = [...grepTargets, ...other.reads];
