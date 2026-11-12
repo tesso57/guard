@@ -6,7 +6,7 @@
  */
 import { homedir, tmpdir, userInfo } from "node:os";
 import { createHash } from "node:crypto";
-import { accessSync, constants, existsSync, opendirSync, statSync } from "node:fs";
+import { accessSync, constants, existsSync, opendirSync, statSync, type Stats } from "node:fs";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { grepExplicitPaths, hasGluedPathValue, innerCommands, INTERPRETER_NAMES, isLongOption, isReadOnlyArgv, isShell, nonFlags, normalizeArgv, type Parsed, parseShell, rgDisablesConfig, rgExplicitPaths, rgInfoOnly, rgListsFiles, rgListsTypes, rgSimpleIncludeSuffixes, rgVisibility, unwrapCommandWrappers } from "./shell.ts";
@@ -16,6 +16,23 @@ import { containsProtectedRoot, expandGlobFully, trustedDirFor, trustedDirRelati
 
 export const BUILTIN_TOOLS = new Set(["bash", "edit", "write", "read", "grep", "find", "ls"]);
 const INCOMPLETE_DIRECTORY_COMPARISON = "/__guard_incomplete_directory_comparison__";
+
+/** An unmodifiable root-owned system binary cannot be rewritten through a project hard link. */
+function immutableSystemExecutable(candidate: string, actual: string, st: Stats): boolean {
+  const roots = ["/bin", "/sbin", "/usr/bin", "/usr/sbin"];
+  if (!st.isFile() || st.uid !== 0 || (st.mode & 0o022) !== 0 ||
+      !roots.some((root) => isInsideExact(candidate, root)) || !roots.some((root) => isInsideExact(actual, root))) return false;
+  const unwritable = (path: string) => {
+    try { accessSync(path, constants.W_OK); return false; }
+    catch (error: any) { return ["EACCES", "EPERM", "EROFS"].includes(error?.code); }
+  };
+  if (!unwritable(actual)) return false;
+  for (const path of [candidate, actual]) for (let dir = dirname(path); ; dir = dirname(dir)) {
+    if (!unwritable(dir)) return false;
+    if (dirname(dir) === dir) break;
+  }
+  return true;
+}
 const BASH_BUILTINS = new Set(["echo", "printf", "pwd", "cd", "pushd", "popd", "dirs", "true", "false", "test", "[", "type", "command", "builtin", "enable", "export", "set", "declare", "unset", "read", "history", "help", "alias", "unalias", "hash", ":"]);
 
 function printfChanges(args: string[], matches: (name: string) => boolean): boolean {
@@ -140,7 +157,8 @@ export function inspectExecutablePath(parsed: Parsed, cwd: string, platform: Nod
           return { risk: "cannot inspect the executable search path" };
         }
         const actual = realPath(candidate);
-        selected.push([executable, base, candidate, actual, st.dev, st.ino, st.mode, st.size, st.mtimeMs, st.ctimeMs]);
+        selected.push([executable, base, candidate, actual, st.dev, st.ino, st.mode, st.nlink, st.size, st.mtimeMs, st.ctimeMs]);
+        if (st.nlink > 1 && !immutableSystemExecutable(candidate, actual, st)) risk ??= "a command resolves to a hard-linked executable";
         if ([candidate, actual].some((path) => unsafeRoots.some((root) => isInside(path, root)))) risk ??= "a command resolves to a project, temporary or Pi-managed executable";
         found = true;
         break; // Bash uses the first executable it finds.
@@ -166,13 +184,15 @@ export function inspectBuiltinSearchExecutable(tool: string, cwd: string): { ris
   const physicalCwd = realPath(cwd);
   const roots = [cwd, physicalCwd, enclosingRepository(cwd), enclosingRepository(physicalCwd), AGENT_DIR, realPath(AGENT_DIR), "/tmp", "/private/tmp", tmpdir(), realPath(tmpdir())].filter((root): root is string => !!root);
   const selected: unknown[] = [tool, local, path, process.cwd()];
+  let multipleLinks = false;
   const inspect = (candidate: string, requireExecutable: boolean): boolean => {
     try {
       if (requireExecutable) accessSync(candidate, constants.X_OK);
       const st = statSync(candidate);
       if (requireExecutable && !st.isFile()) return false;
       const actual = realPath(candidate);
-      selected.push([candidate, actual, st.dev, st.ino, st.mode, st.size, st.mtimeMs, st.ctimeMs]);
+      multipleLinks = st.isFile() && st.nlink > 1 && !immutableSystemExecutable(candidate, actual, st);
+      selected.push([candidate, actual, st.dev, st.ino, st.mode, st.nlink, st.size, st.mtimeMs, st.ctimeMs]);
       return true;
     } catch (error: any) {
       if (["ENOENT", "ENOTDIR", "EACCES"].includes(error?.code)) return false;
@@ -194,6 +214,7 @@ export function inspectBuiltinSearchExecutable(tool: string, cwd: string): { ris
     }
     const fingerprint = createHash("sha256").update(JSON.stringify(selected)).digest("hex");
     if (!candidate) return { risk: "the built-in search tool may download an executable", fingerprint };
+    if (multipleLinks) return { risk: "the built-in search executable has multiple hard links", fingerprint };
     if (relativeLookup) return { risk: "the built-in search executable resolves through a relative PATH entry", fingerprint };
     if ([candidate, realPath(candidate)].some((p) => roots.some((root) => isInside(p, root))))
       return { risk: "the built-in search tool resolves to a project, temporary or Pi-managed executable", fingerprint };

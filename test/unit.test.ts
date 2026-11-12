@@ -185,6 +185,40 @@ if (process.platform !== "win32") {
   }
 }
 if (process.platform !== "win32") {
+  const dir = mkdtempSync(join(process.cwd(), ".guard-hardlink-path-"));
+  const source = join(PROJ, "hardlinked-search-executable");
+  const previousPath = process.env.PATH;
+  const binary = join(dir, "rg");
+  writeFileSync(binary, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  try {
+    process.env.PATH = dir;
+    const beforeLink = inspectBuiltinSearchExecutable("grep", PROJ);
+    const shellBeforeLink = inspectExecutablePath(P("rg needle file"), PROJ);
+    ok("policy: a standalone built-in executable outside protected roots is not flagged", !beforeLink.risk);
+    ok("policy: a standalone shell executable outside protected roots is not flagged", !shellBeforeLink.risk);
+    try { linkSync(binary, source); }
+    catch (error: any) { if (error?.code !== "EXDEV") throw error; }
+    if (existsSync(source)) {
+      const afterLink = inspectBuiltinSearchExecutable("grep", PROJ);
+      ok("policy: a hard-linked built-in executable cannot hide a project executable", !!afterLink.risk);
+      ok("policy: a new hard link changes the executable fingerprint", beforeLink.fingerprint !== afterLink.fingerprint);
+      const shellAfterLink = inspectExecutablePath(P("rg needle file"), PROJ);
+      ok("policy: a hard-linked shell executable cannot hide a project executable", !!shellAfterLink.risk);
+      ok("policy: a new hard link changes the shell executable fingerprint", shellBeforeLink.fingerprint !== shellAfterLink.fingerprint);
+    }
+  } finally {
+    rmSync(source, { force: true });
+    if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
+  }
+}
+if (process.platform !== "win32" && existsSync("/usr/bin/grep")) {
+  const system = statSync("/usr/bin/grep");
+  let writable = true;
+  try { fs.accessSync("/usr/bin/grep", fs.constants.W_OK); } catch { writable = false; }
+  if (system.nlink > 1 && system.uid === 0 && (system.mode & 0o022) === 0 && !writable)
+    ok("policy: an unmodifiable root-owned system executable does not prompt for its hard links", !inspectExecutablePath(P("grep needle file"), PROJ).risk);
+}
+if (process.platform !== "win32") {
   const shadow = mkdtempSync(join(tmpdir(), "guard-grep-shadow-"));
   const before = process.env.PATH;
   process.env.PATH = `${shadow}:/usr/bin:/bin`;
