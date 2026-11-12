@@ -778,14 +778,19 @@ const GLOB_FILE_COMMANDS = new Set(["cat", "head", "tail", "wc", "ls", "grep", "
 
 const CONTENT_SEARCH = new Set(["rg", "ag", "ack", "grep", "egrep", "fgrep"]);
 const isGrepFamily = (h: string) => h === "grep" || h === "egrep" || h === "fgrep";
-const recursiveGrep = (args: string[]) =>
-  args.some((t, i) =>
-    (/^-[A-Za-z0-9]*[rR]/.test(t) && !t.startsWith("--")) ||
-    isLongOption(t, "--recursive") ||
-    isLongOption(t, "--dereference-recursive") ||
-    (isLongOption(t, "--directories") && /recurse/.test(t + (args[i + 1] ?? ""))) ||
-    (t === "-d" && args[i + 1] === "recurse"),
-  );
+const recursiveGrep = (args: string[]) => {
+  for (let i = 0; i < args.length; i++) {
+    const t = args[i];
+    if (t === "--") break;
+    // A separate regexp value is data, even when it looks like a recursive option.
+    if (t === "-e" || (isLongOption(t, "--regexp") && !t.includes("="))) { i++; continue; }
+    if ((/^-[A-Za-z0-9]*[rR]/.test(t) && !t.startsWith("--")) ||
+      isLongOption(t, "--recursive") || isLongOption(t, "--dereference-recursive") ||
+      (isLongOption(t, "--directories") && /recurse/.test(t + (args[i + 1] ?? ""))) ||
+      (t === "-d" && args[i + 1] === "recurse")) return true;
+  }
+  return false;
+};
 /**
  * What a recursive content search may print: the first secret file it would reach, and whether the search tree was
  * too large to check (then the call is not treated as safe).

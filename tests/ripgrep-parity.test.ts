@@ -73,6 +73,17 @@ test("ripgrep visibility and guard decisions agree on representative searches", 
       const flagged = !!sensitive("bash", { command }, project, protectedRoots(project), parsed) || searchNeedsJudgement("bash", { command }, project, parsed);
       assert.equal(!flagged && safeAllow("bash", { command }, project, { trusted: true, touched: new Set() }, parsed), expectSafe, command);
     }
+    writeFileSync(join(project, "pattern.txt"), "-R\n");
+    const literalGrep = spawnSync("grep", ["-e", "-R", "pattern.txt", "."], { cwd: project, encoding: "utf8" });
+    assert.equal(literalGrep.status, 2, "grep reports the directory operand without recursing");
+    assert.equal(literalGrep.stdout.includes("pattern.txt:-R"), true);
+    assert.equal(literalGrep.stdout.includes(".env"), false);
+    const literalGrepCommand = "grep -e '-R' pattern.txt .";
+    clearPathCache();
+    assert.equal(!!sensitive("bash", { command: literalGrepCommand }, project, protectedRoots(project), parseShell(literalGrepCommand)), false);
+    const recursiveGrepCommand = "grep -e '-R' -r .";
+    clearPathCache();
+    assert.ok(sensitive("bash", { command: recursiveGrepCommand }, project, protectedRoots(project), parseShell(recursiveGrepCommand)));
     writeFileSync(join(project, ".ignore"), "!README.md\n");
     writeFileSync(join(project, "README.md"), "needle\n");
     const literalRule = spawnSync("rg", ["--no-config", "-l", "needle", "."], { cwd: project, encoding: "utf8" });
