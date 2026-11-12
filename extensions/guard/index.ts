@@ -13,7 +13,7 @@
  */
 import { createHash } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
-import { basename, relative } from "node:path";
+import { basename, isAbsolute, relative } from "node:path";
 import { types as utilTypes } from "node:util";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { audit, tail, type AuditRecord } from "./audit.ts";
@@ -343,9 +343,27 @@ export default function (pi: ExtensionAPI) {
     return by && !trustProblem(tool) ? by : undefined;
   }
 
+  const registeredSkillTargets = new Map<string, string>();
+  function snapshotRegisteredSkills(): void {
+    clearPathCache();
+    try {
+      for (const command of pi.getCommands()) {
+        const path = command.sourceInfo?.path;
+        if (command.source !== "skill" || typeof path !== "string" || !isAbsolute(path)) continue;
+        if (registeredSkillTargets.has(path)) continue;
+        try { if (statSync(path).isFile()) registeredSkillTargets.set(path, realPath(path)); } catch { /* unavailable skills do not qualify */ }
+      }
+    } catch { /* unavailable registry does not grant new bypasses */ }
+  }
+
   function registeredSkillPaths(): string[] {
-    try { return pi.getCommands().filter((command) => command.source === "skill" && typeof command.sourceInfo?.path === "string").map((command) => command.sourceInfo.path); }
-    catch { return []; }
+    clearPathCache();
+    try {
+      return pi.getCommands().filter((command) => {
+        const path = command.sourceInfo?.path;
+        return command.source === "skill" && typeof path === "string" && registeredSkillTargets.has(path) && registeredSkillTargets.get(path) === realPath(path);
+      }).map((command) => command.sourceInfo.path);
+    } catch { return []; }
   }
 
   /** Other tool calls of the assistant message that contains callId, from the session branch. */
@@ -835,6 +853,8 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_e, ctx) => {
     stopPreflight();
     stateEpoch++;
+    registeredSkillTargets.clear();
+    snapshotRegisteredSkills();
     const loaded = loadConfig();
     cfg = loaded;
     trusted = ctx.isProjectTrusted();
@@ -849,6 +869,9 @@ export default function (pi: ExtensionAPI) {
     if (!cfg.disabled && !process.env.GUARD_OPENAI_API_KEY)
       warn(ctx, "guard: GUARD_OPENAI_API_KEY is not set. Running in rules-only mode: calls that need a model judgement will ask you first.");
   });
+
+  // Pi may bind its command registry after session_start.
+  pi.on("before_agent_start", () => { snapshotRegisteredSkills(); });
 
   // Rewinding with /tree changes which session rules and on/off state apply
   pi.on("session_tree", async (_e, ctx) => {

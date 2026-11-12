@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, symlinkSync, unlinkSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,11 +19,14 @@ test("Pi can read a skill without guard handling the call", async () => {
   try {
     await mkdir(skillDir, { recursive: true });
     await mkdir(externalSkillDir, { recursive: true });
+    await mkdir(join(dir, ".ssh"));
+    await writeFile(join(dir, ".ssh", "id_rsa"), "secret-not-a-skill");
     await writeFile(join(skillDir, "SKILL.md"), "skill-read-fixture");
     await writeFile(join(externalSkillDir, "SKILL.md"), "---\nname: registered\ndescription: Test skill\n---\nregistered-skill-fixture\n");
     const fake = createFakeModel([
       { content: [{ type: "toolCall", id: "skill", name: "read", arguments: { path: ".agents/skills/fixture/SKILL.md" } }] },
       { content: [{ type: "toolCall", id: "registered-skill", name: "read", arguments: { path: join(externalSkillDir, "SKILL.md") } }] },
+      { content: [{ type: "toolCall", id: "retargeted-skill", name: "read", arguments: { path: join(externalSkillDir, "SKILL.md") } }] },
       { content: [{ type: "text", text: "done" }] },
     ]);
     const loader = new DefaultResourceLoader({
@@ -34,6 +37,12 @@ test("Pi can read a skill without guard handling the call", async () => {
       extensionFactories: [(pi) => { pi.on("session_start", () => {
         for (const [id, path] of [["deny-skill-read", join(skillDir, "SKILL.md")], ["deny-registered-skill", join(externalSkillDir, "SKILL.md")]]) {
           pi.appendEntry("guard-rule", { op: "add", rule: { id, decision: "deny", tool: "read", match: { kind: "path", path }, scope: "session", cwd: project, createdAt: new Date().toISOString() } });
+        }
+      }); pi.on("tool_result", (event) => {
+        if (event.toolCallId === "registered-skill") {
+          const path = join(externalSkillDir, "SKILL.md");
+          unlinkSync(path);
+          symlinkSync(join(dir, ".ssh", "id_rsa"), path);
         }
       }); }],
     });
@@ -48,6 +57,8 @@ test("Pi can read a skill without guard handling the call", async () => {
       assert.ok(result && result.role === "toolResult" && !result.isError && JSON.stringify(result.content).includes("skill-read-fixture"));
       const external = session.messages.find((message) => message.role === "toolResult" && message.toolCallId === "registered-skill");
       assert.ok(external && external.role === "toolResult" && !external.isError && JSON.stringify(external.content).includes("registered-skill-fixture"));
+      const retargeted = session.messages.find((message) => message.role === "toolResult" && message.toolCallId === "retargeted-skill");
+      assert.ok(retargeted && retargeted.role === "toolResult" && retargeted.isError && !JSON.stringify(retargeted.content).includes("secret-not-a-skill"));
       const audit = join(agentDir, "guard", "audit.jsonl");
       assert.equal(existsSync(audit) && readFileSync(audit, "utf8").includes("skill-read-fixture"), false);
     } finally { session.dispose(); }
