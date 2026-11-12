@@ -9,7 +9,7 @@ import { createHash } from "node:crypto";
 import { accessSync, constants, existsSync, opendirSync, statSync } from "node:fs";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { hasGluedPathValue, innerCommands, INTERPRETER_NAMES, isLongOption, isReadOnlyArgv, isShell, nonFlags, normalizeArgv, type Parsed, parseShell, rgDisablesConfig, rgExplicitPaths, rgListsFiles, rgSimpleIncludeSuffixes, unwrapCommandWrappers } from "./shell.ts";
+import { hasGluedPathValue, innerCommands, INTERPRETER_NAMES, isLongOption, isReadOnlyArgv, isShell, nonFlags, normalizeArgv, type Parsed, parseShell, rgDisablesConfig, rgExplicitPaths, rgListsFiles, rgSimpleIncludeSuffixes, rgUsesFileTypes, unwrapCommandWrappers } from "./shell.ts";
 import { readRegularText } from "./files.ts";
 import { containsProtectedRoot, expandGlobFully, trustedDirFor, trustedDirRelative, type TrustedDir, type TrustedDirState, isPiCodePath, PI_CODE_DIRS, gitConfigIsSafe, globHitsOptionLikeName, globMayReach, ignoreFilesReinclude, isFreelyReadable, isHardLinked, isHomeOrAncestor, isInside, isInsideExact, isProjectPath, isProjectHardlinkSafe, isProtectedHardLink, isRiskyProjectFile, memo, pathLikeTokens, pathVariants, protectedReason, protectedRoots, readFallbackVariants, realPath, resolvePath, secretFilesUnder, sensitiveReason, UNKNOWN_PATH } from "./paths.ts";
 
@@ -785,8 +785,8 @@ const recursiveGrep = (args: string[]) =>
     (t === "-d" && args[i + 1] === "recurse"),
   );
 /** rg skips hidden and ignored files unless told otherwise. */
-const rgSeesHidden = (args: string[]) =>
-  args.some((t) => (/^-[A-Za-z0-9.]*[u.]/.test(t) && !t.startsWith("--")) || ["--hidden", "--no-ignore", "--no-ignore-vcs", "--no-ignore-dot", "--glob", "--iglob"].some((o) => isLongOption(t, o)) || t === "-g");
+const rgSeesHidden = (a: string[]) =>
+  rgUsesFileTypes(a) || a.slice(1).some((t) => (/^-[A-Za-z0-9.]*[u.]/.test(t) && !t.startsWith("--")) || ["--hidden", "--no-ignore", "--no-ignore-vcs", "--no-ignore-dot", "--glob", "--iglob"].some((o) => isLongOption(t, o)) || t === "-g");
 
 /**
  * What a recursive content search may print: the first secret file it would reach, and whether the search tree was
@@ -809,9 +809,9 @@ function searchExposure(tool: string, input: any, cwd: string, parsed?: Parsed):
         if (error?.code !== "ENOENT" && error?.code !== "ENOTDIR") unknown = true;
         continue;
       }
-      const { files, complete } = secretFilesUnder(real, projectRead && isProjectPath(real, cwd) ? cwd : undefined, suffixes);
+      const { files, complete } = secretFilesUnder(real, projectRead && isProjectPath(real, cwd) ? cwd : undefined, suffixes, hidden);
       if (!complete) unknown = true;
-      const hit = files.find((f) => hidden || !relativeHasHidden(real, f));
+      const hit = files[0];
       if (hit) return { hit, unknown };
     }
     return { unknown };
@@ -832,7 +832,7 @@ function searchExposure(tool: string, input: any, cwd: string, parsed?: Parsed):
     // rg skips hidden files unless told otherwise, or unless an ignore file re-includes them (`!.env`)
     const roots0 = given.length ? given : bases;
     const suffixes = a[0] === "rg" && !parsed.dynamic.length && !parsed.globs.length ? rgSimpleIncludeSuffixes(a) : undefined;
-    const r = check(roots0, a[0] !== "rg" || rgSeesHidden(args) || roots0.some((x) => ignoreFilesReinclude(realPath(x))), suffixes);
+    const r = check(roots0, a[0] !== "rg" || rgSeesHidden(a) || roots0.some((x) => ignoreFilesReinclude(realPath(x))), suffixes);
     if (r.hit) return r;
     unknown ||= r.unknown;
   }
@@ -858,10 +858,6 @@ export function usesRipgrepConfig(parsed?: Parsed): boolean {
     const a = normalizeArgv(raw, "deny").argv;
     return a[0] === "rg" && !rgDisablesConfig(a);
   });
-}
-
-function relativeHasHidden(root: string, file: string): boolean {
-  return file.slice(root.length).split("/").some((seg) => seg.startsWith("."));
 }
 
 export function sensitive(tool: string, input: any, cwd: string, roots: string[], parsed?: Parsed): string | undefined {

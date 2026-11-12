@@ -1609,6 +1609,37 @@ name: visible
   ok("rg: a matching file with an unlocated hard link remains subject to confirmation", !inspect("rg -g '*.txt' needle .").safe);
 }
 
+// Hidden files are not part of a default rg search unless re-included.
+{
+  const repo = mkdtempSync(join(tmpdir(), "guard-rg-hidden-links-"));
+  const outside = mkdtempSync(join(tmpdir(), "guard-rg-hidden-outside-"));
+  mkdirSync(join(repo, ".hidden"));
+  writeFileSync(join(repo, "visible.txt"), "needle\n");
+  writeFileSync(join(outside, "linked.txt"), "needle\n");
+  linkSync(join(outside, "linked.txt"), join(repo, ".hidden", "linked.txt"));
+  const safe = (command: string) => {
+    clearPathCache();
+    return safeAllow("bash", { command }, repo, O, P(command));
+  };
+  ok("rg: hidden hard links do not affect an ordinary recursive search", safe("rg needle ."));
+  ok("rg: --hidden keeps unknown hard links subject to confirmation", !safe("rg --hidden needle ."));
+  ok("rg: an explicitly searched hidden directory keeps hard-link checks", !safe("rg needle .hidden"));
+  writeFileSync(join(repo, ".gitignore"), "!.hidden/\n");
+  ok("rg: a hidden re-inclusion keeps hard-link checks", !safe("rg needle ."));
+}
+
+{
+  const repo = mkdtempSync(join(tmpdir(), "guard-rg-hidden-types-"));
+  writeFileSync(join(repo, ".env"), "needle\n");
+  const inspect = (command: string) => {
+    clearPathCache();
+    return sensitive("bash", { command }, repo, protectedRoots(repo), P(command));
+  };
+  for (const command of ["rg -tsh needle .", "rg --type sh needle .", "rg --type-add 'custom:.env' -tcustom needle ."])
+    ok(`rg: type selection may include a hidden secret: ${command}`, !!inspect(command));
+  ok("rg: a type-looking search pattern does not include hidden files", !inspect("rg -e '-tsh' ."));
+}
+
 // Exercise the same Git directory resolution against a worktree created by Git itself.
 {
   const root = mkdtempSync(join(tmpdir(), "guard-real-worktree-"));

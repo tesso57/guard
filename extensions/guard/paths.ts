@@ -758,12 +758,13 @@ export function walkBounded(root: string, fn: (path: string, name: string) => vo
  * `complete` is false when the tree was too large or deep to check; build and dependency directories are included,
  * because `grep -r` reads them too.
  */
-export function secretFilesUnder(root: string, projectRoot?: string, suffixes?: readonly string[]): { files: string[]; complete: boolean } {
-  return memo(`secrets:${JSON.stringify([root, projectRoot, suffixes])}`, () => {
+export function secretFilesUnder(root: string, projectRoot?: string, suffixes?: readonly string[], includeHidden = true): { files: string[]; complete: boolean } {
+  return memo(`secrets:${JSON.stringify([root, projectRoot, suffixes, includeHidden])}`, () => {
     const files: string[] = [];
     if (isHomeOrAncestor(root)) return { files: [root], complete: true };
     let uncertain = false;
     const complete = walkBounded(root, (p) => {
+      if (!includeHidden && relative(root, p).split(sep).some((part) => part.startsWith("."))) return;
       if (suffixes && !suffixes.some((suffix) => basename(p).toLowerCase().endsWith(suffix))) return;
       try {
         const st = lstatSync(p);
