@@ -1658,6 +1658,10 @@ name: visible
   };
   for (const command of ["grep .env src/file.txt", "grep -e .env src/file.txt", `grep -F '${join(HOME, ".ssh", "id_rsa")}' src/file.txt`])
     ok(`grep: a search pattern is not treated as an input file: ${command}`, !inspect(command).sensitive && inspect(command).safe);
+  for (const command of ["egrep .env src/file.txt", "fgrep -e .env src/file.txt"])
+    ok(`grep compatibility commands: patterns are not input files: ${command}`, !inspect(command).sensitive && inspect(command).safe);
+  for (const command of ["egrep needle .env", "fgrep needle .env"])
+    ok(`grep compatibility commands: secret targets remain sensitive: ${command}`, !!inspect(command).sensitive);
   ok("grep: an explicitly searched secret remains sensitive", !!inspect("grep needle .env").sensitive);
   ok("grep: a secret pattern file remains sensitive", !!inspect("grep -f .env src/file.txt").sensitive);
 }

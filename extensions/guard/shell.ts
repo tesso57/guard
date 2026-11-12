@@ -642,7 +642,7 @@ const GREP_LONG_VALUES = new Set(["regexp", "after-context", "before-context", "
 
 /** Parse only common grep options; unknown options stay on the guarded path. */
 export function grepExplicitPaths(argv: string[], allowStdin = false): string[] | undefined {
-  if (argv[0] !== "grep") return undefined;
+  if (!["grep", "egrep", "fgrep"].includes(argv[0])) return undefined;
   const operands: string[] = [];
   let patternProvided = false;
   for (let i = 1; i < argv.length; i++) {

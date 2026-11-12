@@ -296,7 +296,7 @@ function computeInputPaths(tool: string, input: any, cwd: string, parsed?: Parse
         // Both the normalized and the raw argv: normalization drops location values (git -C x, npm --prefix x).
         // Operands after `--` are paths even when they start with `-` (`cat -- --d/../../.ssh/key`).
         const afterDashes = (xs: string[]) => (xs.includes("--") ? xs.slice(xs.indexOf("--") + 1).map((t) => (t.startsWith("-") ? `./${t}` : t)) : []);
-        const explicit = !parsed.dynamic.length && !parsed.globs.length ? s.argv[0] === "rg" ? rgExplicitPaths(s.argv) : s.argv[0] === "grep" ? grepExplicitPaths(s.argv) : undefined : undefined;
+        const explicit = !parsed.dynamic.length && !parsed.globs.length ? s.argv[0] === "rg" ? rgExplicitPaths(s.argv) : isGrepFamily(s.argv[0]) ? grepExplicitPaths(s.argv) : undefined : undefined;
         if (explicit) {
           const files = [...explicit, ...(s.argv[0] === "rg" ? optionValue(s.argv, ["--file"]) : [])].filter((path) => path !== "-");
           reads.push(...files.flatMap((path) => pathVariants(base, path.startsWith("-") ? `./${path}` : path)));
@@ -830,7 +830,7 @@ function searchExposure(tool: string, input: any, cwd: string, parsed?: Parsed):
     const gitGrep = a[0] === "git" && a.includes("grep");
     if (!((isGrepFamily(a[0]) && recursiveGrep(args)) || a[0] === "rg" || a[0] === "ag" || a[0] === "ack" || gitGrep)) continue;
     if (rgInfoOnly(a) || rgListsFiles(a) || rgListsTypes(a)) continue;
-    const explicit = !parsed.dynamic.length && !parsed.globs.length ? s.argv[0] === "rg" ? rgExplicitPaths(s.argv) : s.argv[0] === "grep" ? grepExplicitPaths(s.argv) : undefined : undefined;
+    const explicit = !parsed.dynamic.length && !parsed.globs.length ? s.argv[0] === "rg" ? rgExplicitPaths(s.argv) : isGrepFamily(s.argv[0]) ? grepExplicitPaths(s.argv) : undefined : undefined;
     const given = explicit ? bases.flatMap((b) => explicit.filter((path) => path !== "-").flatMap((path) => pathVariants(b, path.startsWith("-") ? `./${path}` : path))) : bases.flatMap((b) => pathLikeTokens(b, nonFlags(a).slice(1)));
     // rg skips hidden files unless told otherwise, or unless an ignore file re-includes them (`!.env`)
     const roots0 = given.length ? given : bases;
@@ -913,7 +913,7 @@ export function sensitive(tool: string, input: any, cwd: string, roots: string[]
     // Static commands are matched without quoted text (echo '.env' >> .gitignore names no file)
     const envScan = parsed.ok && !parsed.dynamic.length ? stripQuoted(cmd) : cmd;
     const inspectedSearchOnly = parsed.ok && !parsed.dynamic.length && !parsed.globs.length && parsed.subs.length > 0 && parsed.subs.every((sub) =>
-      !sub.assigns.length && !sub.heredocs.length && (sub.argv[0] === "rg" ? rgExplicitPaths(sub.argv) !== undefined : sub.argv[0] === "grep" && grepExplicitPaths(sub.argv) !== undefined));
+      !sub.assigns.length && !sub.heredocs.length && (sub.argv[0] === "rg" ? rgExplicitPaths(sub.argv) !== undefined : isGrepFamily(sub.argv[0]) && grepExplicitPaths(sub.argv) !== undefined));
     if (!inspectedSearchOnly && /(?:^|[\s"'/:])\.env(?:\.[\w.-]+)?(?=$|[\s"';|&])/.test(envScan) && !/\.env\.(?:example|sample|template)/.test(envScan)) return ".env file";
     // cd to a computed path ($(…), $VAR) and then changing files: guard cannot tell where that happens
     const subs = subsWithBases(parsed, cwd);
