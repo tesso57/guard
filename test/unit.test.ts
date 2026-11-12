@@ -1697,6 +1697,28 @@ name: visible
     ok(`rg: options that include hidden files remain sensitive: ${command}`, !!inspect(command).sensitive);
 }
 
+{
+  const repo = mkdtempSync(join(tmpdir(), "guard-rg-no-vcs-"));
+  mkdirSync(join(repo, ".git"));
+  writeFileSync(join(repo, ".env"), "needle\n");
+  writeFileSync(join(repo, "visible.txt"), "needle\n");
+  writeFileSync(join(repo, ".gitignore"), "!.env\n");
+  const previous = process.env.GIT_CONFIG_NOSYSTEM;
+  delete process.env.GIT_CONFIG_NOSYSTEM;
+  const safe = (command: string) => {
+    clearPathCache();
+    const parsed = P(command);
+    return !sensitive("bash", { command }, repo, protectedRoots(repo), parsed) && safeAllow("bash", { command }, repo, O, parsed);
+  };
+  try {
+    ok("rg: disabling VCS ignores avoids unrelated Git configuration checks", safe("rg --no-ignore-vcs needle ."));
+    writeFileSync(join(repo, ".ignore"), "!.env\n");
+    ok("rg: non-VCS ignore rules can still include hidden files", !safe("rg --no-ignore-vcs needle ."));
+    ok("rg: disabling both VCS and dot ignores excludes hidden files", safe("rg --no-ignore-vcs --no-ignore-dot needle ."));
+    ok("rg: explicit hidden globs remain checked even without ignore rules", !safe("rg --no-ignore-vcs --no-ignore-dot -g .env needle ."));
+  } finally { if (previous === undefined) delete process.env.GIT_CONFIG_NOSYSTEM; else process.env.GIT_CONFIG_NOSYSTEM = previous; }
+}
+
 // Exercise the same Git directory resolution against a worktree created by Git itself.
 {
   const root = mkdtempSync(join(tmpdir(), "guard-real-worktree-"));

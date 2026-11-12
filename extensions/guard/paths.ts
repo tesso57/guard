@@ -157,8 +157,9 @@ function gitDirectories(root: string): { gitdir: string; common: string } {
  * Whether ripgrep may search hidden files under root although it skips them by default: ignore files can
  * re-include them with `!` patterns.
  */
-export function ignoreFilesReinclude(root: string): boolean {
-  return memo(`reinclude:${root}`, () => {
+export function ignoreFilesReinclude(root: string, ignoreVcs = false, ignoreDot = false): boolean {
+  return memo(`reinclude:${JSON.stringify([root, ignoreVcs, ignoreDot])}`, () => {
+    if (ignoreVcs && ignoreDot) return false;
     let found = false;
     const check = (p: string) => {
       try {
@@ -166,19 +167,21 @@ export function ignoreFilesReinclude(root: string): boolean {
       } catch (e: any) { if (e?.code !== "ENOENT" && e?.code !== "ENOTDIR") found = true; }
     };
     // An unknown Git configuration may redirect core.excludesFile to an arbitrary ignore file.
-    if (!gitConfigIsSafe(root)) return true;
+    if (!ignoreVcs && !gitConfigIsSafe(root)) return true;
     const home = process.env.HOME;
-    if (home) check(join(process.env.XDG_CONFIG_HOME || join(home, ".config"), "git", "ignore"));
+    if (!ignoreVcs && home) check(join(process.env.XDG_CONFIG_HOME || join(home, ".config"), "git", "ignore"));
     for (let d = root; ; d = dirname(d)) {
-      for (const n of [".ignore", ".rgignore", ".gitignore"]) check(join(d, n));
-      try {
-        const { common } = gitDirectories(d);
-        check(join(common, "info", "exclude"));
-      } catch (e: any) { if (e?.code !== "ENOENT" && e?.code !== "ENOTDIR") found = true; }
+      for (const n of [...(ignoreDot ? [] : [".ignore", ".rgignore"]), ...(ignoreVcs ? [] : [".gitignore"])]) check(join(d, n));
+      if (!ignoreVcs) {
+        try {
+          const { common } = gitDirectories(d);
+          check(join(common, "info", "exclude"));
+        } catch (e: any) { if (e?.code !== "ENOENT" && e?.code !== "ENOTDIR") found = true; }
+      }
       if (dirname(d) === d || isHomeOrAncestor(d)) break;
     }
     const complete = walkBounded(root, (p, name) => {
-      if (!found && (name === ".ignore" || name === ".rgignore" || name === ".gitignore")) check(p);
+      if (!found && ((!ignoreDot && (name === ".ignore" || name === ".rgignore")) || (!ignoreVcs && name === ".gitignore"))) check(p);
     }, 12, 20_000, new Set([".git"]), (_path, name) => !name.startsWith("."));
     return found || !complete;
   });

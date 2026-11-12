@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -53,6 +53,24 @@ test("ripgrep visibility and guard decisions agree on representative searches", 
     assert.equal(typeList.status, 0);
     clearPathCache();
     assert.equal(safeAllow("bash", { command: "rg --type-list" }, project, { trusted: true, touched: new Set() }, parseShell("rg --type-list")), true);
+    unlinkSync(join(project, ".ignore"));
+    assert.equal(spawnSync("git", ["init", "--quiet", project], { stdio: "ignore" }).status, 0);
+    writeFileSync(join(project, ".gitignore"), "!.env\n");
+    delete process.env.GIT_CONFIG_NOSYSTEM;
+    for (const [options, dotRule, expectHidden] of [
+      [["--no-ignore-vcs"], false, false],
+      [["--no-ignore-vcs"], true, true],
+      [["--no-ignore-vcs", "--no-ignore-dot"], true, false],
+    ] as const) {
+      if (dotRule) writeFileSync(join(project, ".ignore"), "!.env\n");
+      const result = spawnSync("rg", ["--no-config", ...options, "-l", "needle", "."], { cwd: project, encoding: "utf8" });
+      assert.equal(result.stdout.includes(".env"), expectHidden);
+      const command = `rg --no-config ${options.join(" ")} needle .`;
+      clearPathCache();
+      const parsed = parseShell(command);
+      const flagged = !!sensitive("bash", { command }, project, protectedRoots(project), parsed) || searchNeedsJudgement("bash", { command }, project, parsed);
+      assert.equal(flagged, expectHidden, command);
+    }
     if (process.platform !== "win32") {
       const marker = join(dir, "preprocessor-ran"), script = join(dir, "preprocessor"), config = join(dir, "ripgrep.conf");
       writeFileSync(script, '#!/bin/sh\nprintf called > "$GUARD_PARITY_MARKER"\ncat "$1"\n', { mode: 0o700 });

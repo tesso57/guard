@@ -829,7 +829,7 @@ function searchExposure(tool: string, input: any, cwd: string, parsed?: Parsed):
     const roots0 = given.length ? given : bases;
     const suffixes = a[0] === "rg" && !parsed.dynamic.length && !parsed.globs.length ? rgSimpleIncludeSuffixes(a) : undefined;
     const visibility = rgVisibility(a);
-    const r = check(roots0, a[0] !== "rg" || visibility.hidden || (!visibility.ignoresRules && roots0.some((x) => ignoreFilesReinclude(realPath(x)))), suffixes);
+    const r = check(roots0, a[0] !== "rg" || visibility.hidden || (!visibility.ignoresRules && roots0.some((x) => ignoreFilesReinclude(realPath(x), visibility.ignoresVcs, visibility.ignoresDot))), suffixes);
     if (r.hit) return r;
     unknown ||= r.unknown;
   }
