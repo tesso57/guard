@@ -73,6 +73,24 @@ test("ripgrep visibility and guard decisions agree on representative searches", 
       const flagged = !!sensitive("bash", { command }, project, protectedRoots(project), parsed) || searchNeedsJudgement("bash", { command }, project, parsed);
       assert.equal(!flagged && safeAllow("bash", { command }, project, { trusted: true, touched: new Set() }, parsed), expectSafe, command);
     }
+    writeFileSync(join(project, "pattern-example.txt"), "literal .env marker\n");
+    for (const binary of ["egrep", "fgrep"]) {
+      const result = spawnSync(binary, [".env", "pattern-example.txt"], { cwd: project, encoding: "utf8" });
+      if ((result.error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") continue;
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout, /literal \.env marker/);
+      const command = `${binary} .env pattern-example.txt`;
+      clearPathCache();
+      const parsed = parseShell(command);
+      assert.equal(sensitive("bash", { command }, project, protectedRoots(project), parsed), undefined, command);
+      assert.equal(safeAllow("bash", { command }, project, { trusted: true, touched: new Set() }, parsed), true, command);
+      const secret = `${binary} needle .env`;
+      const secretResult = spawnSync(binary, ["needle", ".env"], { cwd: project, encoding: "utf8" });
+      assert.equal(secretResult.status, 0, secretResult.stderr);
+      assert.match(secretResult.stdout, /needle/);
+      clearPathCache();
+      assert.ok(sensitive("bash", { command: secret }, project, protectedRoots(project), parseShell(secret)), secret);
+    }
     writeFileSync(join(project, "pattern.txt"), "-R\n");
     const literalGrep = spawnSync("grep", ["-e", "-R", "pattern.txt", "."], { cwd: project, encoding: "utf8" });
     assert.equal(literalGrep.status, 2, "grep reports the directory operand without recursing");
