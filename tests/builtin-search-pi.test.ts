@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { machoLoaders } from "../extensions/guard/macho.ts";
 
 test("Pi does not run a shadowed built-in search executable before confirmation", { skip: process.platform === "win32" }, () => {
   const dir = mkdtempSync(join(tmpdir(), "guard-builtin-pi-"));
@@ -164,6 +165,38 @@ test("Pi asks before an ELF with a missing dynamic loader can trigger a download
       assert.match(JSON.stringify(unexpectedOutput.content), /guard/i);
       assert.equal(existsSync(join(agent, "bin")), false);
     }
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(bin, { recursive: true, force: true }); }
+});
+
+test("Pi asks before a Mach-O with an untrusted loader can trigger a download", { skip: process.platform !== "darwin" }, (t) => {
+  const location = spawnSync("which", ["rg"], { encoding: "utf8" });
+  if (location.status !== 0) return t.skip("ripgrep is unavailable");
+  const file = readFileSync(realpathSync(location.stdout.trim()));
+  const needle = Buffer.from("/usr/lib/dyld\0"), replacement = Buffer.from(`/${"z".repeat(needle.length - 2)}\0`);
+  let changed = false, from = 0;
+  for (;;) {
+    const at = file.indexOf(needle, from);
+    if (at < 0) break;
+    replacement.copy(file, at); changed = true; from = at + needle.length;
+  }
+  if (!changed) return t.skip("ripgrep does not contain a standard loader path");
+  const parsed = machoLoaders(file.length, (offset, length) => file.subarray(offset, offset + length));
+  assert.ok(parsed?.loaders.some((loader) => loader !== "/usr/lib/dyld"));
+  const dir = mkdtempSync(join(tmpdir(), "guard-macho-loader-"));
+  const bin = mkdtempSync(join(process.cwd(), ".guard-macho-loader-"));
+  const project = join(dir, "project"), agent = join(dir, "agent");
+  try {
+    mkdirSync(project);
+    writeFileSync(join(project, "file.txt"), "needle\n");
+    writeFileSync(join(bin, "rg"), file, { mode: 0o755 });
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(GUARD_|RISK_|PI_|OPENAI_|BASH_FUNC_)/.test(key) && !["BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "RIPGREP_CONFIG_PATH", "GREP_OPTIONS"].includes(key)));
+    Object.assign(env, { HOME: dir, XDG_CONFIG_HOME: join(dir, "config"), PI_CODING_AGENT_DIR: agent, GUARD_TEST_PROJECT: project, GUARD_TEST_TOOL: "grep", PATH: bin });
+    const result = spawnSync(process.execPath, ["--experimental-strip-types", fileURLToPath(new URL("./helpers/builtin-search-child.mjs", import.meta.url))], { env, encoding: "utf8", timeout: 30_000 });
+    assert.equal(result.status, 0, result.stderr);
+    const output = JSON.parse(result.stdout);
+    assert.equal(output.blocked, true);
+    assert.match(JSON.stringify(output.content), /guard/i);
+    assert.equal(existsSync(join(agent, "bin")), false);
   } finally { rmSync(dir, { recursive: true, force: true }); rmSync(bin, { recursive: true, force: true }); }
 });
 

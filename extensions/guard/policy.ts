@@ -15,6 +15,7 @@ import { grepExplicitPaths, hasGluedPathValue, innerCommands, INTERPRETER_NAMES,
 import { readRegularText } from "./files.ts";
 import { AGENT_DIR } from "./config.ts";
 import { elfPrograms } from "./elf.ts";
+import { machoLoaders } from "./macho.ts";
 import { containsProtectedRoot, expandGlobFully, trustedDirFor, trustedDirRelative, type TrustedDir, type TrustedDirState, isPiCodePath, PI_CODE_DIRS, gitConfigIsSafe, globHitsOptionLikeName, globMayReach, ignoreFilesReinclude, isFreelyReadable, isHardLinked, isHomeOrAncestor, isInside, isInsideExact, isProjectPath, isProjectHardlinkSafe, isProtectedHardLink, isRiskyProjectFile, memo, pathLikeTokens, pathVariants, protectedReason, protectedRoots, readFallbackVariants, realPath, resolvePath, secretFilesUnder, sensitiveReason, UNKNOWN_PATH } from "./paths.ts";
 
 export const BUILTIN_TOOLS = new Set(["bash", "edit", "write", "read", "grep", "find", "ls"]);
@@ -243,15 +244,15 @@ export function inspectBuiltinSearchExecutable(tool: string, cwd: string, piVers
   const selected: unknown[] = [tool, local, path, offline, piVersion, process.cwd()];
   let multipleLinks = false;
   let interpreterRisk: string | undefined;
-  let elfReadBudget = 1_048_576;
-  const readElf = (file: string, st: Stats, offset: number, length: number) => {
-    if (length > elfReadBudget) throw new Error("ELF inspection budget exceeded");
-    elfReadBudget -= length;
+  let nativeReadBudget = 1_048_576;
+  const readNative = (file: string, st: Stats, offset: number, length: number) => {
+    if (length > nativeReadBudget) throw new Error("native inspection budget exceeded");
+    nativeReadBudget -= length;
     return executableSlice(file, st, offset, length);
   };
   const inspectElfLoader = (file: string, st: Stats, header: Buffer): string | undefined => {
     if (process.platform !== "linux" || header.subarray(0, 4).toString("hex") !== "7f454c46") return undefined;
-    const programs = elfPrograms(header, st.size, (offset, length) => readElf(file, st, offset, length));
+    const programs = elfPrograms(header, st.size, (offset, length) => readNative(file, st, offset, length));
     if (!programs) throw new Error("ELF program headers are not verifiable");
     if (!programs.interpreter) return undefined;
     const loader = programs.interpreter;
@@ -260,11 +261,25 @@ export function inspectBuiltinSearchExecutable(tool: string, cwd: string, piVers
     if (!loaderStat.isFile()) throw new Error("ELF loader is not a file");
     const loaderHeader = executablePrefix(loader, loaderStat, 512);
     if (loaderHeader.subarray(0, 4).toString("hex") !== "7f454c46" || !hasNativeExecutableHeader(loaderHeader, loaderStat.size)) throw new Error("ELF loader is not verifiable");
-    const loaderPrograms = elfPrograms(loaderHeader, loaderStat.size, (offset, length) => readElf(loader, loaderStat, offset, length));
+    const loaderPrograms = elfPrograms(loaderHeader, loaderStat.size, (offset, length) => readNative(loader, loaderStat, offset, length));
     if (!loaderPrograms || loaderPrograms.interpreter) throw new Error("ELF loader program headers are not verifiable");
     selected.push(["elf-loader", loader, actual, loaderStat.dev, loaderStat.ino, loaderStat.mode, loaderStat.nlink, loaderStat.size, loaderStat.mtimeMs, loaderStat.ctimeMs]);
     if (!/^ld[^/]*\.so(?:\.[A-Za-z0-9._-]+)?$/.test(basename(loader)) || !immutableSystemExecutable(loader, actual, loaderStat))
       return "the built-in search executable uses an untrusted ELF loader";
+    return undefined;
+  };
+  const inspectNativeLoader = (file: string, st: Stats, header: Buffer): string | undefined => {
+    if (process.platform !== "darwin") return inspectElfLoader(file, st, header);
+    const macho = machoLoaders(st.size, (offset, length) => readNative(file, st, offset, length));
+    if (!macho) throw new Error("Mach-O load commands are not verifiable");
+    if (macho.dyldEnvironment) return "the built-in search executable configures the dynamic loader";
+    if (macho.loaders.some((loader) => loader !== "/usr/lib/dyld")) return "the built-in search executable uses an untrusted Mach-O loader";
+    if (!macho.loaders.length) return undefined;
+    const loader = "/usr/lib/dyld";
+    accessSync(loader, constants.X_OK);
+    const loaderStat = statSync(loader), actual = realPath(loader);
+    if (!immutableSystemExecutable(loader, actual, loaderStat)) return "the built-in search executable uses an untrusted Mach-O loader";
+    selected.push(["mach-o-loader", loader, actual, loaderStat.dev, loaderStat.ino, loaderStat.mode, loaderStat.nlink, loaderStat.size, loaderStat.mtimeMs, loaderStat.ctimeMs]);
     return undefined;
   };
   const inspect = (candidate: string, requireExecutable: boolean): boolean => {
@@ -297,12 +312,12 @@ export function inspectBuiltinSearchExecutable(tool: string, cwd: string, piVers
             if (prefix.length >= 2 && prefix[0] === 35 && prefix[1] === 33) interpreterRisk = "the built-in search executable uses a nested script interpreter";
             else if (!hasNativeExecutableHeader(prefix, interpreterStat.size))
               interpreterRisk = "the built-in search interpreter's executable format cannot be verified";
-            else interpreterRisk = inspectElfLoader(interpreter, interpreterStat, prefix);
+            else interpreterRisk = inspectNativeLoader(interpreter, interpreterStat, prefix);
             if (basename(resolved) === "env" || [interpreter, resolved].some((p) => roots.some((root) => isInside(p, root))) ||
                 (interpreterStat.nlink > 1 && !immutableSystemExecutable(interpreter, resolved, interpreterStat)))
               interpreterRisk ??= "the built-in search executable uses an unverified interpreter";
           } else if (!hasNativeExecutableHeader(header, st.size)) interpreterRisk = "the built-in search executable's format cannot be verified";
-          else interpreterRisk = inspectElfLoader(candidate, st, header);
+          else interpreterRisk = inspectNativeLoader(candidate, st, header);
         } catch { interpreterRisk = "cannot verify the built-in search executable's interpreter"; }
       }
       return true;
