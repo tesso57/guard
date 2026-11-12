@@ -50,7 +50,7 @@ Pi's built-in `grep` and `find` run `rg` and `fd` (or `fdfind`) respectively, an
 
 For Pi 1.5.0, guard recognizes `PI_OFFLINE=1` (also `true` or `yes`, case-insensitive): when the search executable is absent, Pi reports it as unavailable without downloading it. Other Pi versions retain the confirmation because their offline download behavior has not been verified.
 
-An existing executable can still fail to start, for example if its interpreter is missing; Pi may then attempt a download. The metadata check does not establish that every candidate can start.
+For script candidates, guard checks the interpreter path and its identity without running it; missing, relative, untrusted, or `env`-resolved interpreters require confirmation. Native executables can still fail to start for other reasons, such as a missing dynamic loader; Pi may then attempt a download. The metadata check does not establish that every candidate can start.
 
 Git's compiled-in system configuration path varies between installations. To avoid executing Git before the safety check or guessing that path, guard skips the read-only Git shortcut unless `GIT_CONFIG_NOSYSTEM` is true or `GIT_CONFIG_SYSTEM` explicitly identifies a configuration file that guard can inspect. Other checks and remembered rules still apply.
 The Git hooks directory is inspected up to 1,000 entries; a larger or unreadable directory disables the shortcut because guard cannot establish that it is safe.

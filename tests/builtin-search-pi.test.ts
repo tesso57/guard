@@ -53,6 +53,32 @@ test("Pi cannot fall through a broken trusted candidate to an untrusted search e
   }
 });
 
+test("Pi asks before a broken search executable can trigger a download", { skip: process.platform === "win32" }, () => {
+  const dir = mkdtempSync(join(tmpdir(), "guard-builtin-broken-"));
+  const bin = mkdtempSync(join(process.cwd(), ".guard-builtin-broken-"));
+  const project = join(dir, "project"), agent = join(dir, "agent");
+  try {
+    mkdirSync(project);
+    writeFileSync(join(project, "file.txt"), "needle\n");
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(GUARD_|RISK_|PI_|OPENAI_|BASH_FUNC_)/.test(key) && !["BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "RIPGREP_CONFIG_PATH", "GREP_OPTIONS"].includes(key)));
+    Object.assign(env, { HOME: dir, XDG_CONFIG_HOME: join(dir, "config"), PI_CODING_AGENT_DIR: agent, GUARD_TEST_PROJECT: project, PATH: bin });
+    for (const [tool, binary] of [["grep", "rg"], ["find", "fd"]]) {
+      writeFileSync(join(bin, binary), "#!/guard-missing-interpreter\n", { mode: 0o755 });
+      env.GUARD_TEST_TOOL = tool;
+      const result = spawnSync(process.execPath, ["--experimental-strip-types", fileURLToPath(new URL("./helpers/builtin-search-child.mjs", import.meta.url))], { env, encoding: "utf8", timeout: 30_000 });
+      assert.equal(result.status, 0, result.stderr);
+      const output = JSON.parse(result.stdout);
+      assert.equal(output.blocked, true, tool);
+      assert.match(JSON.stringify(output.content), /guard/i, tool);
+      assert.equal(existsSync(join(agent, "bin")), false, tool);
+      rmSync(join(bin, binary));
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(bin, { recursive: true, force: true });
+  }
+});
+
 test("Pi skips guard for verified built-in searches inside skill directories", { skip: process.platform === "win32" }, (t) => {
   const dir = mkdtempSync(join(tmpdir(), "guard-builtin-skill-pi-"));
   const project = join(dir, "project"), agent = join(dir, "agent"), skill = join(project, ".agents", "skills", "fixture");

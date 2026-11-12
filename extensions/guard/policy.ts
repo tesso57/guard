@@ -6,7 +6,8 @@
  */
 import { homedir, tmpdir, userInfo } from "node:os";
 import { createHash } from "node:crypto";
-import { accessSync, constants, existsSync, opendirSync, statSync, type Stats } from "node:fs";
+import { isUtf8 } from "node:buffer";
+import { accessSync, closeSync, constants, existsSync, fstatSync, openSync, opendirSync, readSync, statSync, type Stats } from "node:fs";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import * as piSdk from "@earendil-works/pi-coding-agent";
@@ -187,6 +188,7 @@ export function inspectBuiltinSearchExecutable(tool: string, cwd: string, piVers
   const roots = [cwd, physicalCwd, enclosingRepository(cwd), enclosingRepository(physicalCwd), AGENT_DIR, realPath(AGENT_DIR), "/tmp", "/private/tmp", tmpdir(), realPath(tmpdir())].filter((root): root is string => !!root);
   const selected: unknown[] = [tool, local, path, offline, piVersion, process.cwd()];
   let multipleLinks = false;
+  let interpreterRisk: string | undefined;
   const inspect = (candidate: string, requireExecutable: boolean): boolean => {
     try {
       if (requireExecutable) accessSync(candidate, constants.X_OK);
@@ -195,6 +197,37 @@ export function inspectBuiltinSearchExecutable(tool: string, cwd: string, piVers
       const actual = realPath(candidate);
       multipleLinks = st.isFile() && st.nlink > 1 && !immutableSystemExecutable(candidate, actual, st);
       selected.push([candidate, actual, st.dev, st.ino, st.mode, st.nlink, st.size, st.mtimeMs, st.ctimeMs]);
+      interpreterRisk = undefined;
+      if (st.isFile()) {
+        let fd: number | undefined;
+        try {
+          fd = openSync(candidate, constants.O_RDONLY | constants.O_NONBLOCK);
+          const opened = fstatSync(fd);
+          if (!opened.isFile() || opened.dev !== st.dev || opened.ino !== st.ino || opened.size !== st.size || opened.mtimeMs !== st.mtimeMs || opened.ctimeMs !== st.ctimeMs) throw new Error("executable changed");
+          const header = Buffer.alloc(512);
+          const length = readSync(fd, header, 0, header.length, 0);
+          const after = fstatSync(fd);
+          if (after.size !== opened.size || after.mtimeMs !== opened.mtimeMs || after.ctimeMs !== opened.ctimeMs) throw new Error("executable changed during inspection");
+          if (length >= 2 && header[0] === 35 && header[1] === 33) {
+            const end = header.indexOf(10, 2);
+            if (end < 0 && length === header.length) throw new Error("interpreter line is too long");
+            const lineBytes = header.subarray(2, end < 0 ? length : end);
+            if (!isUtf8(lineBytes)) throw new Error("interpreter path is not UTF-8");
+            const line = lineBytes.toString("utf8");
+            const interpreter = line.match(/^[ \t]*([^ \t\r]+)(?:[ \t]|$)/)?.[1];
+            if (!interpreter || line.includes("\r") || !isAbsolute(interpreter)) throw new Error("interpreter path is not verifiable");
+            accessSync(interpreter, constants.X_OK);
+            const interpreterStat = statSync(interpreter);
+            const resolved = realPath(interpreter);
+            if (!interpreterStat.isFile()) throw new Error("interpreter is not a file");
+            selected.push([interpreter, resolved, interpreterStat.dev, interpreterStat.ino, interpreterStat.mode, interpreterStat.nlink, interpreterStat.size, interpreterStat.mtimeMs, interpreterStat.ctimeMs]);
+            if (basename(resolved) === "env" || [interpreter, resolved].some((p) => roots.some((root) => isInside(p, root))) ||
+                (interpreterStat.nlink > 1 && !immutableSystemExecutable(interpreter, resolved, interpreterStat)))
+              interpreterRisk = "the built-in search executable uses an unverified interpreter";
+          }
+        } catch { interpreterRisk = "cannot verify the built-in search executable's interpreter"; }
+        finally { if (fd !== undefined) { try { closeSync(fd); } catch { interpreterRisk = "cannot inspect the built-in search executable safely"; } } }
+      }
       return true;
     } catch (error: any) {
       if (["ENOENT", "ENOTDIR", "EACCES"].includes(error?.code)) return false;
@@ -208,7 +241,8 @@ export function inspectBuiltinSearchExecutable(tool: string, cwd: string, piVers
     const inspectCandidate = (candidate: string, relativeLookup: boolean, requireExecutable: boolean) => {
       if (!inspect(candidate, requireExecutable)) return;
       found = true;
-      if (multipleLinks) risk ??= "the built-in search executable has multiple hard links";
+      if (interpreterRisk) risk ??= interpreterRisk;
+      else if (multipleLinks) risk ??= "the built-in search executable has multiple hard links";
       else if (relativeLookup) risk ??= "the built-in search executable resolves through a relative PATH entry";
       else if ([candidate, realPath(candidate)].some((p) => roots.some((root) => isInside(p, root))))
         risk ??= "the built-in search tool resolves to a project, temporary or Pi-managed executable";
