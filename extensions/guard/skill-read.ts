@@ -70,10 +70,12 @@ export function isSkillRead(tool: string, input: unknown, cwd: string, registere
       if (sub.argv[0] === "rg") return rgListsFiles(sub.argv) || rgExplicitPaths(sub.argv)?.length === 0;
       return true;
     });
+    // A file operand can skip hard-link inspection only if no pipeline command reads file contents.
+    const onlyListFileOperands = onlyFileLists && parsed.subs.every((sub) => ["rg", "grep"].includes(sub.argv[0]));
     return paths.length > 0 && other.writes.length === 0 && paths.every((path) => {
       if (!inside(path)) return false;
       const stat = statSync(path);
-      if (stat.isFile()) return stat.nlink <= 1 || isProjectHardlinkSafe(path, cwd);
+      if (stat.isFile()) return onlyListFileOperands || stat.nlink <= 1 || isProjectHardlinkSafe(path, cwd);
       return parsed.subs.some((sub) => ["rg", "grep"].includes(sub.argv[0])) && stat.isDirectory() &&
         (onlyFileLists || secretFilesUnder(path, isProjectPath(path, cwd) ? cwd : undefined).complete);
     });
