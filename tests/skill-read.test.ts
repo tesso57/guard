@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -36,8 +36,14 @@ test("only direct read-only access within standard skill directories bypasses gu
     assert.equal(isSkillRead("bash", { command: `cat '${skill}'; rm '${outside}'` }, cwd), false);
     assert.equal(isSkillRead("bash", { command: `cat '${join(cwd, ".agents", "skills", "example", "outside")}'` }, cwd), false);
     assert.equal(isSkillRead("write", { path: skill, content: "changed" }, cwd), false);
-    assert.equal(isSkillRead("read", { path: outside }, cwd, [outside]), true);
-    assert.equal(isSkillRead("read", { path: outside }, cwd, [join(cwd, "different.md")]), false);
+    const registered = { path: outside, target: realpathSync(outside) };
+    assert.equal(isSkillRead("read", { path: outside }, cwd, [registered]), true);
+    assert.equal(isSkillRead("read", { path: outside }, cwd, [{ path: join(cwd, "different.md"), target: join(cwd, "different.md") }]), false);
+    const replacement = join(cwd, "replacement.txt");
+    writeFileSync(replacement, "replacement");
+    unlinkSync(outside);
+    symlinkSync(replacement, outside);
+    assert.equal(isSkillRead("read", { path: outside }, cwd, [registered]), false, "a registered path cannot be retargeted after its target was captured");
     unlinkSync(skill);
     symlinkSync(outside, skill);
     assert.equal(isSkillRead("read", { path: skill }, cwd), false, "a retargeted path must not reuse a cached in-scope result");

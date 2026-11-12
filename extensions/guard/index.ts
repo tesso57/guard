@@ -26,7 +26,7 @@ import { clearPathCache, createTrustedDirState, isFreelyReadable, listTrustedDir
 import { BUILTIN_TOOLS, hardDeny, hasUninspectedToolInput, inputPaths, inspectExecutablePath, pathsStayInProject, piString, safeAllow, searchNeedsJudgement, sensitive, usesRipgrepConfig, writesStayPlain } from "./policy.ts";
 import { type Decision, deriveDenyPatterns, derivePatterns, describeMatch, globalAllowPatternIsReadOnly, type Match, newId, type Rule, RuleStore, type Scope, supportsAnyInputAllow } from "./rules.ts";
 import { isReadOnlyArgv, normalizeArgv, type Parsed, parseShell } from "./shell.ts";
-import { isSkillRead } from "./skill-read.ts";
+import { isSkillRead, type RegisteredSkill } from "./skill-read.ts";
 import { confirmDialog, displayText, preview } from "./ui.ts";
 
 const STATE_ENTRY = "guard-state";
@@ -356,13 +356,13 @@ export default function (pi: ExtensionAPI) {
     } catch { /* unavailable registry does not grant new bypasses */ }
   }
 
-  function registeredSkillPaths(): string[] {
+  function registeredSkillPaths(): RegisteredSkill[] {
     clearPathCache();
     try {
       return pi.getCommands().filter((command) => {
         const path = command.sourceInfo?.path;
         return command.source === "skill" && typeof path === "string" && registeredSkillTargets.has(path) && registeredSkillTargets.get(path) === realPath(path);
-      }).map((command) => command.sourceInfo.path);
+      }).map((command) => ({ path: command.sourceInfo.path, target: registeredSkillTargets.get(command.sourceInfo.path)! }));
     } catch { return []; }
   }
 

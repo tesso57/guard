@@ -7,8 +7,10 @@ import { clearPathCache, isInsideExact, realPath, resolvePath } from "./paths.ts
 import { inputPaths, inspectExecutablePath, usesRipgrepConfig } from "./policy.ts";
 import { isReadOnlyArgv, parseShell, rgExplicitPaths } from "./shell.ts";
 
+export type RegisteredSkill = { path: string; target: string };
+
 /** Only plain reads of standard skill locations or Pi-registered skill files bypass guard. */
-export function isSkillRead(tool: string, input: unknown, cwd: string, registeredSkills: readonly string[] = []): boolean {
+export function isSkillRead(tool: string, input: unknown, cwd: string, registeredSkills: readonly RegisteredSkill[] = []): boolean {
   try {
     if (!input || typeof input !== "object" || utilTypes.isProxy(input)) return false;
     const key = tool === "read" ? "path" : tool === "bash" ? "command" : undefined;
@@ -22,7 +24,7 @@ export function isSkillRead(tool: string, input: unknown, cwd: string, registere
       if (dirname(dir) === dir) break;
     }
     const inside = (path: string) => roots.some((root) => isInsideExact(realPath(path), realPath(root)) && (isInsideExact(path, root) || isInsideExact(path, realPath(root)))) ||
-      registeredSkills.some((skill) => isAbsolute(skill) && realPath(skill) === realPath(path));
+      registeredSkills.some((skill) => isAbsolute(skill.path) && realPath(skill.path) === skill.target && realPath(path) === skill.target);
     if (tool === "read") {
       const path = resolvePath(cwd, field.value);
       return inside(path) && statSync(path).isFile();
