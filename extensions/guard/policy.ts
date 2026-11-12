@@ -49,6 +49,30 @@ function executablePrefix(path: string, expected: Stats, limit: number): Buffer 
     return bytes.subarray(0, length);
   } finally { closeSync(fd); }
 }
+
+/** Recognize structurally plausible native headers without executing the file. */
+function hasNativeExecutableHeader(header: Buffer): boolean {
+  if (header.length < 4) return false;
+  const magic = header.subarray(0, 4).toString("hex");
+  if (["linux", "freebsd", "openbsd", "netbsd", "sunos"].includes(process.platform)) {
+    if (magic !== "7f454c46" || header.length < 52 || ![1, 2].includes(header[4]) || ![1, 2].includes(header[5]) || header[6] !== 1) return false;
+    if (header[4] === 2 && header.length < 64) return false;
+    const type = header[5] === 1 ? header.readUInt16LE(16) : header.readUInt16BE(16);
+    return type === 2 || type === 3;
+  }
+  if (process.platform !== "darwin") return false;
+  if (["feedface", "cefaedfe", "feedfacf", "cffaedfe"].includes(magic)) {
+    if (header.length < (["feedfacf", "cffaedfe"].includes(magic) ? 32 : 28)) return false;
+    const littleEndian = magic === "cefaedfe" || magic === "cffaedfe";
+    return (littleEndian ? header.readUInt32LE(12) : header.readUInt32BE(12)) === 2;
+  }
+  const fat = ["cafebabe", "bebafeca", "cafebabf", "bfbafeca"].includes(magic);
+  if (!fat || header.length < 8) return false;
+  const littleEndian = magic === "bebafeca" || magic === "bfbafeca";
+  const count = littleEndian ? header.readUInt32LE(4) : header.readUInt32BE(4);
+  const entrySize = magic === "cafebabf" || magic === "bfbafeca" ? 32 : 20;
+  return count > 0 && count <= Math.floor((header.length - 8) / entrySize);
+}
 const BASH_BUILTINS = new Set(["echo", "printf", "pwd", "cd", "pushd", "popd", "dirs", "true", "false", "test", "[", "type", "command", "builtin", "enable", "export", "set", "declare", "unset", "read", "history", "help", "alias", "unalias", "hash", ":"]);
 
 function printfChanges(args: string[], matches: (name: string) => boolean): boolean {
@@ -229,15 +253,14 @@ export function inspectBuiltinSearchExecutable(tool: string, cwd: string, piVers
             const resolved = realPath(interpreter);
             if (!interpreterStat.isFile()) throw new Error("interpreter is not a file");
             selected.push([interpreter, resolved, interpreterStat.dev, interpreterStat.ino, interpreterStat.mode, interpreterStat.nlink, interpreterStat.size, interpreterStat.mtimeMs, interpreterStat.ctimeMs]);
-            const prefix = executablePrefix(interpreter, interpreterStat, 4);
-            const nativeFormats = process.platform === "darwin" ? ["feedface", "cefaedfe", "feedfacf", "cffaedfe", "cafebabe", "bebafeca", "cafebabf", "bfbafeca"] : ["linux", "freebsd", "openbsd", "netbsd", "sunos"].includes(process.platform) ? ["7f454c46"] : [];
+            const prefix = executablePrefix(interpreter, interpreterStat, 512);
             if (prefix.length >= 2 && prefix[0] === 35 && prefix[1] === 33) interpreterRisk = "the built-in search executable uses a nested script interpreter";
-            else if (!nativeFormats.includes(prefix.toString("hex")))
+            else if (!hasNativeExecutableHeader(prefix))
               interpreterRisk = "the built-in search interpreter's executable format cannot be verified";
             if (basename(resolved) === "env" || [interpreter, resolved].some((p) => roots.some((root) => isInside(p, root))) ||
                 (interpreterStat.nlink > 1 && !immutableSystemExecutable(interpreter, resolved, interpreterStat)))
               interpreterRisk ??= "the built-in search executable uses an unverified interpreter";
-          }
+          } else if (!hasNativeExecutableHeader(header)) interpreterRisk = "the built-in search executable's format cannot be verified";
         } catch { interpreterRisk = "cannot verify the built-in search executable's interpreter"; }
       }
       return true;

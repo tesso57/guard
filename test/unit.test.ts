@@ -204,6 +204,10 @@ if (process.platform !== "win32") {
     writeFileSync(join(first, "rg"), "#!/guard-missing-interpreter\n", { mode: 0o755 });
     const broken = inspectBuiltinSearchExecutable("grep", PROJ);
     ok("policy: an inaccessible search interpreter requires confirmation", !!broken.risk);
+    writeFileSync(join(first, "rg"), "not an executable format\n", { mode: 0o755 });
+    ok("policy: an unknown search executable format requires confirmation", !!inspectBuiltinSearchExecutable("grep", PROJ).risk);
+    writeFileSync(join(first, "rg"), Buffer.from(process.platform === "darwin" ? "cafebabe" : "7f454c46", "hex"), { mode: 0o755 });
+    ok("policy: a truncated native executable header requires confirmation", !!inspectBuiltinSearchExecutable("grep", PROJ).risk);
     const interpreter = join(later, "interpreter");
     writeFileSync(interpreter, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
     writeFileSync(join(first, "rg"), `#!${interpreter}\n`, { mode: 0o755 });
