@@ -9,7 +9,7 @@ import { createHash } from "node:crypto";
 import { accessSync, constants, existsSync, opendirSync, statSync } from "node:fs";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { hasGluedPathValue, innerCommands, INTERPRETER_NAMES, isLongOption, isReadOnlyArgv, isShell, nonFlags, normalizeArgv, type Parsed, parseShell, rgDisablesConfig, rgExplicitPaths, rgListsFiles, unwrapCommandWrappers } from "./shell.ts";
+import { hasGluedPathValue, innerCommands, INTERPRETER_NAMES, isLongOption, isReadOnlyArgv, isShell, nonFlags, normalizeArgv, type Parsed, parseShell, rgDisablesConfig, rgExplicitPaths, rgListsFiles, rgSimpleIncludeSuffixes, unwrapCommandWrappers } from "./shell.ts";
 import { readRegularText } from "./files.ts";
 import { containsProtectedRoot, expandGlobFully, trustedDirFor, trustedDirRelative, type TrustedDir, type TrustedDirState, isPiCodePath, PI_CODE_DIRS, gitConfigIsSafe, globHitsOptionLikeName, globMayReach, ignoreFilesReinclude, isFreelyReadable, isHardLinked, isHomeOrAncestor, isInside, isInsideExact, isProjectPath, isProjectHardlinkSafe, isProtectedHardLink, isRiskyProjectFile, memo, pathLikeTokens, pathVariants, protectedReason, protectedRoots, readFallbackVariants, realPath, resolvePath, secretFilesUnder, sensitiveReason, UNKNOWN_PATH } from "./paths.ts";
 
@@ -794,7 +794,7 @@ const rgSeesHidden = (args: string[]) =>
  */
 function searchExposure(tool: string, input: any, cwd: string, parsed?: Parsed): { hit?: string; unknown: boolean } {
   const projectRead = tool === "bash" && !!parsed && parsed.ok && !parsed.dynamic.length && !parsed.writes.length && parsed.subcommands.every(isReadOnlyArgv);
-  const check = (roots0: string[], hidden: boolean) => {
+  const check = (roots0: string[], hidden: boolean, suffixes?: string[]) => {
     let unknown = false;
     for (const r of roots0) {
       const real = realPath(r);
@@ -811,7 +811,7 @@ function searchExposure(tool: string, input: any, cwd: string, parsed?: Parsed):
       }
       const { files, complete } = secretFilesUnder(real, projectRead && isProjectPath(real, cwd) ? cwd : undefined);
       if (!complete) unknown = true;
-      const hit = files.find((f) => hidden || !relativeHasHidden(real, f));
+      const hit = files.find((f) => (hidden || !relativeHasHidden(real, f)) && (!suffixes || suffixes.some((suffix) => basename(f).toLowerCase().endsWith(suffix))));
       if (hit) return { hit, unknown };
     }
     return { unknown };
@@ -831,7 +831,8 @@ function searchExposure(tool: string, input: any, cwd: string, parsed?: Parsed):
     const given = rgPaths ? bases.flatMap((b) => rgPaths.filter((path) => path !== "-").flatMap((path) => pathVariants(b, path.startsWith("-") ? `./${path}` : path))) : bases.flatMap((b) => pathLikeTokens(b, nonFlags(a).slice(1)));
     // rg skips hidden files unless told otherwise, or unless an ignore file re-includes them (`!.env`)
     const roots0 = given.length ? given : bases;
-    const r = check(roots0, a[0] !== "rg" || rgSeesHidden(args) || roots0.some((x) => ignoreFilesReinclude(realPath(x))));
+    const suffixes = a[0] === "rg" && !parsed.dynamic.length && !parsed.globs.length ? rgSimpleIncludeSuffixes(a) : undefined;
+    const r = check(roots0, a[0] !== "rg" || rgSeesHidden(args) || roots0.some((x) => ignoreFilesReinclude(realPath(x))), suffixes);
     if (r.hit) return r;
     unknown ||= r.unknown;
   }
