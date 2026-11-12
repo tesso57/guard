@@ -845,8 +845,15 @@ export function searchNeedsJudgement(tool: string, input: any, cwd: string, pars
 
 /** An ambient ripgrep config may inject options such as --pre and --follow. */
 export function usesRipgrepConfig(parsed?: Parsed): boolean {
-  if (!process.env.RIPGREP_CONFIG_PATH || !parsed) return false;
-  return parsed.subcommands.some((raw) => {
+  if (!parsed) return false;
+  const configured = !!process.env.RIPGREP_CONFIG_PATH || parsed.subs.some((sub) => {
+    const a = normalizeArgv(sub.argv, "deny").argv;
+    const rgIndex = sub.argv.findIndex((word) => basename(word) === "rg");
+    const prefix = a[0] === "rg" && rgIndex > 0 ? sub.argv.slice(0, rgIndex) : [];
+    const declarations = ["export", "declare", "typeset", "readonly"].includes(sub.argv[0]) ? sub.argv.slice(1) : [];
+    return [...sub.assigns, ...prefix, ...declarations].some((word) => /^RIPGREP_CONFIG_PATH=/.test(word));
+  });
+  return configured && parsed.subcommands.some((raw) => {
     const a = normalizeArgv(raw, "deny").argv;
     return a[0] === "rg" && a[1] !== "--no-config";
   });
@@ -894,7 +901,9 @@ export function sensitive(tool: string, input: any, cwd: string, roots: string[]
     const cmd = String(input?.command ?? "");
     // Static commands are matched without quoted text (echo '.env' >> .gitignore names no file)
     const envScan = parsed.ok && !parsed.dynamic.length ? stripQuoted(cmd) : cmd;
-    if (/(?:^|[\s"'/:])\.env(?:\.[\w.-]+)?(?=$|[\s"';|&])/.test(envScan) && !/\.env\.(?:example|sample|template)/.test(envScan)) return ".env file";
+    const inspectedRgOnly = parsed.ok && !parsed.dynamic.length && !parsed.globs.length && parsed.subs.length > 0 && parsed.subs.every((sub) =>
+      sub.argv[0] === "rg" && !sub.assigns.length && !sub.heredocs.length && rgExplicitPaths(sub.argv) !== undefined);
+    if (!inspectedRgOnly && /(?:^|[\s"'/:])\.env(?:\.[\w.-]+)?(?=$|[\s"';|&])/.test(envScan) && !/\.env\.(?:example|sample|template)/.test(envScan)) return ".env file";
     // cd to a computed path ($(…), $VAR) and then changing files: guard cannot tell where that happens
     const subs = subsWithBases(parsed, cwd);
     const computedCd = subs.findIndex((x) => ["cd", "pushd"].includes(x.a[0]) && /[$`]/.test(x.s.argv.slice(1).join(" ")));
@@ -945,6 +954,7 @@ const PLAIN_CREATORS = new Set(["mkdir", "touch"]);
 export function safeAllow(tool: string, input: any, cwd: string, opts: { trusted: boolean; touched: Set<string>; trustedDirs?: TrustedDirState }, parsed?: Parsed): boolean {
   if (tool === "bash") {
     if (!parsed || !parsed.ok || parsed.dynamic.length || parsed.writes.length || !parsed.subcommands.length) return false;
+    if (usesRipgrepConfig(parsed)) return false;
     // Glued option values (-f/etc/x, -bf~/x) are easy to misread; such commands always get a judgement.
     // So are words that start with `-` and contain a path (`-- --d/../../x`, `--x/y`).
     if (parsed.subcommands.some(hasGluedPathValue)) return false;

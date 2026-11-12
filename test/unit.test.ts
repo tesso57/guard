@@ -1586,10 +1586,16 @@ name: visible
     const parsed = P(command);
     return { sensitive: sensitive("bash", { command }, repo, protectedRoots(repo), parsed), safe: safeAllow("bash", { command }, repo, O, parsed) };
   };
-  for (const command of ["rg needle src", "rg -e needle src", "rg --regexp needle src", "rg -g '*.txt' needle src", "rg '.env' src"])
+  for (const command of ["rg needle src", "rg -e needle src", "rg --regexp needle src", "rg -g '*.txt' needle src", "rg '.env' src", "rg .env src", "rg -e .env src", "rg --regexp=.env src"])
     ok(`rg: pattern directory is not treated as a search root: ${command}`, !inspect(command).sensitive && inspect(command).safe);
   ok("rg: an explicitly searched directory containing a key remains sensitive", !!inspect("rg -e needle needle").sensitive);
   ok("rg: a sensitive pattern file remains sensitive", !!inspect("rg --file needle/private.pem src").sensitive);
+  ok("rg: an explicit .env target remains sensitive", !!inspect("rg needle .env").sensitive);
+  ok("rg: a .env pattern file remains sensitive", !!inspect("rg --file .env src").sensitive);
+  for (const command of ["RIPGREP_CONFIG_PATH=.env rg needle src", "env RIPGREP_CONFIG_PATH=.env rg needle src", "export RIPGREP_CONFIG_PATH=.env; rg needle src"])
+    ok(`rg: inline configuration requires confirmation: ${command}`, usesRipgrepConfig(P(command)) && !inspect(command).safe);
+  ok("rg: --no-config disables inline configuration", !usesRipgrepConfig(P("RIPGREP_CONFIG_PATH=.env rg --no-config needle src")));
+  ok("rg: a configuration-looking search pattern is not an assignment", !usesRipgrepConfig(P("rg RIPGREP_CONFIG_PATH=example src")));
 }
 
 // Exercise the same Git directory resolution against a worktree created by Git itself.
@@ -3969,6 +3975,11 @@ hasUI = true;
 ok("int: ambient ripgrep config cannot bypass confirmation", rgBlocked?.block === true && calls.length === 0 && tail(1)[0]?.reasons.some((reason: string) => reason.includes("RIPGREP_CONFIG_PATH")));
 if (oldRgConfig === undefined) delete process.env.RIPGREP_CONFIG_PATH;
 else process.env.RIPGREP_CONFIG_PATH = oldRgConfig;
+hasUI = false;
+calls = [];
+const inlineRgBlocked = await run("bash", { command: "RIPGREP_CONFIG_PATH=custom-rg-config rg needle docs" });
+hasUI = true;
+ok("int: inline ripgrep configuration cannot bypass confirmation", inlineRgBlocked?.block === true && calls.length === 0 && tail(1)[0]?.reasons.some((reason: string) => reason.includes("RIPGREP_CONFIG_PATH")));
 
 const oldSkipTools = process.env.RISK_SKIP_TOOLS;
 process.env.RISK_SKIP_TOOLS = "custom-oversized";
