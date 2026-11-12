@@ -23,7 +23,7 @@ import { MAX_FILE_BYTES, readBoundedText } from "./files.ts";
 import { buildRequest, callDecisions, evaluate, MAX_ATTACHED_FILES, type ModelVerdict } from "./judge.ts";
 import { redact } from "./redact.ts";
 import { clearPathCache, createTrustedDirState, isFreelyReadable, listTrustedDirs, trustDir, type TrustedDirState, isHardLinked, isInsideExact, pathLikeTokens, pathVariants, protectedReason, protectedRoots, realPath, recentlyChangedFiles, resolvePath, sensitiveReason } from "./paths.ts";
-import { BUILTIN_TOOLS, hardDeny, hasUninspectedToolInput, inputPaths, inspectExecutablePath, pathsStayInProject, piString, safeAllow, searchNeedsJudgement, sensitive, usesRipgrepConfig, writesStayPlain } from "./policy.ts";
+import { BUILTIN_TOOLS, hardDeny, hasUninspectedToolInput, inputPaths, inspectExecutablePath, pathsStayInProject, piString, safeAllow, searchNeedsJudgement, sensitive, usesGrepOptions, usesRipgrepConfig, writesStayPlain } from "./policy.ts";
 import { type Decision, deriveDenyPatterns, derivePatterns, describeMatch, globalAllowPatternIsReadOnly, type Match, newId, type Rule, RuleStore, type Scope, supportsAnyInputAllow } from "./rules.ts";
 import { isReadOnlyArgv, normalizeArgv, type Parsed, parseShell, rgDisablesConfig, rgInfoOnly } from "./shell.ts";
 import { isSkillRead, type RegisteredSkill } from "./skill-read.ts";
@@ -113,13 +113,15 @@ function toolInputHash(tool: string, input: unknown): string {
 
 /** Shell lookup, startup and ripgrep configuration can change while judgement is pending. */
 function shellEnvironmentHash(parsed?: Parsed): string {
+  const unknown = !parsed || !parsed.ok || parsed.dynamic.length > 0;
   const usesRipgrep = !parsed || !parsed.ok || parsed.dynamic.length > 0 || parsed.subcommands.some((raw) => {
     const argv = normalizeArgv(raw, "deny").argv;
     if (argv[0] === "rg") return !rgDisablesConfig(argv) && !rgInfoOnly(argv);
     return ["git", "npm"].includes(argv[0]) || !isReadOnlyArgv(raw);
   });
+  const usesGrep = unknown || parsed.subcommands.some((raw) => ["grep", "egrep", "fgrep", "git", "npm"].includes(normalizeArgv(raw, "deny").argv[0]) || !isReadOnlyArgv(raw));
   return stableHash(Object.fromEntries(Object.entries(process.env).filter(([key]) =>
-    key.toLowerCase() === "path" || ["BASH_ENV", "ENV", "BASHOPTS", "SHELLOPTS", "PS4"].includes(key) || (usesRipgrep && key === "RIPGREP_CONFIG_PATH") || (key.startsWith("BASH_FUNC_") && key.endsWith("%%")),
+    key.toLowerCase() === "path" || ["BASH_ENV", "ENV", "BASHOPTS", "SHELLOPTS", "PS4"].includes(key) || (usesRipgrep && key === "RIPGREP_CONFIG_PATH") || (usesGrep && key === "GREP_OPTIONS") || (key.startsWith("BASH_FUNC_") && key.endsWith("%%")),
   )));
 }
 
@@ -650,6 +652,7 @@ export default function (pi: ExtensionAPI) {
 
     if (hasUninspectedToolInput(tool, input)) return { ...base, action: "confirm", source: "sensitive", reasons: ["tool input exceeds the deterministic inspection limit"], denyPatterns };
     if (usesRipgrepConfig(parsed)) return { ...base, action: "confirm", source: "sensitive", reasons: ["ripgrep may load options from RIPGREP_CONFIG_PATH"], denyPatterns };
+    if (usesGrepOptions(parsed)) return { ...base, action: "confirm", source: "sensitive", reasons: ["grep may load options from GREP_OPTIONS"], denyPatterns };
 
     // Pi may execute all calls in this message concurrently, regardless of their order in the message.
     const peers = opts.peers ?? opts.siblings ?? [];

@@ -20,7 +20,7 @@ process.on("exit", () => {
 
 // Isolate everything: a fake HOME (for ~/.ssh etc.), a fake pi agent dir, and a project dir.
 for (const key of Object.keys(process.env)) {
-  if (["GIT_", "RISK_", "GUARD_", "OPENAI_", "PI_", "BASH_FUNC_"].some((prefix) => key.startsWith(prefix)) || ["RIPGREP_CONFIG_PATH", "CDPATH", "OLDPWD", "BASH_ENV", "ENV", "BASHOPTS", "SHELLOPTS", "PS4", "NODE_OPTIONS"].includes(key) || ["http_proxy", "https_proxy", "all_proxy", "no_proxy"].includes(key.toLowerCase()) || (process.platform !== "win32" && key.toLowerCase() === "path" && key !== "PATH")) delete process.env[key];
+  if (["GIT_", "RISK_", "GUARD_", "OPENAI_", "PI_", "BASH_FUNC_"].some((prefix) => key.startsWith(prefix)) || ["RIPGREP_CONFIG_PATH", "GREP_OPTIONS", "CDPATH", "OLDPWD", "BASH_ENV", "ENV", "BASHOPTS", "SHELLOPTS", "PS4", "NODE_OPTIONS"].includes(key) || ["http_proxy", "https_proxy", "all_proxy", "no_proxy"].includes(key.toLowerCase()) || (process.platform !== "win32" && key.toLowerCase() === "path" && key !== "PATH")) delete process.env[key];
 }
 if (process.platform !== "win32") process.env.PATH = "/usr/bin:/bin";
 // Node 24+ can install a proxy dispatcher before this module runs. Permit only the local mock directly.
@@ -82,7 +82,7 @@ if (http.setGlobalProxyFromEnv) {
 }
 
 const { parseShell, normalizeArgv, isReadOnlyArgv, unwrapCommandWrappers } = await import("../extensions/guard/shell.ts");
-const { enclosingRepository, executablePathRisk, hardDeny, sensitive, safeAllow, usesRipgrepConfig, writesStayPlain } = await import("../extensions/guard/policy.ts");
+const { enclosingRepository, executablePathRisk, hardDeny, sensitive, safeAllow, usesGrepOptions, usesRipgrepConfig, writesStayPlain } = await import("../extensions/guard/policy.ts");
 const { clearPathCache, protectedRoots, secretFilesUnder, isInside, isInsideExact, isFreelyReadable, sensitiveReason, walkBounded, ignoreFilesReinclude, expandGlobFully, gitConfigIsSafe } = await import("../extensions/guard/paths.ts");
 const { derivePatterns, deriveDenyPatterns, describeMatch, examples, newId, RuleStore } = await import("../extensions/guard/rules.ts");
 const { evaluate, buildRequest, callDecisions } = await import("../extensions/guard/judge.ts");
@@ -329,6 +329,21 @@ ok("paths: read fallback through a narrow-space symlink is sensitive", !!sensiti
   ok("shell: an option value named --no-config does not disable config", usesRipgrepConfig(P("rg -g --no-config needle src")));
   if (oldRgConfig === undefined) delete process.env.RIPGREP_CONFIG_PATH;
   else process.env.RIPGREP_CONFIG_PATH = oldRgConfig;
+}
+
+{
+  const repo = mkdtempSync(join(tmpdir(), "guard-grep-options-"));
+  writeFileSync(join(repo, ".env"), "needle\n");
+  const safe = (command: string) => {
+    clearPathCache();
+    return safeAllow("bash", { command }, repo, O, P(command));
+  };
+  process.env.GREP_OPTIONS = "-r";
+  ok("grep: ambient options cannot turn a shortcut into a recursive search", usesGrepOptions(P("grep needle .")) && !safe("grep needle ."));
+  delete process.env.GREP_OPTIONS;
+  for (const command of ["GREP_OPTIONS=-r grep needle .", "env GREP_OPTIONS=-r grep needle .", "export GREP_OPTIONS=-r; grep needle ."])
+    ok(`grep: inline options cannot bypass inspection: ${command}`, usesGrepOptions(P(command)) && !safe(command));
+  ok("grep: configuration-looking search text is not an assignment", !usesGrepOptions(P("grep GREP_OPTIONS=-r .")));
 }
 
 // ---------- review 2, item 1: read-only commands that write or execute ----------
@@ -2904,6 +2919,17 @@ const run = async (toolName: string, input: any) => h.tool_call({ type: "tool_ca
     if (priorBashEnv === undefined) delete process.env.BASH_ENV; else process.env.BASH_ENV = priorBashEnv;
   }
   await run("bash", { command: "git status" });
+  const priorGrepEnv = process.env.GREP_OPTIONS;
+  delete process.env.GREP_OPTIONS;
+  ctx.ui.select = async () => { process.env.GREP_OPTIONS = "opaque-grep-options"; return "Allow (this time only)"; };
+  try {
+    const changedGrepEnv = await run("bash", { command: "grep needle .env" });
+    ok("int: grep options changing during confirmation block without leaking their values", changedGrepEnv?.block === true && changedGrepEnv.reason.includes("shell environment changed") && !JSON.stringify(tail(1)[0]).includes("opaque-grep-options"));
+  } finally {
+    ctx.ui.select = savedSelect;
+    if (priorGrepEnv === undefined) delete process.env.GREP_OPTIONS; else process.env.GREP_OPTIONS = priorGrepEnv;
+  }
+  await run("bash", { command: "git status" });
   const priorRgEnv = process.env.RIPGREP_CONFIG_PATH;
   delete process.env.RIPGREP_CONFIG_PATH;
   ctx.ui.select = async () => {
@@ -4218,6 +4244,13 @@ hasUI = true;
 ok("int: ambient ripgrep config cannot bypass confirmation", rgBlocked?.block === true && calls.length === 0 && tail(1)[0]?.reasons.some((reason: string) => reason.includes("RIPGREP_CONFIG_PATH")));
 if (oldRgConfig === undefined) delete process.env.RIPGREP_CONFIG_PATH;
 else process.env.RIPGREP_CONFIG_PATH = oldRgConfig;
+process.env.GREP_OPTIONS = "-r";
+hasUI = false;
+calls = [];
+const grepOptionsBlocked = await run("bash", { command: "grep needle docs" });
+hasUI = true;
+delete process.env.GREP_OPTIONS;
+ok("int: ambient grep options require confirmation before a recursive search", grepOptionsBlocked?.block === true && calls.length === 0 && tail(1)[0]?.reasons.some((reason: string) => reason.includes("GREP_OPTIONS")));
 hasUI = false;
 calls = [];
 const inlineRgBlocked = await run("bash", { command: "RIPGREP_CONFIG_PATH=custom-rg-config rg needle docs" });

@@ -841,20 +841,30 @@ export function searchNeedsJudgement(tool: string, input: any, cwd: string, pars
   return searchExposure(tool, input, cwd, parsed).unknown;
 }
 
+function shellVariableAssigned(parsed: Parsed, name: string): boolean {
+  return parsed.subs.some((sub) => {
+    const a = normalizeArgv(sub.argv, "deny").argv;
+    const commandIndex = sub.argv.findIndex((word) => basename(word) === a[0]);
+    const prefix = commandIndex > 0 ? sub.argv.slice(0, commandIndex) : [];
+    const declarations = ["export", "declare", "typeset", "readonly"].includes(sub.argv[0]) ? sub.argv.slice(1) : [];
+    return [...sub.assigns, ...prefix, ...declarations].some((word) => word.startsWith(`${name}=`));
+  });
+}
+
 /** An ambient ripgrep config may inject options such as --pre and --follow. */
 export function usesRipgrepConfig(parsed?: Parsed): boolean {
   if (!parsed) return false;
-  const configured = !!process.env.RIPGREP_CONFIG_PATH || parsed.subs.some((sub) => {
-    const a = normalizeArgv(sub.argv, "deny").argv;
-    const rgIndex = sub.argv.findIndex((word) => basename(word) === "rg");
-    const prefix = a[0] === "rg" && rgIndex > 0 ? sub.argv.slice(0, rgIndex) : [];
-    const declarations = ["export", "declare", "typeset", "readonly"].includes(sub.argv[0]) ? sub.argv.slice(1) : [];
-    return [...sub.assigns, ...prefix, ...declarations].some((word) => /^RIPGREP_CONFIG_PATH=/.test(word));
-  });
+  const configured = !!process.env.RIPGREP_CONFIG_PATH || shellVariableAssigned(parsed, "RIPGREP_CONFIG_PATH");
   return configured && parsed.subcommands.some((raw) => {
     const a = normalizeArgv(raw, "deny").argv;
     return a[0] === "rg" && !rgInfoOnly(a) && !rgDisablesConfig(a);
   });
+}
+
+/** Some grep implementations still honor GREP_OPTIONS, including recursive flags. */
+export function usesGrepOptions(parsed?: Parsed): boolean {
+  if (!parsed || !(process.env.GREP_OPTIONS || shellVariableAssigned(parsed, "GREP_OPTIONS"))) return false;
+  return parsed.subcommands.some((raw) => ["grep", "egrep", "fgrep"].includes(normalizeArgv(raw, "deny").argv[0]));
 }
 
 export function sensitive(tool: string, input: any, cwd: string, roots: string[], parsed?: Parsed): string | undefined {
@@ -948,7 +958,7 @@ const PLAIN_CREATORS = new Set(["mkdir", "touch"]);
 export function safeAllow(tool: string, input: any, cwd: string, opts: { trusted: boolean; touched: Set<string>; trustedDirs?: TrustedDirState }, parsed?: Parsed): boolean {
   if (tool === "bash") {
     if (!parsed || !parsed.ok || parsed.dynamic.length || parsed.writes.length || !parsed.subcommands.length) return false;
-    if (usesRipgrepConfig(parsed)) return false;
+    if (usesRipgrepConfig(parsed) || usesGrepOptions(parsed)) return false;
     // Glued option values (-f/etc/x, -bf~/x) are easy to misread; such commands always get a judgement.
     // So are words that start with `-` and contain a path (`-- --d/../../x`, `--x/y`).
     if (parsed.subcommands.some(hasGluedPathValue)) return false;
