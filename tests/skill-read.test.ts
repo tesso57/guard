@@ -100,6 +100,12 @@ test("only direct read-only access within standard skill directories bypasses gu
     assert.equal(isSkillRead("bash", { command: `cat '${skill}' | sed -n '1p'` }, cwd), true);
     assert.equal(isSkillRead("bash", { command: `grep -n example '${skill}'` }, cwd), true);
     assert.equal(isSkillRead("bash", { command: `grep -e '-foo' '${skill}'` }, cwd), true);
+    assert.equal(isSkillRead("bash", { command: `grep -e - '${skill}'` }, cwd), true);
+    assert.equal(isSkillRead("bash", { command: `rg -e - '${skill}'` }, cwd), true);
+    assert.equal(isSkillRead("bash", { command: `cat '${skill}' | grep -e -` }, cwd), true);
+    assert.equal(isSkillRead("bash", { command: `cat '${skill}' | rg -e -` }, cwd), true);
+    assert.equal(isSkillRead("bash", { command: `grep example -` }, cwd), false);
+    assert.equal(isSkillRead("bash", { command: `rg example -` }, cwd), false);
     assert.equal(isSkillRead("bash", { command: `grep -e '-R' '${skill}'` }, cwd), true);
     assert.equal(isSkillRead("bash", { command: `grep -e '--dereference-recursive' '${skill}'` }, cwd), true);
     assert.equal(isSkillRead("bash", { command: `rg -e '-foo' '${skill}'` }, cwd), true);

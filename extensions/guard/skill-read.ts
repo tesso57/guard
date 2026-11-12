@@ -38,7 +38,7 @@ export function isSkillRead(tool: string, input: unknown, cwd: string, registere
     let pipedSearch = false;
     for (const [index, sub] of parsed.subs.entries()) {
       if (sub.assigns.length || sub.reads.length || sub.heredocs.length || !["cat", "head", "tail", "sed", "rg", "grep"].includes(sub.argv[0]) || !isReadOnlyArgv(sub.argv)) return false;
-      if (sub.argv.slice(1).includes("-")) return false;
+      if (!["grep", "rg"].includes(sub.argv[0]) && sub.argv.slice(1).includes("-")) return false;
       if (sub.argv[0] === "grep" && process.env.GREP_OPTIONS) return false;
       if (sub.argv[0] === "rg" && rgUsesPatternFile(sub.argv)) return false;
       if (sub.argv[0] === "grep") {
@@ -49,7 +49,7 @@ export function isSkillRead(tool: string, input: unknown, cwd: string, registere
       }
       if (sub.argv[0] === "rg") {
         const explicit = rgExplicitPaths(sub.argv);
-        if (!explicit) return false;
+        if (!explicit || explicit.includes("-")) return false;
         if (!explicit.length) {
           if (!pipeline || index === 0 || !rgReadsStdin(sub.argv)) return false;
           pipedSearch = true;
