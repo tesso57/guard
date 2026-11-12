@@ -35,6 +35,28 @@ test("skill reads with an unknown hard link use the normal guard checks", () => 
   } finally { rmSync(parent, { recursive: true, force: true }); }
 });
 
+test("skill reads bypass guard only when every hard link is known and non-sensitive", () => {
+  const parent = mkdtempSync(join(tmpdir(), "guard-skill-known-links-"));
+  const cwd = join(parent, "project");
+  const dir = join(cwd, ".agents", "skills", "example");
+  const skill = join(dir, "SKILL.md");
+  const alias = join(cwd, "copy.md");
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(skill, "example");
+    linkSync(skill, alias);
+    assert.equal(isSkillRead("read", { path: skill }, cwd), true);
+    assert.equal(isSkillRead("bash", { command: `cat '${skill}'` }, cwd), true);
+    linkSync(skill, join(parent, "outside"));
+    assert.equal(isSkillRead("read", { path: skill }, cwd), false);
+    assert.equal(isSkillRead("bash", { command: `cat '${skill}'` }, cwd), false);
+    unlinkSync(join(parent, "outside"));
+    linkSync(skill, join(cwd, ".env"));
+    assert.equal(isSkillRead("read", { path: skill }, cwd), false);
+    assert.equal(isSkillRead("bash", { command: `cat '${skill}'` }, cwd), false);
+  } finally { rmSync(parent, { recursive: true, force: true }); }
+});
+
 test("only direct read-only access within standard skill directories bypasses guard", () => {
   const cwd = mkdtempSync(join(tmpdir(), "guard-skill-read-"));
   const skill = join(cwd, ".agents", "skills", "example", "SKILL.md");

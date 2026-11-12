@@ -28,7 +28,7 @@ export function isSkillRead(tool: string, input: unknown, cwd: string, registere
     if (tool === "read") {
       const path = resolvePath(cwd, field.value);
       const stat = statSync(path);
-      return inside(path) && stat.isFile() && stat.nlink <= 1;
+      return inside(path) && stat.isFile() && (stat.nlink <= 1 || isProjectHardlinkSafe(path, cwd));
     }
     if (process.env.BASH_ENV || process.env.ENV || process.env.BASHOPTS || process.env.SHELLOPTS || Object.keys(process.env).some((name) => name.startsWith("BASH_FUNC_") && name.endsWith("%%"))) return false;
     const parsed = parseShell(field.value);
