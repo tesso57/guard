@@ -40,6 +40,8 @@ Direct skill reads bypass guard entirely, including deny rules and audit logging
 
 Checks that grant a project or public-directory shortcut require matching path casing, so a differently cased path may need judgement even on a case-insensitive filesystem. Protective checks still treat case variants as equivalent.
 
+`tail` in follow mode goes through normal judgement: it can keep reading after the file name is retargeted. This includes follow mode on skill files.
+
 Git's compiled-in system configuration path varies between installations. To avoid executing Git before the safety check or guessing that path, guard skips the read-only Git shortcut unless `GIT_CONFIG_NOSYSTEM` is true or `GIT_CONFIG_SYSTEM` explicitly identifies a configuration file that guard can inspect. Other checks and remembered rules still apply.
 The Git hooks directory is inspected up to 1,000 entries; a larger or unreadable directory disables the shortcut because guard cannot establish that it is safe.
 

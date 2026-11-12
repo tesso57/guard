@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { isSkillRead } from "../extensions/guard/skill-read.ts";
 import { searchNeedsJudgement, sensitive } from "../extensions/guard/policy.ts";
-import { parseShell, rgExplicitPaths } from "../extensions/guard/shell.ts";
+import { isReadOnlyArgv, parseShell, rgExplicitPaths } from "../extensions/guard/shell.ts";
 
 test("ripgrep patterns and option values are not mistaken for search paths", () => {
   assert.deepEqual(rgExplicitPaths(["rg", "-e", "/skill/SKILL.md"]), []);
@@ -47,6 +47,11 @@ test("skill reads bypass guard only when every hard link is known and non-sensit
     linkSync(skill, alias);
     assert.equal(isSkillRead("read", { path: skill }, cwd), true);
     assert.equal(isSkillRead("bash", { command: `cat '${skill}'` }, cwd), true);
+    assert.equal(isSkillRead("bash", { command: `tail -n 10 '${skill}'` }, cwd), true);
+    for (const option of ["-f", "-F", "-qF", "--follow", "--follow=name", "--fol"]) {
+      assert.equal(isSkillRead("bash", { command: `tail ${option} '${skill}'` }, cwd), false, option);
+      assert.equal(isReadOnlyArgv(["tail", option, skill]), false, option);
+    }
     linkSync(skill, join(parent, "outside"));
     assert.equal(isSkillRead("read", { path: skill }, cwd), false);
     assert.equal(isSkillRead("bash", { command: `cat '${skill}'` }, cwd), false);
