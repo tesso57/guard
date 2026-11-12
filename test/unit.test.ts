@@ -172,6 +172,19 @@ if (process.platform !== "win32") {
   } finally { if (before === undefined) delete process.env.PATH; else process.env.PATH = before; }
 }
 if (process.platform !== "win32") {
+  const oldCwd = process.cwd(), oldPath = process.env.PATH;
+  const otherCwd = mkdtempSync(join(oldCwd, ".guard-relative-path-"));
+  try {
+    writeFileSync(join(otherCwd, "rg"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    process.chdir(otherCwd);
+    process.env.PATH = ".";
+    ok("policy: built-in search does not trust a relative PATH from a different working directory", !!inspectBuiltinSearchExecutable("grep", PROJ).risk);
+  } finally {
+    process.chdir(oldCwd);
+    if (oldPath === undefined) delete process.env.PATH; else process.env.PATH = oldPath;
+  }
+}
+if (process.platform !== "win32") {
   const shadow = mkdtempSync(join(tmpdir(), "guard-grep-shadow-"));
   const before = process.env.PATH;
   process.env.PATH = `${shadow}:/usr/bin:/bin`;

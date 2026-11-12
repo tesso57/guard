@@ -28,7 +28,7 @@ test("ripgrep visibility and guard decisions agree on representative searches", 
     const { clearPathCache, protectedRoots } = await import("../extensions/guard/paths.ts");
     if (existsSync("/usr/bin/rg")) {
       const previousPath = process.env.PATH;
-      process.env.PATH = "/usr/bin:/bin";
+      process.env.PATH = "/usr/bin:/bin:.";
       try { assert.equal(inspectBuiltinSearchExecutable("grep", project).risk, undefined, "system ripgrep does not require extra confirmation"); }
       finally { if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath; }
     }

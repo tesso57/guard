@@ -181,18 +181,20 @@ export function inspectBuiltinSearchExecutable(tool: string, cwd: string): { ris
   };
   try {
     let candidate: string | undefined;
+    let relativeLookup = false;
     let probes = 0;
     if (existsSync(local)) { inspect(local, false); candidate = local; }
     else for (const name of names) {
       for (const entry of path.split(delimiter)) {
         if (++probes > 512) return { risk: "built-in search executable lookup exceeds the inspection limit" };
         const next = join(resolve(process.cwd(), entry || "."), name);
-        if (inspect(next, true)) { candidate = next; break; }
+        if (inspect(next, true)) { candidate = next; relativeLookup = !isAbsolute(entry); break; }
       }
       if (candidate) break;
     }
     const fingerprint = createHash("sha256").update(JSON.stringify(selected)).digest("hex");
     if (!candidate) return { risk: "the built-in search tool may download an executable", fingerprint };
+    if (relativeLookup) return { risk: "the built-in search executable resolves through a relative PATH entry", fingerprint };
     if ([candidate, realPath(candidate)].some((p) => roots.some((root) => isInside(p, root))))
       return { risk: "the built-in search tool resolves to a project, temporary or Pi-managed executable", fingerprint };
     return { fingerprint };
