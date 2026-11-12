@@ -268,11 +268,51 @@ export function inspectBuiltinSearchExecutable(tool: string, cwd: string, piVers
     nativeReadBudget -= length;
     return executableSlice(file, st, offset, length);
   };
+  const inspectElfPaths = (file: string, programs: NonNullable<ReturnType<typeof elfPrograms>>): string | undefined => {
+    if (programs.audit) return "the built-in search executable configures ELF auditing or filtering";
+    const origins = [...new Set([dirname(file), dirname(realPath(file))])];
+    const directories = new Set<string>();
+    let probes = 0, exhausted = false;
+    const check = (path: string, directory = false): boolean => {
+      let trusted = true;
+      for (const origin of origins) {
+        if (++probes > 512) { exhausted = true; return false; }
+        const expanded = path.replace(/\$(?:\{ORIGIN\}|ORIGIN(?![A-Za-z0-9_]))/g, origin);
+        if (!expanded || expanded.includes("$") || !isAbsolute(expanded)) { trusted = false; continue; }
+        if (directory) directories.add(expanded);
+        const actual = realPath(expanded);
+        if ([expanded, actual].some((p) => roots.some((root) => isInside(p, root)))) trusted = false;
+        try {
+          const st = statSync(expanded);
+          selected.push(["elf-library-path", expanded, actual, st.dev, st.ino, st.mode, st.nlink, st.size, st.mtimeMs, st.ctimeMs]);
+        } catch (error: any) {
+          if (!["ENOENT", "ENOTDIR"].includes(error?.code)) { trusted = false; continue; }
+          selected.push(["elf-library-path", expanded, actual, null]);
+        }
+      }
+      return trusted;
+    };
+    let risk: string | undefined;
+    for (const paths of programs.libraryPaths ?? []) for (const path of paths.split(":")) {
+      if (!check(path, true)) risk ??= "the built-in search executable has an unverified ELF library search path";
+      if (exhausted) return risk;
+    }
+    for (const dependency of programs.dependencies ?? []) {
+      if (!dependency || ((dependency.includes("/") || dependency.includes("$")) && !check(dependency))) risk ??= "the built-in search executable has an unverified ELF dependency";
+      if (exhausted) return risk;
+      if (dependency && !dependency.includes("/") && !dependency.includes("$")) for (const directory of directories) {
+        if (!check(join(directory, dependency))) risk ??= "the built-in search executable has an unverified ELF dependency";
+        if (exhausted) return risk;
+      }
+    }
+    return risk;
+  };
   const inspectElfLoader = (file: string, st: Stats, header: Buffer): string | undefined => {
     if (process.platform !== "linux" || header.subarray(0, 4).toString("hex") !== "7f454c46") return undefined;
     const programs = elfPrograms(header, st.size, (offset, length) => readNative(file, st, offset, length));
     if (!programs) throw new Error("ELF program headers are not verifiable");
-    if (!programs.interpreter) return undefined;
+    const pathsRisk = inspectElfPaths(file, programs);
+    if (!programs.interpreter) return pathsRisk;
     const loader = programs.interpreter;
     accessSync(loader, constants.X_OK);
     const loaderStat = statSync(loader), actual = realPath(loader);
@@ -284,7 +324,7 @@ export function inspectBuiltinSearchExecutable(tool: string, cwd: string, piVers
     selected.push(["elf-loader", loader, actual, loaderStat.dev, loaderStat.ino, loaderStat.mode, loaderStat.nlink, loaderStat.size, loaderStat.mtimeMs, loaderStat.ctimeMs]);
     if (!/^ld[^/]*\.so(?:\.[A-Za-z0-9._-]+)?$/.test(basename(loader)) || !immutableSystemExecutable(loader, actual, loaderStat))
       return "the built-in search executable uses an untrusted ELF loader";
-    return undefined;
+    return pathsRisk ?? inspectElfPaths(loader, loaderPrograms);
   };
   const inspectNativeLoader = (file: string, st: Stats, header: Buffer): string | undefined => {
     if (process.platform !== "darwin") return inspectElfLoader(file, st, header);

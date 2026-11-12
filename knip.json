@@ -2,5 +2,5 @@
   "$schema": "https://unpkg.com/knip@6/schema.json",
   "entry": ["extensions/index.ts", "tests/*.test.ts"],
   "project": ["extensions/**/*.ts", "test/**/*.{ts,mjs}", "tests/**/*.ts"],
-  "ignoreBinaries": ["mkfifo", "rg"]
+  "ignoreBinaries": ["cc", "mkfifo", "rg"]
 }

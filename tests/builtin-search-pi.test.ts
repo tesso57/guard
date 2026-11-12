@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { machoLoaders } from "../extensions/guard/macho.ts";
+import { elfPrograms } from "../extensions/guard/elf.ts";
 
 test("Pi does not run a shadowed built-in search executable before confirmation", { skip: process.platform === "win32" }, () => {
   const dir = mkdtempSync(join(tmpdir(), "guard-builtin-pi-"));
@@ -165,6 +166,51 @@ test("Pi asks before an ELF with a missing dynamic loader can trigger a download
       assert.match(JSON.stringify(unexpectedOutput.content), /guard/i);
       assert.equal(existsSync(join(agent, "bin")), false);
     }
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(bin, { recursive: true, force: true }); }
+});
+
+test("Pi checks ELF library search paths before starting a built-in search", { skip: process.platform !== "linux" }, (t) => {
+  const compiler = spawnSync("cc", ["--version"], { encoding: "utf8" });
+  if (compiler.status !== 0) return t.skip("C compiler is unavailable");
+  const dir = mkdtempSync(join(tmpdir(), "guard-elf-runpath-"));
+  const bin = mkdtempSync(join(process.cwd(), ".guard-elf-runpath-"));
+  const project = join(dir, "project"), agent = join(dir, "agent"), library = join(project, "lib"), marker = join(dir, "executed");
+  try {
+    mkdirSync(library, { recursive: true });
+    writeFileSync(join(project, "file.txt"), "needle\n");
+    const source = join(dir, "candidate.c"), executable = join(bin, "rg");
+    writeFileSync(source, '#include <stdio.h>\n#include <stdlib.h>\nint main(void) { const char *p = getenv("GUARD_TEST_MARKER"); if (p) { FILE *f = fopen(p, "w"); if (f) fclose(f); } return 0; }\n');
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(GUARD_|RISK_|PI_|OPENAI_|BASH_FUNC_|LD_|DYLD_)/.test(key) && !["BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "RIPGREP_CONFIG_PATH", "GREP_OPTIONS"].includes(key)));
+    Object.assign(env, { HOME: dir, XDG_CONFIG_HOME: join(dir, "config"), PI_CODING_AGENT_DIR: agent, GUARD_TEST_PROJECT: project, GUARD_TEST_TOOL: "grep", GUARD_TEST_MARKER: marker, PATH: bin });
+    const compile = (runpath: string) => {
+      const result = spawnSync("cc", [source, `-Wl,-rpath,${runpath}`, "-o", executable], { encoding: "utf8" });
+      assert.equal(result.status, 0, result.stderr);
+    };
+    const invoke = () => spawnSync(process.execPath, ["--experimental-strip-types", fileURLToPath(new URL("./helpers/builtin-search-child.mjs", import.meta.url))], { env, encoding: "utf8", timeout: 30_000 });
+    compile(library);
+    const blocked = invoke();
+    assert.equal(blocked.status, 0, blocked.stderr);
+    assert.equal(JSON.parse(blocked.stdout).blocked, true);
+    assert.equal(existsSync(marker), false, "the untrusted runpath must be checked before --version runs");
+    compile("$ORIGIN/lib");
+    mkdirSync(join(bin, "lib"));
+    const compiled = readFileSync(executable);
+    const parsed = elfPrograms(compiled.subarray(0, 64), compiled.length, (offset, length) => compiled.subarray(offset, offset + length));
+    const dependency = parsed?.dependencies?.find((name) => name && !name.includes("/") && !name.includes("$"));
+    if (dependency) {
+      writeFileSync(join(library, "fake-library.so"), "fixture");
+      const alias = join(bin, "lib", dependency);
+      symlinkSync(join(library, "fake-library.so"), alias);
+      const linked = invoke();
+      assert.equal(linked.status, 0, linked.stderr);
+      assert.equal(JSON.parse(linked.stdout).blocked, true, "a dependency symlink into the project must require confirmation");
+      assert.equal(existsSync(marker), false);
+      rmSync(alias);
+    }
+    const allowed = invoke();
+    assert.equal(allowed.status, 0, allowed.stderr);
+    assert.equal(JSON.parse(allowed.stdout).blocked, false, "a runpath outside protected roots should not force confirmation");
+    assert.equal(existsSync(marker), true);
   } finally { rmSync(dir, { recursive: true, force: true }); rmSync(bin, { recursive: true, force: true }); }
 });
 
