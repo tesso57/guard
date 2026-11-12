@@ -49,12 +49,18 @@ test("ripgrep visibility and guard decisions agree on representative searches", 
       if (result.stdout.split("\n").some((line) => line.endsWith("/.env"))) assert.equal(flagged, true, command);
       if (expectSafe) assert.equal(!flagged && safeAllow("bash", { command }, project, { trusted: true, touched: new Set() }, parsed), true, command);
     }
+    const typeList = spawnSync("rg", ["--no-config", "--type-list"], { cwd: project, encoding: "utf8" });
+    assert.equal(typeList.status, 0);
+    clearPathCache();
+    assert.equal(safeAllow("bash", { command: "rg --type-list" }, project, { trusted: true, touched: new Set() }, parseShell("rg --type-list")), true);
     if (process.platform !== "win32") {
       const marker = join(dir, "preprocessor-ran"), script = join(dir, "preprocessor"), config = join(dir, "ripgrep.conf");
       writeFileSync(script, '#!/bin/sh\nprintf called > "$GUARD_PARITY_MARKER"\ncat "$1"\n', { mode: 0o700 });
       writeFileSync(config, `--pre=${script}\n`);
       process.env.RIPGREP_CONFIG_PATH = config;
       process.env.GUARD_PARITY_MARKER = marker;
+      clearPathCache();
+      assert.equal(safeAllow("bash", { command: "rg --type-list" }, project, { trusted: true, touched: new Set() }, parseShell("rg --type-list")), false);
       const search = spawnSync("rg", ["needle", "visible.txt"], { cwd: project, encoding: "utf8" });
       assert.equal(search.status, 0);
       assert.equal(existsSync(marker), true, "the configured preprocessor must run for a normal search");

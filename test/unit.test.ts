@@ -322,6 +322,7 @@ ok("paths: read fallback through a narrow-space symlink is sensitive", !!sensiti
     ok(`shell: ripgrep information command needs no config confirmation: ${option}`, !usesRipgrepConfig(parsed) && isReadOnlyArgv(parsed.subcommands[0]) && safeAllow("bash", { command }, PROJ, O, parsed));
   }
   ok("shell: ambient ripgrep config requires confirmation", usesRipgrepConfig(P("rg needle src")) && !isReadOnlyArgv(["rg", "needle", "src"]));
+  ok("shell: ripgrep type listing still checks ambient config", usesRipgrepConfig(P("rg --type-list")));
   ok("shell: first --no-config disables ambient ripgrep config", !usesRipgrepConfig(P("rg --no-config needle src")) && isReadOnlyArgv(["rg", "--no-config", "needle", "src"]));
   ok("shell: --no-config after another option also disables ambient config", !usesRipgrepConfig(P("rg -n --no-config needle src")) && isReadOnlyArgv(["rg", "-n", "--no-config", "needle", "src"]));
   ok("shell: a pattern named --no-config does not disable config", usesRipgrepConfig(P("rg -e --no-config src")) && usesRipgrepConfig(P("rg -- --no-config")));
@@ -1577,6 +1578,8 @@ name: visible
     return { sensitive: sensitive("bash", { command }, repo, protectedRoots(repo), parsed), safe: safeAllow("bash", { command }, repo, O, parsed) };
   };
   ok("rg: listing project files does not inspect their contents", !inspect("rg --files").sensitive && inspect("rg --files").safe);
+  ok("rg: listing file types does not inspect project contents", !inspect("rg --type-list").sensitive && inspect("rg --type-list").safe);
+  ok("rg: --type-list used as a pattern remains a content search", !!inspect("rg -e --type-list .").sensitive);
   ok("rg: --files used as an option value remains a content search", !!inspect("rg -e --files .").sensitive);
   ok("rg: --files after -- remains a search pattern", !!inspect("rg -- --files .").sensitive);
   ok("rg: explicitly naming a sensitive file still requires confirmation", !!inspect("rg --files visible.pem").sensitive);

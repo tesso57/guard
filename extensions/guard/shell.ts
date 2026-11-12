@@ -644,8 +644,9 @@ const RG_LONG_VALUES = new Set([
   "encoding", "engine", "file", "glob", "iglob", "max-columns", "max-count", "max-depth", "maxdepth", "max-filesize", "path-separator", "regexp",
   "replace", "sort", "sortr", "threads", "type", "type-not", "type-add", "type-clear", "dfa-size-limit", "regex-size-limit",
 ]);
-function inspectRgOptions(a: string[]): { known: boolean; listsFiles: boolean; noConfig: boolean; noIgnore: boolean; hidden: boolean; unrestricted: number; patternProvided: boolean; fileTypes: boolean; operands: string[]; globs: string[] } {
+function inspectRgOptions(a: string[]): { known: boolean; listsFiles: boolean; listsTypes: boolean; noConfig: boolean; noIgnore: boolean; hidden: boolean; unrestricted: number; patternProvided: boolean; fileTypes: boolean; operands: string[]; globs: string[] } {
   let listsFiles = false;
+  let listsTypes = false;
   let noConfig = false;
   let noIgnore = false;
   let hidden = false;
@@ -654,7 +655,7 @@ function inspectRgOptions(a: string[]): { known: boolean; listsFiles: boolean; n
   let fileTypes = false;
   const operands: string[] = [];
   const globs: string[] = [];
-  const invalid = () => ({ known: false, listsFiles: false, noConfig: false, noIgnore: false, hidden: false, unrestricted: 0, patternProvided: false, fileTypes: false, operands: [], globs: [] });
+  const invalid = () => ({ known: false, listsFiles: false, listsTypes: false, noConfig: false, noIgnore: false, hidden: false, unrestricted: 0, patternProvided: false, fileTypes: false, operands: [], globs: [] });
   for (let i = 1; i < a.length; i++) {
     const t = a[i];
     if (t === "--") { operands.push(...a.slice(i + 1)); break; }
@@ -664,6 +665,7 @@ function inspectRgOptions(a: string[]): { known: boolean; listsFiles: boolean; n
       const name = t.slice(2, eq < 0 ? undefined : eq);
       if (RG_LONG_FLAGS.has(name) && eq < 0) {
         if (name === "files") listsFiles = true;
+        if (name === "type-list") listsTypes = true;
         if (name === "no-config") noConfig = true;
         if (name === "no-ignore") noIgnore = true;
         if (name === "hidden") hidden = true;
@@ -693,7 +695,7 @@ function inspectRgOptions(a: string[]): { known: boolean; listsFiles: boolean; n
       if (c === ".") hidden = true;
     }
   }
-  return { known: true, listsFiles, noConfig, noIgnore, hidden, unrestricted, patternProvided, fileTypes, operands, globs };
+  return { known: true, listsFiles, listsTypes, noConfig, noIgnore, hidden, unrestricted, patternProvided, fileTypes, operands, globs };
 }
 
 /** `--files` lists paths instead of searching their contents, when it is an actual option. */
@@ -701,6 +703,13 @@ export function rgListsFiles(a: string[]): boolean {
   if (a[0] !== "rg") return false;
   const options = inspectRgOptions(a);
   return options.known && options.listsFiles;
+}
+
+/** A type listing without search inputs reports metadata instead of file contents. */
+export function rgListsTypes(a: string[]): boolean {
+  if (a[0] !== "rg") return false;
+  const options = inspectRgOptions(a);
+  return options.known && options.listsTypes && !options.patternProvided && options.operands.length === 0 && options.globs.length === 0;
 }
 
 /** Standalone information requests do not search files or run configured preprocessors. */
