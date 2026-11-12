@@ -1598,10 +1598,15 @@ name: visible
     ok(`rg: inline configuration requires confirmation: ${command}`, usesRipgrepConfig(P(command)) && !inspect(command).safe);
   ok("rg: --no-config disables inline configuration", !usesRipgrepConfig(P("RIPGREP_CONFIG_PATH=.env rg --no-config needle src")));
   ok("rg: a configuration-looking search pattern is not an assignment", !usesRipgrepConfig(P("rg RIPGREP_CONFIG_PATH=example src")));
+  const outside = mkdtempSync(join(tmpdir(), "guard-rg-glob-link-"));
+  linkSync(join(repo, "needle", "private.pem"), join(outside, "private.pem"));
   ok("rg: a simple inclusion glob excludes unrelated secret names from recursive search", !inspect("rg -g '*.txt' needle .").sensitive && inspect("rg -g '*.txt' needle .").safe);
   ok("rg: an explicitly named secret is still read despite an exclusion glob", !!inspect("rg -g '*.txt' needle .env").sensitive);
   ok("rg: multiple inclusion globs retain matching secret files", !!inspect("rg -g '*.txt' -g '*.pem' needle .").sensitive);
   ok("rg: unsupported or negative globs retain conservative secret checks", !!inspect("rg -g '!*.pem' needle .").sensitive && !!inspect("rg -g '*.txt' -g '.env' needle .").sensitive);
+  const externalText = join(outside, "linked.txt");
+  linkSync(join(repo, "src", "file.txt"), externalText);
+  ok("rg: a matching file with an unlocated hard link remains subject to confirmation", !inspect("rg -g '*.txt' needle .").safe);
 }
 
 // Exercise the same Git directory resolution against a worktree created by Git itself.

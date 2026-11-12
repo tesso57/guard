@@ -809,9 +809,9 @@ function searchExposure(tool: string, input: any, cwd: string, parsed?: Parsed):
         if (error?.code !== "ENOENT" && error?.code !== "ENOTDIR") unknown = true;
         continue;
       }
-      const { files, complete } = secretFilesUnder(real, projectRead && isProjectPath(real, cwd) ? cwd : undefined);
+      const { files, complete } = secretFilesUnder(real, projectRead && isProjectPath(real, cwd) ? cwd : undefined, suffixes);
       if (!complete) unknown = true;
-      const hit = files.find((f) => (hidden || !relativeHasHidden(real, f)) && (!suffixes || suffixes.some((suffix) => basename(f).toLowerCase().endsWith(suffix))));
+      const hit = files.find((f) => hidden || !relativeHasHidden(real, f));
       if (hit) return { hit, unknown };
     }
     return { unknown };
