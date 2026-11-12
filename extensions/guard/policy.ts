@@ -9,7 +9,7 @@ import { createHash } from "node:crypto";
 import { accessSync, constants, existsSync, opendirSync, statSync } from "node:fs";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { hasGluedPathValue, innerCommands, INTERPRETER_NAMES, isLongOption, isReadOnlyArgv, isShell, nonFlags, normalizeArgv, type Parsed, parseShell, rgExplicitPaths, rgListsFiles, unwrapCommandWrappers } from "./shell.ts";
+import { hasGluedPathValue, innerCommands, INTERPRETER_NAMES, isLongOption, isReadOnlyArgv, isShell, nonFlags, normalizeArgv, type Parsed, parseShell, rgDisablesConfig, rgExplicitPaths, rgListsFiles, unwrapCommandWrappers } from "./shell.ts";
 import { readRegularText } from "./files.ts";
 import { containsProtectedRoot, expandGlobFully, trustedDirFor, trustedDirRelative, type TrustedDir, type TrustedDirState, isPiCodePath, PI_CODE_DIRS, gitConfigIsSafe, globHitsOptionLikeName, globMayReach, ignoreFilesReinclude, isFreelyReadable, isHardLinked, isHomeOrAncestor, isInside, isInsideExact, isProjectPath, isProjectHardlinkSafe, isProtectedHardLink, isRiskyProjectFile, memo, pathLikeTokens, pathVariants, protectedReason, protectedRoots, readFallbackVariants, realPath, resolvePath, secretFilesUnder, sensitiveReason, UNKNOWN_PATH } from "./paths.ts";
 
@@ -855,7 +855,7 @@ export function usesRipgrepConfig(parsed?: Parsed): boolean {
   });
   return configured && parsed.subcommands.some((raw) => {
     const a = normalizeArgv(raw, "deny").argv;
-    return a[0] === "rg" && a[1] !== "--no-config";
+    return a[0] === "rg" && !rgDisablesConfig(a);
   });
 }
 

@@ -317,7 +317,9 @@ ok("paths: read fallback through a narrow-space symlink is sensitive", !!sensiti
   process.env.RIPGREP_CONFIG_PATH = "/tmp/example-rg-config";
   ok("shell: ambient ripgrep config requires confirmation", usesRipgrepConfig(P("rg needle src")) && !isReadOnlyArgv(["rg", "needle", "src"]));
   ok("shell: first --no-config disables ambient ripgrep config", !usesRipgrepConfig(P("rg --no-config needle src")) && isReadOnlyArgv(["rg", "--no-config", "needle", "src"]));
+  ok("shell: --no-config after another option also disables ambient config", !usesRipgrepConfig(P("rg -n --no-config needle src")) && isReadOnlyArgv(["rg", "-n", "--no-config", "needle", "src"]));
   ok("shell: a pattern named --no-config does not disable config", usesRipgrepConfig(P("rg -e --no-config src")) && usesRipgrepConfig(P("rg -- --no-config")));
+  ok("shell: an option value named --no-config does not disable config", usesRipgrepConfig(P("rg -g --no-config needle src")));
   if (oldRgConfig === undefined) delete process.env.RIPGREP_CONFIG_PATH;
   else process.env.RIPGREP_CONFIG_PATH = oldRgConfig;
 }

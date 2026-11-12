@@ -644,11 +644,12 @@ const RG_LONG_VALUES = new Set([
   "encoding", "file", "glob", "iglob", "max-columns", "max-count", "max-depth", "maxdepth", "max-filesize", "path-separator", "regexp",
   "replace", "sort", "sortr", "threads", "type", "type-not", "type-add", "type-clear", "dfa-size-limit", "regex-size-limit",
 ]);
-function inspectRgOptions(a: string[]): { known: boolean; listsFiles: boolean; patternProvided: boolean; operands: string[] } {
+function inspectRgOptions(a: string[]): { known: boolean; listsFiles: boolean; noConfig: boolean; patternProvided: boolean; operands: string[] } {
   let listsFiles = false;
+  let noConfig = false;
   let patternProvided = false;
   const operands: string[] = [];
-  const invalid = () => ({ known: false, listsFiles: false, patternProvided: false, operands: [] });
+  const invalid = () => ({ known: false, listsFiles: false, noConfig: false, patternProvided: false, operands: [] });
   for (let i = 1; i < a.length; i++) {
     const t = a[i];
     if (t === "--") { operands.push(...a.slice(i + 1)); break; }
@@ -656,7 +657,7 @@ function inspectRgOptions(a: string[]): { known: boolean; listsFiles: boolean; p
     if (t.startsWith("--")) {
       const eq = t.indexOf("=");
       const name = t.slice(2, eq < 0 ? undefined : eq);
-      if (RG_LONG_FLAGS.has(name) && eq < 0) { if (name === "files") listsFiles = true; continue; }
+      if (RG_LONG_FLAGS.has(name) && eq < 0) { if (name === "files") listsFiles = true; if (name === "no-config") noConfig = true; continue; }
       if (!RG_LONG_VALUES.has(name)) return invalid();
       if (name === "regexp" || name === "file") patternProvided = true;
       if (eq < 0) { if (i + 1 >= a.length) return invalid(); i++; }
@@ -672,7 +673,7 @@ function inspectRgOptions(a: string[]): { known: boolean; listsFiles: boolean; p
       if (!RG_SHORT_FLAGS.has(c)) return invalid();
     }
   }
-  return { known: true, listsFiles, patternProvided, operands };
+  return { known: true, listsFiles, noConfig, patternProvided, operands };
 }
 
 /** `--files` lists paths instead of searching their contents, when it is an actual option. */
@@ -680,6 +681,13 @@ export function rgListsFiles(a: string[]): boolean {
   if (a[0] !== "rg") return false;
   const options = inspectRgOptions(a);
   return options.known && options.listsFiles;
+}
+
+/** Only an actual option, not a pattern or option value, disables the ambient config. */
+export function rgDisablesConfig(a: string[]): boolean {
+  if (a[0] !== "rg") return false;
+  const options = inspectRgOptions(a);
+  return options.known && options.noConfig;
 }
 
 /** Explicit search roots, excluding the pattern and option values; undefined for unknown options. */
@@ -741,7 +749,7 @@ export function isReadOnlyArgv(raw: string[]): boolean {
     case "rg":
       // An allowlist: rg keeps gaining options that run programs (--pre, --hostname-bin) or follow links out (-L)
       // Requiring it first avoids mistaking a pattern or an option value for a flag.
-      if (process.env.RIPGREP_CONFIG_PATH && a[1] !== "--no-config") return false;
+      if (process.env.RIPGREP_CONFIG_PATH && !rgDisablesConfig(a)) return false;
       return inspectRgOptions(a).known;
     case "grep":
     case "egrep":
