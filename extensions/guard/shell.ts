@@ -703,6 +703,11 @@ export function rgListsFiles(a: string[]): boolean {
   return options.known && options.listsFiles;
 }
 
+/** Standalone information requests do not search files or run configured preprocessors. */
+export function rgInfoOnly(a: string[]): boolean {
+  return a.length === 2 && a[0] === "rg" && ["--version", "-V", "--help", "-h"].includes(a[1]);
+}
+
 /** Only an actual option, not a pattern or option value, disables the ambient config. */
 export function rgDisablesConfig(a: string[]): boolean {
   if (a[0] !== "rg") return false;
@@ -755,6 +760,7 @@ export function isReadOnlyArgv(raw: string[]): boolean {
   const head = a[0];
   // An empty command name is never read-only (it may hide the real command)
   if (!head) return false;
+  if (rgInfoOnly(a)) return true;
   if (a.length === 2 && /^(--version|-V|--help)$/.test(a[1])) return VERSION_TOOLS.has(head);
   switch (head) {
     case "test":

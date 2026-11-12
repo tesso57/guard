@@ -315,6 +315,12 @@ ok("paths: read fallback through a narrow-space symlink is sensitive", !!sensiti
   ok("shell: an arbitrary executable with --version is not read-only", !isReadOnlyArgv(["custom-tool", "--version"]) && !safeAllow("bash", { command: "custom-tool --version" }, PROJ, O, P("custom-tool --version")));
   const oldRgConfig = process.env.RIPGREP_CONFIG_PATH;
   process.env.RIPGREP_CONFIG_PATH = "/tmp/example-rg-config";
+  for (const option of ["--version", "-V", "--help", "-h"]) {
+    const command = `rg ${option}`;
+    const parsed = P(command);
+    clearPathCache();
+    ok(`shell: ripgrep information command needs no config confirmation: ${option}`, !usesRipgrepConfig(parsed) && isReadOnlyArgv(parsed.subcommands[0]) && safeAllow("bash", { command }, PROJ, O, parsed));
+  }
   ok("shell: ambient ripgrep config requires confirmation", usesRipgrepConfig(P("rg needle src")) && !isReadOnlyArgv(["rg", "needle", "src"]));
   ok("shell: first --no-config disables ambient ripgrep config", !usesRipgrepConfig(P("rg --no-config needle src")) && isReadOnlyArgv(["rg", "--no-config", "needle", "src"]));
   ok("shell: --no-config after another option also disables ambient config", !usesRipgrepConfig(P("rg -n --no-config needle src")) && isReadOnlyArgv(["rg", "-n", "--no-config", "needle", "src"]));

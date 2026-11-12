@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -48,6 +48,25 @@ test("ripgrep visibility and guard decisions agree on representative searches", 
       const flagged = !!sensitive("bash", { command }, project, protectedRoots(project), parsed) || searchNeedsJudgement("bash", { command }, project, parsed);
       if (result.stdout.split("\n").some((line) => line.endsWith("/.env"))) assert.equal(flagged, true, command);
       if (expectSafe) assert.equal(!flagged && safeAllow("bash", { command }, project, { trusted: true, touched: new Set() }, parsed), true, command);
+    }
+    if (process.platform !== "win32") {
+      const marker = join(dir, "preprocessor-ran"), script = join(dir, "preprocessor"), config = join(dir, "ripgrep.conf");
+      writeFileSync(script, '#!/bin/sh\nprintf called > "$GUARD_PARITY_MARKER"\ncat "$1"\n', { mode: 0o700 });
+      writeFileSync(config, `--pre=${script}\n`);
+      process.env.RIPGREP_CONFIG_PATH = config;
+      process.env.GUARD_PARITY_MARKER = marker;
+      const search = spawnSync("rg", ["needle", "visible.txt"], { cwd: project, encoding: "utf8" });
+      assert.equal(search.status, 0);
+      assert.equal(existsSync(marker), true, "the configured preprocessor must run for a normal search");
+      rmSync(marker);
+      for (const option of ["--version", "-V", "--help", "-h"]) {
+        const result = spawnSync("rg", [option], { cwd: project, encoding: "utf8" });
+        assert.equal(result.status, 0, option);
+        assert.equal(existsSync(marker), false, option);
+        const command = `rg ${option}`;
+        clearPathCache();
+        assert.equal(safeAllow("bash", { command }, project, { trusted: true, touched: new Set() }, parseShell(command)), true, command);
+      }
     }
   } finally {
     for (const key of Object.keys(process.env)) if (isolated(key)) delete process.env[key];
