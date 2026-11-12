@@ -1,7 +1,7 @@
 {
   "name": "guard",
   "version": "0.1.0",
-  "description": "pi coding agent extension that judges the risk of every tool call with the OpenAI Decisions API before it runs",
+  "description": "Pi coding agent extension that checks tool calls and uses the OpenAI Decisions API when needed",
   "type": "module",
   "license": "MIT",
   "private": true,
