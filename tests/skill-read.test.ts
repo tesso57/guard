@@ -86,6 +86,13 @@ test("only direct read-only access within standard skill directories bypasses gu
     mkdirSync(join(cwd, ".agents", "skills", "example"), { recursive: true });
     writeFileSync(skill, "example");
     writeFileSync(outside, "outside");
+    for (const name of ["-F", "--follow"]) {
+      const skillDir = join(cwd, ".agents", "skills", "example");
+      writeFileSync(join(skillDir, name), "example");
+      assert.equal(isReadOnlyArgv(["tail", "--", name]), true, `${name} is an operand after --`);
+      assert.equal(isSkillRead("bash", { command: `tail -- ${name}` }, skillDir), true);
+      assert.equal(isSkillRead("bash", { command: `tail -F -- ${name}` }, skillDir), false);
+    }
     symlinkSync(outside, join(cwd, ".agents", "skills", "example", "outside"));
     assert.equal(isSkillRead("read", { path: skill }, cwd), true);
     assert.equal(isSkillRead("bash", { command: `cat '${skill}'` }, cwd), true);

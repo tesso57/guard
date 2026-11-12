@@ -838,9 +838,12 @@ export function isReadOnlyArgv(raw: string[]): boolean {
     case "printf":
       // printf -v NAME assigns a shell variable (CDPATH, PATH, HOME, ...)
       return !a.slice(1).some((t) => /^-[A-Za-z]*v/.test(t) && !t.startsWith("--"));
-    case "tail":
+    case "tail": {
       // Following a file can continue reading after its name is retargeted.
-      return !hasShort(a, "f") && !hasShort(a, "F") && !hasLong(a, "--follow");
+      const end = a.indexOf("--");
+      const options = end < 0 ? a : a.slice(0, end);
+      return !hasShort(options, "f") && !hasShort(options, "F") && !hasLong(options, "--follow");
+    }
     case "less":
     case "more":
       // Pagers can run commands (+cmd, lesskey files, LESSOPEN); agents have no terminal to page on anyway
