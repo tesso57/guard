@@ -13,10 +13,13 @@ export type RegisteredSkill = { path: string; target: string };
 export function isSkillRead(tool: string, input: unknown, cwd: string, registeredSkills: readonly RegisteredSkill[] = []): boolean {
   try {
     if (!input || typeof input !== "object" || utilTypes.isProxy(input)) return false;
-    const key = tool === "read" ? "path" : tool === "bash" ? "command" : undefined;
+    const key = tool === "read" || tool === "ls" ? "path" : tool === "bash" ? "command" : undefined;
     if (!key) return false;
     const field = Object.getOwnPropertyDescriptor(input, key);
-    if (!field || !("value" in field) || typeof field.value !== "string") return false;
+    if (!field && key in input) return false;
+    if (field && (!("value" in field) || (field.value !== undefined && typeof field.value !== "string"))) return false;
+    if (tool !== "ls" && (!field || !("value" in field) || typeof field.value !== "string")) return false;
+    const value = field && "value" in field && typeof field.value === "string" ? field.value : "";
     clearPathCache();
     const roots = [join(homedir(), ".agents", "skills"), join(AGENT_DIR, "skills"), join(cwd, ".pi", "skills")];
     for (let dir = cwd; ; dir = dirname(dir)) {
@@ -26,12 +29,16 @@ export function isSkillRead(tool: string, input: unknown, cwd: string, registere
     const inside = (path: string) => roots.some((root) => isInsideExact(realPath(path), realPath(root)) && (isInsideExact(path, root) || isInsideExact(path, realPath(root)))) ||
       registeredSkills.some((skill) => isAbsolute(skill.path) && realPath(skill.path) === skill.target && realPath(path) === skill.target);
     if (tool === "read") {
-      const path = resolvePath(cwd, field.value);
+      const path = resolvePath(cwd, value);
       const stat = statSync(path);
       return inside(path) && stat.isFile() && (stat.nlink <= 1 || isProjectHardlinkSafe(path, cwd));
     }
+    if (tool === "ls") {
+      const path = resolvePath(cwd, value || ".");
+      return inside(path) && statSync(path).isDirectory();
+    }
     if (process.env.BASH_ENV || process.env.ENV || process.env.BASHOPTS || process.env.SHELLOPTS || Object.keys(process.env).some((name) => name.startsWith("BASH_FUNC_") && name.endsWith("%%"))) return false;
-    const parsed = parseShell(field.value);
+    const parsed = parseShell(value);
     if (!parsed.ok || parsed.dynamic.length || parsed.globs.length || parsed.writes.length || parsed.heredocBodies.length || !parsed.subs.length) return false;
     const grepTargets: string[] = [];
     const pipeline = parsed.subs.length > 1 && parsed.operators.length === parsed.subs.length - 1 && parsed.operators.every((operator) => operator === "|");
@@ -60,7 +67,7 @@ export function isSkillRead(tool: string, input: unknown, cwd: string, registere
     if (pipedSearch) {
       const first = parsed.subs[0];
       if (!["cat", "grep", "rg"].includes(first.argv[0])) return false;
-      const source = inputPaths("bash", { command: `${field.value}\0source` }, cwd, { ...parsed, subs: [first], subcommands: [first.argv] });
+      const source = inputPaths("bash", { command: `${value}\0source` }, cwd, { ...parsed, subs: [first], subcommands: [first.argv] });
       if (!source.reads.length || source.writes.length || !source.reads.every(inside)) return false;
     }
     const otherSubs = parsed.subs.filter((sub) => sub.argv[0] !== "grep");
@@ -73,7 +80,7 @@ export function isSkillRead(tool: string, input: unknown, cwd: string, registere
     });
     // A file operand can skip hard-link inspection only if no pipeline command reads file contents.
     const nonListingSubs = parsed.subs.filter((sub) => !rgListsFiles(sub.argv));
-    const nonListingPaths = nonListingSubs.length ? inputPaths("bash", { command: `${field.value}\0non-listing` }, cwd, { ...parsed, subs: nonListingSubs, subcommands: nonListingSubs.map((sub) => sub.argv) }) : { reads: [], writes: [] };
+    const nonListingPaths = nonListingSubs.length ? inputPaths("bash", { command: `${value}\0non-listing` }, cwd, { ...parsed, subs: nonListingSubs, subcommands: nonListingSubs.map((sub) => sub.argv) }) : { reads: [], writes: [] };
     const onlyListFileOperands = onlyFileLists && !nonListingPaths.reads.length && !nonListingPaths.writes.length;
     return paths.length > 0 && other.writes.length === 0 && paths.every((path) => {
       if (!inside(path)) return false;

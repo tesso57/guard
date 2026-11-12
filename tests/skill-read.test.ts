@@ -62,6 +62,11 @@ test("skill reads bypass guard only when every hard link is known and non-sensit
     writeFileSync(skill, "example");
     linkSync(skill, alias);
     assert.equal(isSkillRead("read", { path: skill }, cwd), true);
+    assert.equal(isSkillRead("ls", { path: join(cwd, ".agents", "skills", "example") }, cwd), true);
+    assert.equal(isSkillRead("ls", {}, join(cwd, ".agents", "skills", "example")), true);
+    assert.equal(isSkillRead("ls", { path: cwd }, cwd), false);
+    assert.equal(isSkillRead("ls", { path: skill }, cwd), false);
+    assert.equal(isSkillRead("ls", Object.create({ path: parent }), dir), false, "an inherited path cannot be treated as the default");
     assert.equal(isSkillRead("bash", { command: `cat '${skill}'` }, cwd), true);
     assert.equal(isSkillRead("bash", { command: `tail -n 10 '${skill}'` }, cwd), true);
     for (const option of ["-f", "-F", "-qF", "--follow", "--follow=name", "--fol"]) {
@@ -94,6 +99,8 @@ test("only direct read-only access within standard skill directories bypasses gu
       assert.equal(isSkillRead("bash", { command: `tail -F -- ${name}` }, skillDir), false);
     }
     symlinkSync(outside, join(cwd, ".agents", "skills", "example", "outside"));
+    symlinkSync(cwd, join(cwd, ".agents", "skills", "example", "outside-dir"));
+    assert.equal(isSkillRead("ls", { path: join(cwd, ".agents", "skills", "example", "outside-dir") }, cwd), false);
     assert.equal(isSkillRead("read", { path: skill }, cwd), true);
     assert.equal(isSkillRead("bash", { command: `cat '${skill}'` }, cwd), true);
     assert.equal(isSkillRead("bash", { command: `cat '${skill}' | head -n 1` }, cwd), true);

@@ -27,6 +27,7 @@ test("Pi can read a skill without guard handling the call", async () => {
     const hasRipgrep = spawnSync("rg", ["--version"], { stdio: "ignore" }).status === 0;
     const fake = createFakeModel([
       { content: [{ type: "toolCall", id: "skill", name: "read", arguments: { path: ".agents/skills/fixture/SKILL.md" } }] },
+      { content: [{ type: "toolCall", id: "skill-ls", name: "ls", arguments: { path: ".agents/skills/fixture" } }] },
       { content: [{ type: "toolCall", id: "skill-grep", name: "bash", arguments: { command: "cat .agents/skills/fixture/SKILL.md | grep -n -e 'https://example.test/path'" } }] },
       ...(hasRipgrep ? [{ content: [{ type: "toolCall" as const, id: "skill-rg", name: "bash", arguments: { command: "cat .agents/skills/fixture/SKILL.md | rg skill-read-fixture" } }] }] : []),
       ...(hasRipgrep ? [{ content: [{ type: "toolCall" as const, id: "skill-rg-dash", name: "bash", arguments: { command: "rg -e - .agents/skills/fixture/SKILL.md" } }] }] : []),
@@ -45,6 +46,7 @@ test("Pi can read a skill without guard handling the call", async () => {
         }
         pi.appendEntry("guard-rule", { op: "add", rule: { id: "deny-grep", decision: "deny", tool: "bash", match: { kind: "argv", prefix: ["grep"] }, scope: "session", cwd: project, createdAt: new Date().toISOString() } });
         pi.appendEntry("guard-rule", { op: "add", rule: { id: "deny-rg", decision: "deny", tool: "bash", match: { kind: "argv", prefix: ["rg"] }, scope: "session", cwd: project, createdAt: new Date().toISOString() } });
+        pi.appendEntry("guard-rule", { op: "add", rule: { id: "deny-skill-ls", decision: "deny", tool: "ls", match: { kind: "path", path: skillDir }, scope: "session", cwd: project, createdAt: new Date().toISOString() } });
       }); pi.on("tool_result", (event) => {
         if (event.toolCallId === "registered-skill") {
           const path = join(externalSkillDir, "SKILL.md");
@@ -55,13 +57,15 @@ test("Pi can read a skill without guard handling the call", async () => {
     });
     await loader.reload();
     assert.deepEqual(loader.getExtensions().errors, []);
-    const { session } = await createAgentSession({ cwd: project, agentDir, model: fake.model, sessionManager: SessionManager.inMemory(project), tools: ["read", "bash"], resourceLoader: loader });
+    const { session } = await createAgentSession({ cwd: project, agentDir, model: fake.model, sessionManager: SessionManager.inMemory(project), tools: ["read", "bash", "ls"], resourceLoader: loader });
     try {
       session.modelRuntime.hasConfiguredAuth = () => true;
       session.agent.streamFunction = fake.stream;
       await session.prompt("Read the skill");
       const result = session.messages.find((message) => message.role === "toolResult" && message.toolCallId === "skill");
       assert.ok(result && result.role === "toolResult" && !result.isError && JSON.stringify(result.content).includes("skill-read-fixture"));
+      const listing = session.messages.find((message) => message.role === "toolResult" && message.toolCallId === "skill-ls");
+      assert.ok(listing && listing.role === "toolResult" && !listing.isError && JSON.stringify(listing.content).includes("SKILL.md"));
       const grep = session.messages.find((message) => message.role === "toolResult" && message.toolCallId === "skill-grep");
       assert.ok(grep && grep.role === "toolResult" && !grep.isError && JSON.stringify(grep.content).includes("https://example.test/path"));
       if (hasRipgrep) {
