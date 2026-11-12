@@ -179,7 +179,7 @@ export function ignoreFilesReinclude(root: string): boolean {
     }
     const complete = walkBounded(root, (p, name) => {
       if (!found && (name === ".ignore" || name === ".rgignore" || name === ".gitignore")) check(p);
-    }, 12, 20_000, new Set([".git"]));
+    }, 12, 20_000, new Set([".git"]), (_path, name) => !name.startsWith("."));
     return found || !complete;
   });
 }

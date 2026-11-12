@@ -1643,6 +1643,24 @@ name: visible
 }
 
 {
+  const repo = mkdtempSync(join(tmpdir(), "guard-rg-hidden-ignore-"));
+  const hidden = join(repo, ".hidden");
+  const deep = join(hidden, ...Array(14).fill("nested"));
+  mkdirSync(deep, { recursive: true });
+  writeFileSync(join(hidden, ".ignore"), "!*\n");
+  writeFileSync(join(deep, "item"), "needle\n");
+  writeFileSync(join(repo, "visible.txt"), "needle\n");
+  const safe = (command: string) => {
+    clearPathCache();
+    return safeAllow("bash", { command }, repo, O, P(command));
+  };
+  ok("rg: ignore rules inside an excluded hidden tree do not make default search incomplete", safe("rg needle ."));
+  ok("rg: an explicitly searched hidden tree remains subject to inspection", !safe("rg needle .hidden"));
+  writeFileSync(join(repo, ".ignore"), "!.hidden/\n");
+  ok("rg: a parent rule re-including the hidden tree keeps it subject to inspection", !safe("rg needle ."));
+}
+
+{
   const repo = mkdtempSync(join(tmpdir(), "guard-rg-hidden-types-"));
   writeFileSync(join(repo, ".env"), "needle\n");
   const inspect = (command: string) => {
