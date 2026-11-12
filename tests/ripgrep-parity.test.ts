@@ -81,6 +81,8 @@ test("ripgrep visibility and guard decisions agree on representative searches", 
     const literalGrepCommand = "grep -e '-R' pattern.txt .";
     clearPathCache();
     assert.equal(!!sensitive("bash", { command: literalGrepCommand }, project, protectedRoots(project), parseShell(literalGrepCommand)), false);
+    assert.equal(searchNeedsJudgement("bash", { command: literalGrepCommand }, project, parseShell(literalGrepCommand)), false);
+    assert.equal(safeAllow("bash", { command: literalGrepCommand }, project, { trusted: true, touched: new Set() }, parseShell(literalGrepCommand)), true);
     const recursiveGrepCommand = "grep -e '-R' -r .";
     clearPathCache();
     assert.ok(sensitive("bash", { command: recursiveGrepCommand }, project, protectedRoots(project), parseShell(recursiveGrepCommand)));
