@@ -9,7 +9,7 @@ import { createHash } from "node:crypto";
 import { accessSync, constants, existsSync, opendirSync, statSync } from "node:fs";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { hasGluedPathValue, innerCommands, INTERPRETER_NAMES, isLongOption, isReadOnlyArgv, isShell, nonFlags, normalizeArgv, type Parsed, parseShell, rgDisablesConfig, rgExplicitPaths, rgInfoOnly, rgListsFiles, rgListsTypes, rgSimpleIncludeSuffixes, rgVisibility, unwrapCommandWrappers } from "./shell.ts";
+import { grepExplicitPaths, hasGluedPathValue, innerCommands, INTERPRETER_NAMES, isLongOption, isReadOnlyArgv, isShell, nonFlags, normalizeArgv, type Parsed, parseShell, rgDisablesConfig, rgExplicitPaths, rgInfoOnly, rgListsFiles, rgListsTypes, rgSimpleIncludeSuffixes, rgVisibility, unwrapCommandWrappers } from "./shell.ts";
 import { readRegularText } from "./files.ts";
 import { containsProtectedRoot, expandGlobFully, trustedDirFor, trustedDirRelative, type TrustedDir, type TrustedDirState, isPiCodePath, PI_CODE_DIRS, gitConfigIsSafe, globHitsOptionLikeName, globMayReach, ignoreFilesReinclude, isFreelyReadable, isHardLinked, isHomeOrAncestor, isInside, isInsideExact, isProjectPath, isProjectHardlinkSafe, isProtectedHardLink, isRiskyProjectFile, memo, pathLikeTokens, pathVariants, protectedReason, protectedRoots, readFallbackVariants, realPath, resolvePath, secretFilesUnder, sensitiveReason, UNKNOWN_PATH } from "./paths.ts";
 
@@ -294,9 +294,9 @@ function computeInputPaths(tool: string, input: any, cwd: string, parsed?: Parse
         // Both the normalized and the raw argv: normalization drops location values (git -C x, npm --prefix x).
         // Operands after `--` are paths even when they start with `-` (`cat -- --d/../../.ssh/key`).
         const afterDashes = (xs: string[]) => (xs.includes("--") ? xs.slice(xs.indexOf("--") + 1).map((t) => (t.startsWith("-") ? `./${t}` : t)) : []);
-        const rgPaths = s.argv[0] === "rg" && !parsed.dynamic.length && !parsed.globs.length ? rgExplicitPaths(s.argv) : undefined;
-        if (rgPaths) {
-          const files = [...rgPaths, ...optionValue(s.argv, ["--file"])].filter((path) => path !== "-");
+        const explicit = !parsed.dynamic.length && !parsed.globs.length ? s.argv[0] === "rg" ? rgExplicitPaths(s.argv) : s.argv[0] === "grep" ? grepExplicitPaths(s.argv) : undefined : undefined;
+        if (explicit) {
+          const files = [...explicit, ...(s.argv[0] === "rg" ? optionValue(s.argv, ["--file"]) : [])].filter((path) => path !== "-");
           reads.push(...files.flatMap((path) => pathVariants(base, path.startsWith("-") ? `./${path}` : path)));
         } else if (!moves) reads.push(...pathLikeTokens(base, a.slice(1)), ...pathLikeTokens(base, s.argv.slice(1)), ...pathLikeTokens(base, afterDashes(s.argv.slice(1))));
         reads.push(...s.reads.flatMap((r) => pathVariants(base, r)));
@@ -818,13 +818,13 @@ function searchExposure(tool: string, input: any, cwd: string, parsed?: Parsed):
   }
   if (tool !== "bash" || !parsed) return { unknown: false };
   let unknown = false;
-  for (const { a, bases } of subsWithBases(parsed, cwd)) {
+  for (const { s, a, bases } of subsWithBases(parsed, cwd)) {
     const args = a.slice(1);
     const gitGrep = a[0] === "git" && a.includes("grep");
     if (!((isGrepFamily(a[0]) && recursiveGrep(args)) || a[0] === "rg" || a[0] === "ag" || a[0] === "ack" || gitGrep)) continue;
     if (rgInfoOnly(a) || rgListsFiles(a) || rgListsTypes(a)) continue;
-    const rgPaths = a[0] === "rg" && !parsed.dynamic.length && !parsed.globs.length ? rgExplicitPaths(a) : undefined;
-    const given = rgPaths ? bases.flatMap((b) => rgPaths.filter((path) => path !== "-").flatMap((path) => pathVariants(b, path.startsWith("-") ? `./${path}` : path))) : bases.flatMap((b) => pathLikeTokens(b, nonFlags(a).slice(1)));
+    const explicit = !parsed.dynamic.length && !parsed.globs.length ? s.argv[0] === "rg" ? rgExplicitPaths(s.argv) : s.argv[0] === "grep" ? grepExplicitPaths(s.argv) : undefined : undefined;
+    const given = explicit ? bases.flatMap((b) => explicit.filter((path) => path !== "-").flatMap((path) => pathVariants(b, path.startsWith("-") ? `./${path}` : path))) : bases.flatMap((b) => pathLikeTokens(b, nonFlags(a).slice(1)));
     // rg skips hidden files unless told otherwise, or unless an ignore file re-includes them (`!.env`)
     const roots0 = given.length ? given : bases;
     const suffixes = a[0] === "rg" && !parsed.dynamic.length && !parsed.globs.length ? rgSimpleIncludeSuffixes(a) : undefined;
@@ -905,9 +905,9 @@ export function sensitive(tool: string, input: any, cwd: string, roots: string[]
     const cmd = String(input?.command ?? "");
     // Static commands are matched without quoted text (echo '.env' >> .gitignore names no file)
     const envScan = parsed.ok && !parsed.dynamic.length ? stripQuoted(cmd) : cmd;
-    const inspectedRgOnly = parsed.ok && !parsed.dynamic.length && !parsed.globs.length && parsed.subs.length > 0 && parsed.subs.every((sub) =>
-      sub.argv[0] === "rg" && !sub.assigns.length && !sub.heredocs.length && rgExplicitPaths(sub.argv) !== undefined);
-    if (!inspectedRgOnly && /(?:^|[\s"'/:])\.env(?:\.[\w.-]+)?(?=$|[\s"';|&])/.test(envScan) && !/\.env\.(?:example|sample|template)/.test(envScan)) return ".env file";
+    const inspectedSearchOnly = parsed.ok && !parsed.dynamic.length && !parsed.globs.length && parsed.subs.length > 0 && parsed.subs.every((sub) =>
+      !sub.assigns.length && !sub.heredocs.length && (sub.argv[0] === "rg" ? rgExplicitPaths(sub.argv) !== undefined : sub.argv[0] === "grep" && grepExplicitPaths(sub.argv) !== undefined));
+    if (!inspectedSearchOnly && /(?:^|[\s"'/:])\.env(?:\.[\w.-]+)?(?=$|[\s"';|&])/.test(envScan) && !/\.env\.(?:example|sample|template)/.test(envScan)) return ".env file";
     // cd to a computed path ($(…), $VAR) and then changing files: guard cannot tell where that happens
     const subs = subsWithBases(parsed, cwd);
     const computedCd = subs.findIndex((x) => ["cd", "pushd"].includes(x.a[0]) && /[$`]/.test(x.s.argv.slice(1).join(" ")));

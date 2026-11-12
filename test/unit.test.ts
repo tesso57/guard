@@ -1633,6 +1633,22 @@ name: visible
   ok("rg: a matching file with an unlocated hard link remains subject to confirmation", !inspect("rg -g '*.txt' needle .").safe);
 }
 
+{
+  const repo = mkdtempSync(join(tmpdir(), "guard-grep-pattern-"));
+  mkdirSync(join(repo, "src"));
+  writeFileSync(join(repo, ".env"), "fixture\n");
+  writeFileSync(join(repo, "src", "file.txt"), "example\n");
+  const inspect = (command: string) => {
+    clearPathCache();
+    const parsed = P(command);
+    return { sensitive: sensitive("bash", { command }, repo, protectedRoots(repo), parsed), safe: safeAllow("bash", { command }, repo, O, parsed) };
+  };
+  for (const command of ["grep .env src/file.txt", "grep -e .env src/file.txt", `grep -F '${join(HOME, ".ssh", "id_rsa")}' src/file.txt`])
+    ok(`grep: a search pattern is not treated as an input file: ${command}`, !inspect(command).sensitive && inspect(command).safe);
+  ok("grep: an explicitly searched secret remains sensitive", !!inspect("grep needle .env").sensitive);
+  ok("grep: a secret pattern file remains sensitive", !!inspect("grep -f .env src/file.txt").sensitive);
+}
+
 // Hidden files are not part of a default rg search unless re-included.
 {
   const repo = mkdtempSync(join(tmpdir(), "guard-rg-hidden-links-"));

@@ -5,46 +5,9 @@ import { types as utilTypes } from "node:util";
 import { AGENT_DIR } from "./config.ts";
 import { clearPathCache, isInsideExact, pathVariants, realPath, resolvePath } from "./paths.ts";
 import { inputPaths, inspectExecutablePath, usesRipgrepConfig } from "./policy.ts";
-import { isReadOnlyArgv, parseShell, rgExplicitPaths } from "./shell.ts";
+import { grepExplicitPaths, isReadOnlyArgv, parseShell, rgExplicitPaths } from "./shell.ts";
 
 export type RegisteredSkill = { path: string; target: string };
-
-const GREP_FLAGS = new Set(["E", "F", "G", "P", "i", "v", "w", "x", "c", "l", "L", "n", "H", "h", "o", "q", "s", "r", "a", "I", "z"]);
-const GREP_VALUES = new Set(["e", "A", "B", "C", "m"]);
-const GREP_LONG_FLAGS = new Set(["extended-regexp", "fixed-strings", "basic-regexp", "perl-regexp", "ignore-case", "invert-match", "word-regexp", "line-regexp", "count", "files-with-matches", "files-without-match", "line-number", "with-filename", "no-filename", "only-matching", "quiet", "silent", "no-messages", "recursive", "text", "null-data"]);
-const GREP_LONG_VALUES = new Set(["regexp", "after-context", "before-context", "context", "max-count"]);
-
-/** Parse only common grep options; unknown options stay on the guarded path. */
-function grepPaths(argv: string[]): string[] | undefined {
-  const operands: string[] = [];
-  let patternProvided = false;
-  for (let i = 1; i < argv.length; i++) {
-    const arg = argv[i];
-    if (arg === "--") { operands.push(...argv.slice(i + 1)); break; }
-    if (arg === "-") return undefined;
-    if (!arg.startsWith("-")) { operands.push(arg); continue; }
-    if (arg.startsWith("--")) {
-      const equal = arg.indexOf("=");
-      const name = arg.slice(2, equal < 0 ? undefined : equal);
-      if (GREP_LONG_FLAGS.has(name) && equal < 0) continue;
-      if (!GREP_LONG_VALUES.has(name)) return undefined;
-      if (name === "regexp") patternProvided = true;
-      if (equal < 0 && ++i >= argv.length) return undefined;
-      continue;
-    }
-    for (let j = 1; j < arg.length; j++) {
-      const flag = arg[j];
-      if (GREP_VALUES.has(flag)) {
-        if (flag === "e") patternProvided = true;
-        if (j === arg.length - 1 && ++i >= argv.length) return undefined;
-        break;
-      }
-      if (!GREP_FLAGS.has(flag)) return undefined;
-    }
-  }
-  const paths = patternProvided ? operands : operands.slice(1);
-  return paths.length && !paths.includes("-") ? paths : undefined;
-}
 
 /** Only plain reads of standard skill locations or Pi-registered skill files bypass guard. */
 export function isSkillRead(tool: string, input: unknown, cwd: string, registeredSkills: readonly RegisteredSkill[] = []): boolean {
@@ -75,7 +38,7 @@ export function isSkillRead(tool: string, input: unknown, cwd: string, registere
       if (sub.argv.slice(1).some((arg) => arg === "-" || /^-f/.test(arg) || /^--file(?:=|$)/.test(arg))) return false;
       if (sub.argv[0] === "grep" && (process.env.GREP_OPTIONS || sub.argv.slice(1).some((arg) => /^-[^-]*f/.test(arg)))) return false;
       if (sub.argv[0] === "grep") {
-        const paths = grepPaths(sub.argv);
+        const paths = grepExplicitPaths(sub.argv);
         if (!paths) return false;
         grepTargets.push(...paths.flatMap((path) => pathVariants(cwd, path.startsWith("-") ? `./${path}` : path)));
       }

@@ -15,7 +15,7 @@ test("ripgrep visibility and guard decisions agree on representative searches", 
   const dir = mkdtempSync(join(tmpdir(), "guard-rg-parity-"));
   const home = join(dir, "home"), project = join(dir, "project");
   mkdirSync(home); mkdirSync(project);
-  const isolated = (key: string) => ["GIT_", "PI_", "RISK_", "GUARD_", "OPENAI_", "BASH_FUNC_"].some((prefix) => key.startsWith(prefix)) || ["HOME", "XDG_CONFIG_HOME", "RIPGREP_CONFIG_PATH", "BASH_ENV", "ENV", "BASHOPTS", "SHELLOPTS", "PS4"].includes(key);
+  const isolated = (key: string) => ["GIT_", "PI_", "RISK_", "GUARD_", "OPENAI_", "BASH_FUNC_"].some((prefix) => key.startsWith(prefix)) || ["HOME", "XDG_CONFIG_HOME", "RIPGREP_CONFIG_PATH", "GREP_OPTIONS", "BASH_ENV", "ENV", "BASHOPTS", "SHELLOPTS", "PS4"].includes(key);
   const previous = new Map(Object.entries(process.env).filter(([key]) => isolated(key)));
   for (const key of previous.keys()) delete process.env[key];
   Object.assign(process.env, { HOME: home, XDG_CONFIG_HOME: join(home, "config"), PI_CODING_AGENT_DIR: join(dir, "agent"), GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" });
@@ -48,6 +48,19 @@ test("ripgrep visibility and guard decisions agree on representative searches", 
       const flagged = !!sensitive("bash", { command }, project, protectedRoots(project), parsed) || searchNeedsJudgement("bash", { command }, project, parsed);
       if (result.stdout.split("\n").some((line) => line.endsWith("/.env"))) assert.equal(flagged, true, command);
       if (expectSafe) assert.equal(!flagged && safeAllow("bash", { command }, project, { trusted: true, touched: new Set() }, parsed), true, command);
+    }
+    for (const [args, expectSafe] of [
+      [["-n", ".env", "visible.txt"], true],
+      [["-n", "-e", "/some/path", "visible.txt"], true],
+      [["needle", ".env"], false],
+    ] as const) {
+      const result = spawnSync("grep", [...args], { cwd: project, encoding: "utf8" });
+      assert.ok(result.status === 0 || result.status === 1, result.stderr);
+      const command = ["grep", ...args].join(" ");
+      clearPathCache();
+      const parsed = parseShell(command);
+      const flagged = !!sensitive("bash", { command }, project, protectedRoots(project), parsed) || searchNeedsJudgement("bash", { command }, project, parsed);
+      assert.equal(!flagged && safeAllow("bash", { command }, project, { trusted: true, touched: new Set() }, parsed), expectSafe, command);
     }
     writeFileSync(join(project, ".ignore"), "!README.md\n");
     writeFileSync(join(project, "README.md"), "needle\n");
