@@ -394,6 +394,8 @@ export type TrustedDirState = {
 };
 export const createTrustedDirState = (): TrustedDirState => ({ trustedDirs: [], trustedDirTargets: new Map(), trustedDirAliases: new Map(), version: 0 });
 const defaultTrustedDirState = createTrustedDirState();
+const trustedStateIds = new WeakMap<TrustedDirState, number>();
+let nextTrustedStateId = 1;
 // Home-level folders that hold credentials, tool configuration or executables on PATH
 const UNTRUSTABLE_HOME_DIRS = new Set([".ssh", ".gnupg", ".aws", ".azure", ".gcloud", ".kube", ".docker", ".config", ".local", ".npm", ".cargo", ".rustup", ".gem", ".bun", ".deno", ".volta", ".nvm", ".pyenv", ".rbenv", "library", "bin"]);
 
@@ -540,12 +542,13 @@ export function isProjectHardlinkSafe(p: string, cwd: string): boolean {
   } catch { return false; }
 }
 
-/** Reads inside the project or public directories, without hard-linked files, may skip judgement. */
-export function isFreelyReadable(p: string, cwd: string, state?: TrustedDirState): boolean {
+/** Reads inside a vouched-for directory are allowed; other shortcuts exclude hard-linked files. */
+export function isFreelyReadable(p: string, cwd: string, state?: TrustedDirState, protectedPaths = protectedRoots(cwd)): boolean {
   if (p === UNKNOWN_PATH) return false;
+  if (trustedDirFor(p, false, state)) return !isProtectedHardLink(p, protectedPaths);
   const real = realPath(p);
   const project = isProjectPath(p, cwd);
-  const publicPath = PUBLIC_DIRS.some((d) => isInsideExact(p, d) && isInsideExact(real, realPath(d))) || isPiCodePath(p) || !!trustedDirFor(p, false, state);
+  const publicPath = PUBLIC_DIRS.some((d) => isInsideExact(p, d) && isInsideExact(real, realPath(d))) || isPiCodePath(p);
   return (project || publicPath) && !isHardLinked(p);
 }
 
@@ -762,8 +765,13 @@ export function walkBounded(root: string, fn: (path: string, name: string) => vo
  * `complete` is false when the tree was too large or deep to check; build and dependency directories are included,
  * because `grep -r` reads them too.
  */
-export function secretFilesUnder(root: string, projectRoot?: string, suffixes?: readonly string[], includeHidden = true): { files: string[]; complete: boolean } {
-  return memo(`secrets:${JSON.stringify([root, projectRoot, suffixes, includeHidden])}`, () => {
+export function secretFilesUnder(root: string, projectRoot?: string, suffixes?: readonly string[], includeHidden = true, trustedDirs?: TrustedDirState, protectedPaths: string[] = []): { files: string[]; complete: boolean } {
+  let stateId = 0;
+  if (trustedDirs) {
+    stateId = trustedStateIds.get(trustedDirs) ?? nextTrustedStateId++;
+    trustedStateIds.set(trustedDirs, stateId);
+  }
+  return memo(`secrets:${JSON.stringify([root, projectRoot, suffixes, includeHidden, stateId, trustedDirs?.version, protectedPaths])}`, () => {
     const files: string[] = [];
     if (isHomeOrAncestor(root)) return { files: [root], complete: true };
     let uncertain = false;
@@ -777,7 +785,11 @@ export function secretFilesUnder(root: string, projectRoot?: string, suffixes?: 
         } else {
           if (sensitiveOne(p)) files.push(p);
           // A hard link can expose a secret through an innocuous name; its other paths are unknown.
-          if (st.isFile() && st.nlink > 1 && !(projectRoot && isProjectHardlinkSafe(p, projectRoot))) uncertain = true;
+          if (st.isFile() && st.nlink > 1) {
+            const trusted = !!trustedDirs && !!trustedDirFor(p, false, trustedDirs);
+            if (trusted && protectedPaths.length && isProtectedHardLink(p, protectedPaths)) files.push(p);
+            else if (!(projectRoot && isProjectHardlinkSafe(p, projectRoot)) && !trusted) uncertain = true;
+          }
         }
       } catch { uncertain = true; }
     }, 12, 20_000, new Set(), (_path, name) => includeHidden || !name.startsWith("."));

@@ -82,8 +82,8 @@ if (http.setGlobalProxyFromEnv) {
 }
 
 const { parseShell, normalizeArgv, isReadOnlyArgv, unwrapCommandWrappers } = await import("../extensions/guard/shell.ts");
-const { enclosingRepository, executablePathRisk, hasDynamicLoaderEnvironment, inspectBuiltinSearchExecutable, inspectExecutablePath, hardDeny, sensitive, safeAllow, usesGrepOptions, usesRipgrepConfig, writesStayPlain } = await import("../extensions/guard/policy.ts");
-const { clearPathCache, protectedRoots, secretFilesUnder, isInside, isInsideExact, isFreelyReadable, sensitiveReason, walkBounded, ignoreFilesReinclude, expandGlobFully, gitConfigIsSafe } = await import("../extensions/guard/paths.ts");
+const { enclosingRepository, executablePathRisk, hasDynamicLoaderEnvironment, inspectBuiltinSearchExecutable, inspectExecutablePath, hardDeny, sensitive, safeAllow, searchNeedsJudgement, usesGrepOptions, usesRipgrepConfig, writesStayPlain } = await import("../extensions/guard/policy.ts");
+const { clearPathCache, createTrustedDirState, trustDir, protectedRoots, secretFilesUnder, isInside, isInsideExact, isFreelyReadable, sensitiveReason, walkBounded, ignoreFilesReinclude, expandGlobFully, gitConfigIsSafe } = await import("../extensions/guard/paths.ts");
 const { derivePatterns, deriveDenyPatterns, describeMatch, examples, newId, RuleStore } = await import("../extensions/guard/rules.ts");
 const { evaluate, buildRequest, callDecisions } = await import("../extensions/guard/judge.ts");
 const { loadConfig } = await import("../extensions/guard/config.ts");
@@ -514,6 +514,35 @@ ok("paths: read fallback through a narrow-space symlink is sensitive", !!sensiti
   const gitSearch = "grep -r needle git-tree";
   ok("paths: recursive grep checks secrets inside .git", !!sensitive("bash", { command: gitSearch }, PROJ, roots, P(gitSearch)), JSON.stringify(secretFilesUnder(gitTree)));
   rmSync(gitTree, { recursive: true });
+}
+
+{
+  const notes = mkdtempSync(join(tmpdir(), "guard-granted-notes-"));
+  const external = join(HOME, "outside-note.txt"), note = join(notes, "note.txt");
+  const protectedDir = join(HOME, "protected-fixture"), protectedFile = join(protectedDir, "state.txt");
+  mkdirSync(protectedDir); writeFileSync(external, "note\n"); linkSync(external, note);
+  const first = createTrustedDirState(), second = createTrustedDirState(), protectedPaths = [protectedDir];
+  const command = `rg note '${notes}'`, parsed = P(command), input = { command };
+  clearPathCache();
+  ok("trust: an unvouched hard link remains uncertain in recursive search", searchNeedsJudgement("bash", input, PROJ, parsed, first, protectedPaths));
+  ok("trust: a note directory can be vouched for", !trustDir(notes, false, "note", first));
+  clearPathCache();
+  ok("trust: a read grant covers hard links in recursive search", !searchNeedsJudgement("bash", input, PROJ, parsed, first, protectedPaths) && !sensitive("bash", input, PROJ, protectedPaths, parsed, first));
+  ok("trust: a read grant does not cover a hard-linked write", !!sensitive("write", { path: note, content: "changed" }, PROJ, protectedPaths, undefined, first));
+  ok("trust: another directory can be vouched for independently", !trustDir(protectedDir, false, "other", second));
+  ok("trust: first registry still allows its trusted hard link", !searchNeedsJudgement("bash", input, PROJ, parsed, first, protectedPaths));
+  ok("trust: cached scans do not cross trust registries with the same version", searchNeedsJudgement("bash", input, PROJ, parsed, second, protectedPaths));
+  ok("trust: a write grant can replace the read grant", !trustDir(notes, true, "note", first));
+  clearPathCache();
+  ok("trust: a write grant covers a plain hard-linked write", !sensitive("write", { path: note, content: "changed" }, PROJ, protectedPaths, undefined, first) && safeAllow("write", { path: note, content: "changed" }, PROJ, { trusted: true, touched: new Set(), trustedDirs: first }));
+  ok("trust: a read grant can replace the write grant", !trustDir(notes, false, "note", first));
+  clearPathCache();
+  ok("trust: a revoked write grant no longer covers hard links", !!sensitive("write", { path: note, content: "changed" }, PROJ, protectedPaths, undefined, first));
+  writeFileSync(protectedFile, "protected\n");
+  linkSync(protectedFile, join(notes, "protected.txt"));
+  clearPathCache();
+  ok("trust: recursive searches still detect known protected hard links", !!sensitive("bash", input, PROJ, protectedPaths, parsed, first));
+  rmSync(external); rmSync(protectedDir, { recursive: true, force: true });
 }
 
 {

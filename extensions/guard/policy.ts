@@ -1092,7 +1092,7 @@ const recursiveGrep = (args: string[]) => {
  * What a recursive content search may print: the first secret file it would reach, and whether the search tree was
  * too large to check (then the call is not treated as safe).
  */
-function searchExposure(tool: string, input: any, cwd: string, parsed?: Parsed): { hit?: string; unknown: boolean } {
+function searchExposure(tool: string, input: any, cwd: string, parsed?: Parsed, trustedDirs?: TrustedDirState, protectedPaths: string[] = []): { hit?: string; unknown: boolean } {
   const projectRead = tool === "bash" && !!parsed && parsed.ok && !parsed.dynamic.length && !parsed.writes.length && parsed.subcommands.every(isReadOnlyArgv);
   const check = (roots0: string[], hidden: boolean, suffixes?: string[]) => {
     let unknown = false;
@@ -1101,7 +1101,9 @@ function searchExposure(tool: string, input: any, cwd: string, parsed?: Parsed):
       try {
         if (statSync(real).isFile()) {
           if (sensitiveReason(real)) return { hit: real, unknown };
-          if (isHardLinked(real) && !(projectRead && isProjectHardlinkSafe(real, cwd))) unknown = true;
+          const trusted = !!trustedDirs && !!trustedDirFor(r, false, trustedDirs);
+          if (isHardLinked(real) && trusted && protectedPaths.length && isProtectedHardLink(real, protectedPaths)) return { hit: real, unknown };
+          if (isHardLinked(real) && !(projectRead && isProjectHardlinkSafe(real, cwd)) && !trusted) unknown = true;
           continue;
         }
       } catch (error: any) {
@@ -1109,7 +1111,7 @@ function searchExposure(tool: string, input: any, cwd: string, parsed?: Parsed):
         if (error?.code !== "ENOENT" && error?.code !== "ENOTDIR") unknown = true;
         continue;
       }
-      const { files, complete } = secretFilesUnder(real, projectRead && isProjectPath(real, cwd) ? cwd : undefined, suffixes, hidden);
+      const { files, complete } = secretFilesUnder(real, projectRead && isProjectPath(real, cwd) ? cwd : undefined, suffixes, hidden, trustedDirs, protectedPaths);
       if (!complete) unknown = true;
       const hit = files[0];
       if (hit) return { hit, unknown };
@@ -1141,8 +1143,8 @@ function searchExposure(tool: string, input: any, cwd: string, parsed?: Parsed):
 }
 
 /** True if a content search's reachable files could not be checked completely. */
-export function searchNeedsJudgement(tool: string, input: any, cwd: string, parsed?: Parsed): boolean {
-  return searchExposure(tool, input, cwd, parsed).unknown;
+export function searchNeedsJudgement(tool: string, input: any, cwd: string, parsed?: Parsed, trustedDirs?: TrustedDirState, protectedPaths: string[] = []): boolean {
+  return searchExposure(tool, input, cwd, parsed, trustedDirs, protectedPaths).unknown;
 }
 
 function shellVariableAssigned(parsed: Parsed, name: string): boolean {
@@ -1171,7 +1173,7 @@ export function usesGrepOptions(parsed?: Parsed): boolean {
   return parsed.subcommands.some((raw) => ["grep", "egrep", "fgrep"].includes(normalizeArgv(raw, "deny").argv[0]));
 }
 
-export function sensitive(tool: string, input: any, cwd: string, roots: string[], parsed?: Parsed): string | undefined {
+export function sensitive(tool: string, input: any, cwd: string, roots: string[], parsed?: Parsed, trustedDirs?: TrustedDirState): string | undefined {
   if (tool === "bash" && hasDynamicLoaderEnvironment()) return "dynamic loader environment may load external code";
   if (tool === "bash" && (process.env.BASH_ENV || process.env.ENV || process.env.BASHOPTS || process.env.SHELLOPTS || Object.keys(process.env).some((key) => key.startsWith("BASH_FUNC_") && key.endsWith("%%"))))
     return "shell startup settings, options or imported functions may run code or alter parsing";
@@ -1199,12 +1201,19 @@ export function sensitive(tool: string, input: any, cwd: string, roots: string[]
     const r = sensitiveReason(p);
     if (r) return r;
     if (protectedReason(p, outerRoots) && !(isPiCodePath(p) && !writes.includes(p))) return "reads guard or pi internal state";
-    if (isHardLinked(p) && !(projectRead && !writes.includes(p) && isProjectHardlinkSafe(p, cwd))) return "a hard-linked file may share contents with a path outside the project";
+    if (isHardLinked(p)) {
+      const writing = writes.includes(p);
+      const plainOperation = writing ? ["write", "edit"].includes(tool) : ["read", "grep", "find", "ls"].includes(tool) || projectRead;
+      const trusted = plainOperation && !!trustedDirs && !!trustedDirFor(p, writing, trustedDirs);
+      const knownProjectRead = projectRead && !writing && isProjectHardlinkSafe(p, cwd);
+      if (trusted && isProtectedHardLink(p, roots)) return "a hard link to protected state";
+      if (!trusted && !knownProjectRead) return "a hard-linked file may share contents with a path outside the project";
+    }
   }
   // pi's grep tool searches hidden files recursively
   if (tool === "grep" && reads.concat(reads.length ? [] : [cwd]).some((p) => isHomeOrAncestor(p) || isHomeOrAncestor(realPath(p)))) return "searches file contents across the home directory";
   // Recursive content searches print matching lines of every file they reach, including .env files and keys
-  const exposure = searchExposure(tool, input, cwd, parsed);
+  const exposure = searchExposure(tool, input, cwd, parsed, trustedDirs, roots);
   if (exposure.hit) return `the search would include ${exposure.hit}`;
   if (tool === "bash" && parsed) {
     const cmd = String(input?.command ?? "");
@@ -1260,7 +1269,7 @@ export function sensitive(tool: string, input: any, cwd: string, roots: string[]
 /** Commands that only create empty files or directories; safe when every target is a plain project path. */
 const PLAIN_CREATORS = new Set(["mkdir", "touch"]);
 
-export function safeAllow(tool: string, input: any, cwd: string, opts: { trusted: boolean; touched: Set<string>; trustedDirs?: TrustedDirState }, parsed?: Parsed): boolean {
+export function safeAllow(tool: string, input: any, cwd: string, opts: { trusted: boolean; touched: Set<string>; trustedDirs?: TrustedDirState; protectedPaths?: string[] }, parsed?: Parsed): boolean {
   if (tool === "bash") {
     if (!parsed || !parsed.ok || parsed.dynamic.length || parsed.writes.length || !parsed.subcommands.length) return false;
     if (usesRipgrepConfig(parsed) || usesGrepOptions(parsed)) return false;
@@ -1280,16 +1289,16 @@ export function safeAllow(tool: string, input: any, cwd: string, opts: { trusted
     if (parsed.heredocBodies.length || parsed.subs.some((x) => x.heredocs.length)) return false;
     // The directory stack (pushd -n, rotations) is too easy to get wrong; never a shortcut
     if (parsed.subcommands.some((a) => ["pushd", "popd", "dirs"].includes(normalizeArgv(a).argv[0]))) return false;
-    if (searchExposure(tool, input, cwd, parsed).unknown) return false;
+    if (searchExposure(tool, input, cwd, parsed, opts.trustedDirs, opts.protectedPaths ?? protectedRoots(cwd)).unknown) return false;
     let creates = false;
     for (const a of parsed.subcommands) {
       const head = normalizeArgv(a).argv[0];
       if (PLAIN_CREATORS.has(head)) creates = true;
       else if (bashWriteTargets(a).length || !isReadOnlyArgv(a)) return false;
     }
-    if (creates && !writesStayPlain(tool, input, cwd, parsed, opts.trustedDirs)) return false;
+    if (creates && !writesStayPlain(tool, input, cwd, parsed, opts.trustedDirs, opts.protectedPaths)) return false;
     // Only reads inside the project or in public system directories happen without asking
-    if (!inputPaths(tool, input, cwd, parsed).reads.every((p) => isFreelyReadable(p, cwd, opts.trustedDirs) || (!creates && isProjectHardlinkSafe(p, cwd)))) return false;
+    if (!inputPaths(tool, input, cwd, parsed).reads.every((p) => isFreelyReadable(p, cwd, opts.trustedDirs, opts.protectedPaths) || (!creates && isProjectHardlinkSafe(p, cwd)))) return false;
     const heads = parsed.subcommands.map((a) => normalizeArgv(a).argv[0]);
     // Read-only git still runs commands configured in .git/config, so it needs a trusted repo with a clean config,
     // must run in the project itself (no cd anywhere in the command), and nothing this session may have planted a
@@ -1307,10 +1316,10 @@ export function safeAllow(tool: string, input: any, cwd: string, opts: { trusted
     const realCwd = realPath(cwd);
     return writes.every((w) => {
       const r = realPath(w);
-      if (isHardLinked(w)) return false;
       // Folders another extension vouched for (guard:trust-dir) take plain edits like the project
       const td = trustedDirFor(w, true, opts.trustedDirs);
-      if (td) return plainInTrustedDir(w, td, opts.trustedDirs);
+      if (td) return !isProtectedHardLink(w, opts.protectedPaths ?? protectedRoots(cwd)) && plainInTrustedDir(w, td, opts.trustedDirs);
+      if (isHardLinked(w)) return false;
       // When pi runs in ~ (or above), "the project" would be the whole home directory
       if (isHomeOrAncestor(cwd)) return false;
       // Symlinks that leave the project (docs/notes.md -> ~/.bashrc) are not plain project edits
@@ -1337,15 +1346,15 @@ function plainInTrustedDir(w: string, dir: TrustedDir, state?: TrustedDirState):
   return lexicalPath !== undefined && isInsideExact(r, realDir) && r.toLowerCase() !== realDir.toLowerCase() && !isRiskyProjectFile(relative(realDir, r)) && !isRiskyProjectFile(lexicalPath);
 }
 
-export function writesStayPlain(tool: string, input: any, cwd: string, parsed?: Parsed, state?: TrustedDirState): boolean {
+export function writesStayPlain(tool: string, input: any, cwd: string, parsed?: Parsed, state?: TrustedDirState, protectedPaths = protectedRoots(cwd)): boolean {
   const { writes } = inputPaths(tool, input, cwd, parsed);
-  // A hard-linked file may be the same file as something outside the project
-  if (writes.some(isHardLinked)) return false;
   const realCwd = realPath(cwd);
   return writes.every((w) => {
     const r = realPath(w);
     const trusted = trustedDirFor(w, true, state);
-    if (trusted) return plainInTrustedDir(w, trusted, state);
+    if (trusted) return !isProtectedHardLink(w, protectedPaths) && plainInTrustedDir(w, trusted, state);
+    // A hard-linked file may be the same file as something outside the project.
+    if (isHardLinked(w)) return false;
     return !isHomeOrAncestor(cwd) && isInsideExact(r, realCwd) && r.toLowerCase() !== realCwd.toLowerCase() && !isRiskyProjectFile(r.slice(realCwd.length + 1));
   });
 }

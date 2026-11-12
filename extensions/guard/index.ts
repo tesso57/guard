@@ -164,8 +164,8 @@ function filesystemPolicyHash(tool: string, input: unknown, cwd: string, session
   const builtinExecutable = checked ? checked.builtinExecutable : inspectBuiltinSearchExecutable(tool, cwd);
   return stableHash({
     hard: checked ? checked.hard : hardDeny(tool, input, cwd, roots, parsed),
-    sens: checked ? checked.sens : sensitive(tool, input, cwd, roots, parsed),
-    uncertainSearch: checked ? checked.uncertainSearch : searchNeedsJudgement(tool, input, cwd, parsed) || !!builtinExecutable.risk,
+    sens: checked ? checked.sens : sensitive(tool, input, cwd, roots, parsed, trustedDirs),
+    uncertainSearch: checked ? checked.uncertainSearch : searchNeedsJudgement(tool, input, cwd, parsed, trustedDirs, roots) || !!builtinExecutable.risk,
     builtinExecutable,
     trustedDirsVersion: trustedDirs.version,
     paths: { reads: paths.reads.map((path) => [path, realPath(path)]), writes: paths.writes.map((path) => [path, realPath(path)]) },
@@ -646,7 +646,7 @@ export default function (pi: ExtensionAPI) {
     store.syncSession(ctx.sessionManager.getBranch() as any[]);
     const found = store.find(tool, input, ctx.cwd, parsed);
     // An allow rule only covers calls whose paths stay inside the project, writing only plain files
-    const rule = found?.decision === "allow" && (!writesStayPlain(tool, input, ctx.cwd, parsed, trustedDirs) || !pathsStayInProject(tool, input, ctx.cwd, parsed)) ? undefined : found;
+    const rule = found?.decision === "allow" && (!writesStayPlain(tool, input, ctx.cwd, parsed, trustedDirs, roots) || !pathsStayInProject(tool, input, ctx.cwd, parsed)) ? undefined : found;
     const patterns = derivePatterns(tool, input, ctx.cwd, parsed);
     const denyPatterns = deriveDenyPatterns(tool, input, ctx.cwd, parsed);
     if (rule?.decision === "deny") return { ...base, action: "block", source: "rule-deny", reasons: rule.rules.map((r) => `${r.scope} deny rule: ${describeMatch(r.tool, r.match)}`), auditReasons: rule.rules.map((r) => `${r.scope} deny rule [${r.id}]`), rules: rule.rules };
@@ -680,10 +680,10 @@ export default function (pi: ExtensionAPI) {
     if (treeReason && !cx.fromSiblings.length) {
       return { rememberAllow: false, globalAllow: false, action: "confirm", source: "concurrent", reasons: [treeReason], auditReasons: [treeAuditReason!] };
     }
-    const sens = sensitive(tool, input, ctx.cwd, roots, parsed);
+    const sens = sensitive(tool, input, ctx.cwd, roots, parsed, trustedDirs);
     const builtinExecutable = inspectBuiltinSearchExecutable(tool, ctx.cwd);
     const builtinSearchRisk = builtinExecutable.risk;
-    const scopeUncertain = searchNeedsJudgement(tool, input, ctx.cwd, parsed);
+    const scopeUncertain = searchNeedsJudgement(tool, input, ctx.cwd, parsed, trustedDirs, roots);
     const uncertainSearch = scopeUncertain || !!builtinSearchRisk;
     // A peer can change the file before or while this call executes it.
     const siblingRun = cx.fromSiblings.length ? `runs ${cx.fromSiblings.map((p) => relative(ctx.cwd, p)).join(", ")}, which may change concurrently in this message` : undefined;
@@ -763,13 +763,13 @@ export default function (pi: ExtensionAPI) {
     const shortcutsOk = !siblingRun && !siblingMayChange;
     // Files earlier calls of this message will write count as touched for this judgement (git dirs, ignore files)
     const touchedNow = new Set([...touched, ...peers.flatMap((sb) => siblingWrites(sb, ctx.cwd))]);
-    if (shortcutsOk && !cx.changedFilesRun && safeAllow(tool, input, ctx.cwd, { trusted, touched: touchedNow, trustedDirs }, parsed)) return { ...base, action: "allow", source: "safe", reasons: [] };
+    if (shortcutsOk && !cx.changedFilesRun && safeAllow(tool, input, ctx.cwd, { trusted, touched: touchedNow, trustedDirs, protectedPaths: roots }, parsed)) return { ...base, action: "allow", source: "safe", reasons: [] };
     if (shortcutsOk && !cx.changedFilesRun && !historyIncomplete && !uncertainSearch && cfg.skipModelTools.includes(tool)) {
       // read/grep/find/ls skip the model only inside the project (or public system directories). pi's read tries
       // other spellings (curly quotes, NFD, AM/PM) when a path does not exist, so a read must name an existing file.
       const reads = inputPaths(tool, input, ctx.cwd).reads;
       const exists = tool !== "read" || reads.every((p) => existsSync(p));
-      if (exists && (reads.length ? reads : [ctx.cwd]).every((p) => isFreelyReadable(p, ctx.cwd, trustedDirs))) return { ...base, action: "allow", source: "skip", reasons: [] };
+      if (exists && (reads.length ? reads : [ctx.cwd]).every((p) => isFreelyReadable(p, ctx.cwd, trustedDirs, roots))) return { ...base, action: "allow", source: "skip", reasons: [] };
     }
 
     const judgeContext = historyIncomplete === cx.historyIncomplete ? cx : { ...cx, historyIncomplete };
