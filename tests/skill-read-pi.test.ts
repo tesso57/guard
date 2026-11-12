@@ -12,7 +12,7 @@ test("Pi can read a skill without guard handling the call", async () => {
   const dir = await mkdtemp(join(tmpdir(), "guard-skill-pi-"));
   const project = join(dir, "project"), agentDir = join(dir, "agent"), skillDir = join(project, ".agents", "skills", "fixture");
   const externalSkillDir = join(dir, "external-package", "skills", "registered");
-  const isolated = (key: string) => ["RISK_", "GUARD_", "OPENAI_", "PI_"].some((prefix) => key.startsWith(prefix)) || ["HOME", "XDG_CONFIG_HOME"].includes(key);
+  const isolated = (key: string) => ["RISK_", "GUARD_", "OPENAI_", "PI_", "BASH_FUNC_"].some((prefix) => key.startsWith(prefix)) || ["HOME", "XDG_CONFIG_HOME", "GREP_OPTIONS", "BASH_ENV", "ENV", "BASHOPTS", "SHELLOPTS"].includes(key);
   const previous = new Map(Object.entries(process.env).filter(([key]) => isolated(key)));
   for (const key of previous.keys()) delete process.env[key];
   Object.assign(process.env, { HOME: dir, XDG_CONFIG_HOME: join(dir, "config"), PI_CODING_AGENT_DIR: agentDir });
@@ -25,6 +25,7 @@ test("Pi can read a skill without guard handling the call", async () => {
     await writeFile(join(externalSkillDir, "SKILL.md"), "---\nname: registered\ndescription: Test skill\n---\nregistered-skill-fixture\n");
     const fake = createFakeModel([
       { content: [{ type: "toolCall", id: "skill", name: "read", arguments: { path: ".agents/skills/fixture/SKILL.md" } }] },
+      { content: [{ type: "toolCall", id: "skill-grep", name: "bash", arguments: { command: "grep skill-read-fixture .agents/skills/fixture/SKILL.md" } }] },
       { content: [{ type: "toolCall", id: "registered-skill", name: "read", arguments: { path: join(externalSkillDir, "SKILL.md") } }] },
       { content: [{ type: "toolCall", id: "retargeted-skill", name: "read", arguments: { path: join(externalSkillDir, "SKILL.md") } }] },
       { content: [{ type: "text", text: "done" }] },
@@ -38,6 +39,7 @@ test("Pi can read a skill without guard handling the call", async () => {
         for (const [id, path] of [["deny-skill-read", join(skillDir, "SKILL.md")], ["deny-registered-skill", join(externalSkillDir, "SKILL.md")]]) {
           pi.appendEntry("guard-rule", { op: "add", rule: { id, decision: "deny", tool: "read", match: { kind: "path", path }, scope: "session", cwd: project, createdAt: new Date().toISOString() } });
         }
+        pi.appendEntry("guard-rule", { op: "add", rule: { id: "deny-grep", decision: "deny", tool: "bash", match: { kind: "argv", prefix: ["grep"] }, scope: "session", cwd: project, createdAt: new Date().toISOString() } });
       }); pi.on("tool_result", (event) => {
         if (event.toolCallId === "registered-skill") {
           const path = join(externalSkillDir, "SKILL.md");
@@ -48,13 +50,15 @@ test("Pi can read a skill without guard handling the call", async () => {
     });
     await loader.reload();
     assert.deepEqual(loader.getExtensions().errors, []);
-    const { session } = await createAgentSession({ cwd: project, agentDir, model: fake.model, sessionManager: SessionManager.inMemory(project), tools: ["read"], resourceLoader: loader });
+    const { session } = await createAgentSession({ cwd: project, agentDir, model: fake.model, sessionManager: SessionManager.inMemory(project), tools: ["read", "bash"], resourceLoader: loader });
     try {
       session.modelRuntime.hasConfiguredAuth = () => true;
       session.agent.streamFunction = fake.stream;
       await session.prompt("Read the skill");
       const result = session.messages.find((message) => message.role === "toolResult" && message.toolCallId === "skill");
       assert.ok(result && result.role === "toolResult" && !result.isError && JSON.stringify(result.content).includes("skill-read-fixture"));
+      const grep = session.messages.find((message) => message.role === "toolResult" && message.toolCallId === "skill-grep");
+      assert.ok(grep && grep.role === "toolResult" && !grep.isError && JSON.stringify(grep.content).includes("skill-read-fixture"));
       const external = session.messages.find((message) => message.role === "toolResult" && message.toolCallId === "registered-skill");
       assert.ok(external && external.role === "toolResult" && !external.isError && JSON.stringify(external.content).includes("registered-skill-fixture"));
       const retargeted = session.messages.find((message) => message.role === "toolResult" && message.toolCallId === "retargeted-skill");
