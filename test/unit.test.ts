@@ -1574,6 +1574,24 @@ name: visible
   ok("rg: explicitly naming a sensitive file still requires confirmation", !!inspect("rg --files visible.pem").sensitive);
 }
 
+{
+  const repo = mkdtempSync(join(tmpdir(), "guard-rg-pattern-"));
+  mkdirSync(join(repo, "needle"));
+  mkdirSync(join(repo, "src"));
+  writeFileSync(join(repo, "needle", "private.pem"), "fixture");
+  writeFileSync(join(repo, "src", "file.txt"), "needle\n");
+  writeFileSync(join(repo, ".env"), "fixture");
+  const inspect = (command: string) => {
+    clearPathCache();
+    const parsed = P(command);
+    return { sensitive: sensitive("bash", { command }, repo, protectedRoots(repo), parsed), safe: safeAllow("bash", { command }, repo, O, parsed) };
+  };
+  for (const command of ["rg needle src", "rg -e needle src", "rg --regexp needle src", "rg -g '*.txt' needle src", "rg '.env' src"])
+    ok(`rg: pattern directory is not treated as a search root: ${command}`, !inspect(command).sensitive && inspect(command).safe);
+  ok("rg: an explicitly searched directory containing a key remains sensitive", !!inspect("rg -e needle needle").sensitive);
+  ok("rg: a sensitive pattern file remains sensitive", !!inspect("rg --file needle/private.pem src").sensitive);
+}
+
 // Exercise the same Git directory resolution against a worktree created by Git itself.
 {
   const root = mkdtempSync(join(tmpdir(), "guard-real-worktree-"));

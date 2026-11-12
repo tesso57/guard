@@ -9,7 +9,7 @@ import { createHash } from "node:crypto";
 import { accessSync, constants, existsSync, opendirSync, statSync } from "node:fs";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { hasGluedPathValue, innerCommands, INTERPRETER_NAMES, isLongOption, isReadOnlyArgv, isShell, nonFlags, normalizeArgv, type Parsed, parseShell, rgListsFiles, unwrapCommandWrappers } from "./shell.ts";
+import { hasGluedPathValue, innerCommands, INTERPRETER_NAMES, isLongOption, isReadOnlyArgv, isShell, nonFlags, normalizeArgv, type Parsed, parseShell, rgExplicitPaths, rgListsFiles, unwrapCommandWrappers } from "./shell.ts";
 import { readRegularText } from "./files.ts";
 import { containsProtectedRoot, expandGlobFully, trustedDirFor, trustedDirRelative, type TrustedDir, type TrustedDirState, isPiCodePath, PI_CODE_DIRS, gitConfigIsSafe, globHitsOptionLikeName, globMayReach, ignoreFilesReinclude, isFreelyReadable, isHardLinked, isHomeOrAncestor, isInside, isInsideExact, isProjectPath, isProjectHardlinkSafe, isProtectedHardLink, isRiskyProjectFile, memo, pathLikeTokens, pathVariants, protectedReason, protectedRoots, readFallbackVariants, realPath, resolvePath, secretFilesUnder, sensitiveReason, UNKNOWN_PATH } from "./paths.ts";
 
@@ -294,7 +294,11 @@ function computeInputPaths(tool: string, input: any, cwd: string, parsed?: Parse
         // Both the normalized and the raw argv: normalization drops location values (git -C x, npm --prefix x).
         // Operands after `--` are paths even when they start with `-` (`cat -- --d/../../.ssh/key`).
         const afterDashes = (xs: string[]) => (xs.includes("--") ? xs.slice(xs.indexOf("--") + 1).map((t) => (t.startsWith("-") ? `./${t}` : t)) : []);
-        if (!moves) reads.push(...pathLikeTokens(base, a.slice(1)), ...pathLikeTokens(base, s.argv.slice(1)), ...pathLikeTokens(base, afterDashes(s.argv.slice(1))));
+        const rgPaths = s.argv[0] === "rg" && !parsed.dynamic.length && !parsed.globs.length ? rgExplicitPaths(s.argv) : undefined;
+        if (rgPaths) {
+          const files = [...rgPaths, ...optionValue(s.argv, ["--file"])].filter((path) => path !== "-");
+          reads.push(...files.flatMap((path) => pathVariants(base, path.startsWith("-") ? `./${path}` : path)));
+        } else if (!moves) reads.push(...pathLikeTokens(base, a.slice(1)), ...pathLikeTokens(base, s.argv.slice(1)), ...pathLikeTokens(base, afterDashes(s.argv.slice(1))));
         reads.push(...s.reads.flatMap((r) => pathVariants(base, r)));
         // Wildcards in write targets are expanded: `>> ~/.p?/a????/guard/rules.jsonl` writes to the real file
         writes.push(...[...s.writes, ...bashWriteTargets(s.argv)].flatMap((w) => [...pathVariants(base, w.startsWith("-") ? `./${w}` : w), ...(hasGlob(w) ? globTargets(base, w) : [])]));
@@ -800,7 +804,11 @@ function searchExposure(tool: string, input: any, cwd: string, parsed?: Parsed):
           if (isHardLinked(real) && !(projectRead && isProjectHardlinkSafe(real, cwd))) unknown = true;
           continue;
         }
-      } catch { unknown = true; continue; }
+      } catch (error: any) {
+        // A missing explicit operand causes the search tool to report an error; it does not expose file contents.
+        if (error?.code !== "ENOENT" && error?.code !== "ENOTDIR") unknown = true;
+        continue;
+      }
       const { files, complete } = secretFilesUnder(real, projectRead && isProjectPath(real, cwd) ? cwd : undefined);
       if (!complete) unknown = true;
       const hit = files.find((f) => hidden || !relativeHasHidden(real, f));
@@ -819,7 +827,8 @@ function searchExposure(tool: string, input: any, cwd: string, parsed?: Parsed):
     const gitGrep = a[0] === "git" && a.includes("grep");
     if (!((isGrepFamily(a[0]) && recursiveGrep(args)) || a[0] === "rg" || a[0] === "ag" || a[0] === "ack" || gitGrep)) continue;
     if (rgListsFiles(a)) continue;
-    const given = bases.flatMap((b) => pathLikeTokens(b, nonFlags(a).slice(1)));
+    const rgPaths = a[0] === "rg" && !parsed.dynamic.length && !parsed.globs.length ? rgExplicitPaths(a) : undefined;
+    const given = rgPaths ? bases.flatMap((b) => rgPaths.filter((path) => path !== "-").flatMap((path) => pathVariants(b, path.startsWith("-") ? `./${path}` : path))) : bases.flatMap((b) => pathLikeTokens(b, nonFlags(a).slice(1)));
     // rg skips hidden files unless told otherwise, or unless an ignore file re-includes them (`!.env`)
     const roots0 = given.length ? given : bases;
     const r = check(roots0, a[0] !== "rg" || rgSeesHidden(args) || roots0.some((x) => ignoreFilesReinclude(realPath(x))));
