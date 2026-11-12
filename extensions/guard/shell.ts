@@ -641,7 +641,7 @@ const RG_LONG_FLAGS = new Set([
 ]);
 const RG_LONG_VALUES = new Set([
   "after-context", "before-context", "context", "color", "colors", "context-separator", "field-context-separator", "field-match-separator",
-  "encoding", "file", "glob", "iglob", "max-columns", "max-count", "max-depth", "maxdepth", "max-filesize", "path-separator", "regexp",
+  "encoding", "engine", "file", "glob", "iglob", "max-columns", "max-count", "max-depth", "maxdepth", "max-filesize", "path-separator", "regexp",
   "replace", "sort", "sortr", "threads", "type", "type-not", "type-add", "type-clear", "dfa-size-limit", "regex-size-limit",
 ]);
 function inspectRgOptions(a: string[]): { known: boolean; listsFiles: boolean; noConfig: boolean; noIgnore: boolean; hidden: boolean; unrestricted: number; patternProvided: boolean; fileTypes: boolean; operands: string[]; globs: string[] } {

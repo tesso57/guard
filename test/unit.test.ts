@@ -1719,9 +1719,9 @@ let oversizedDiffFixture = "";
   const hd = (c: string) => (clearPathCache(), hardDeny("bash", { command: c }, P22, r22, P(c)));
   const sens = (c: string) => (clearPathCache(), sensitive("bash", { command: c }, P22, r22, P(c)));
   // P0-1: rg options are an allowlist
-  for (const c of ["rg --hostname-bin pytest --hyperlink-format default x", "rg --hostname-bin=./t.sh x", "rg -z x", "rg --engine=auto x", "rg --pre-glob '*' x", "rg -nL x", "rg --fol x"])
+  for (const c of ["rg --hostname-bin pytest --hyperlink-format default x", "rg --hostname-bin=./t.sh x", "rg -z x", "rg --pre-glob '*' x", "rg -nL x", "rg --fol x"])
     ok(`r22: rg with unknown or exec options is not read-only: ${c}`, !isReadOnlyArgv(c.split(" ")));
-  for (const c of ["rg -n TODO src", "rg -nC3 foo", "rg -e foo -g '*.ts' --type ts -i", "rg --files", "rg -uu --hidden x", "rg --max-count=3 -w x .", "rg -- -x"])
+  for (const c of ["rg -n TODO src", "rg -nC3 foo", "rg -e foo -g '*.ts' --type ts -i", "rg --files", "rg -uu --hidden x", "rg --max-count=3 -w x .", "rg --engine=auto needle src", "rg --engine pcre2 needle src", "rg -- -x"])
     ok(`r22: everyday rg stays read-only: ${c}`, isReadOnlyArgv(P(c).subcommands[0]));
   // P0-2: the project's own .pi/.agents
   for (const c of [
@@ -3117,7 +3117,7 @@ const run = async (toolName: string, input: any) => h.tool_call({ type: "tool_ca
     const priorRgConfig = process.env.RIPGREP_CONFIG_PATH;
     delete process.env.RIPGREP_CONFIG_PATH;
     try {
-      const pendingRg = run("bash", { command: "rg --engine=auto needle docs" });
+      const pendingRg = run("bash", { command: "rg --pre-glob '*.txt' needle docs" });
       await rgStarted;
       process.env.RIPGREP_CONFIG_PATH = "opaque-rg-config-during-judgement";
       releaseRg();
