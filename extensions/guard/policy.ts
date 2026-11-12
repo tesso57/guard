@@ -11,6 +11,7 @@ import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } fro
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { grepExplicitPaths, hasGluedPathValue, innerCommands, INTERPRETER_NAMES, isLongOption, isReadOnlyArgv, isShell, nonFlags, normalizeArgv, type Parsed, parseShell, rgDisablesConfig, rgExplicitPaths, rgInfoOnly, rgListsFiles, rgListsTypes, rgSimpleIncludeSuffixes, rgVisibility, unwrapCommandWrappers } from "./shell.ts";
 import { readRegularText } from "./files.ts";
+import { AGENT_DIR } from "./config.ts";
 import { containsProtectedRoot, expandGlobFully, trustedDirFor, trustedDirRelative, type TrustedDir, type TrustedDirState, isPiCodePath, PI_CODE_DIRS, gitConfigIsSafe, globHitsOptionLikeName, globMayReach, ignoreFilesReinclude, isFreelyReadable, isHardLinked, isHomeOrAncestor, isInside, isInsideExact, isProjectPath, isProjectHardlinkSafe, isProtectedHardLink, isRiskyProjectFile, memo, pathLikeTokens, pathVariants, protectedReason, protectedRoots, readFallbackVariants, realPath, resolvePath, secretFilesUnder, sensitiveReason, UNKNOWN_PATH } from "./paths.ts";
 
 export const BUILTIN_TOOLS = new Set(["bash", "edit", "write", "read", "grep", "find", "ls"]);
@@ -152,6 +153,50 @@ export function inspectExecutablePath(parsed: Parsed, cwd: string, platform: Nod
 
 export function executablePathRisk(parsed: Parsed, cwd: string, platform: NodeJS.Platform = process.platform): string | undefined {
   return inspectExecutablePath(parsed, cwd, platform).risk;
+}
+
+/** Pi's grep/find resolve and may download executables before running the search. */
+export function inspectBuiltinSearchExecutable(tool: string, cwd: string): { risk?: string; fingerprint?: string } {
+  if (tool !== "grep" && tool !== "find") return {};
+  if (process.platform === "win32") return { risk: "cannot verify the executable used by the built-in search tool on Windows" };
+  const names = tool === "grep" ? ["rg"] : ["fd", "fdfind"];
+  const local = join(AGENT_DIR, "bin", names[0]);
+  const path = process.env.PATH;
+  if (path === undefined) return { risk: "cannot determine the built-in search executable path" };
+  const physicalCwd = realPath(cwd);
+  const roots = [cwd, physicalCwd, enclosingRepository(cwd), enclosingRepository(physicalCwd), AGENT_DIR, realPath(AGENT_DIR), "/tmp", "/private/tmp", tmpdir(), realPath(tmpdir())].filter((root): root is string => !!root);
+  const selected: unknown[] = [tool, local, path, process.cwd()];
+  const inspect = (candidate: string, requireExecutable: boolean): boolean => {
+    try {
+      if (requireExecutable) accessSync(candidate, constants.X_OK);
+      const st = statSync(candidate);
+      if (requireExecutable && !st.isFile()) return false;
+      const actual = realPath(candidate);
+      selected.push([candidate, actual, st.dev, st.ino, st.mode, st.size, st.mtimeMs, st.ctimeMs]);
+      return true;
+    } catch (error: any) {
+      if (["ENOENT", "ENOTDIR", "EACCES"].includes(error?.code)) return false;
+      throw error;
+    }
+  };
+  try {
+    let candidate: string | undefined;
+    let probes = 0;
+    if (existsSync(local)) { inspect(local, false); candidate = local; }
+    else for (const name of names) {
+      for (const entry of path.split(delimiter)) {
+        if (++probes > 512) return { risk: "built-in search executable lookup exceeds the inspection limit" };
+        const next = join(resolve(process.cwd(), entry || "."), name);
+        if (inspect(next, true)) { candidate = next; break; }
+      }
+      if (candidate) break;
+    }
+    const fingerprint = createHash("sha256").update(JSON.stringify(selected)).digest("hex");
+    if (!candidate) return { risk: "the built-in search tool may download an executable", fingerprint };
+    if ([candidate, realPath(candidate)].some((p) => roots.some((root) => isInside(p, root))))
+      return { risk: "the built-in search tool resolves to a project, temporary or Pi-managed executable", fingerprint };
+    return { fingerprint };
+  } catch { return { risk: "cannot inspect the built-in search executable" }; }
 }
 
 const HARD_DENY_BASH: [RegExp, string][] = [

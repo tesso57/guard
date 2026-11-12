@@ -24,8 +24,14 @@ test("ripgrep visibility and guard decisions agree on representative searches", 
     writeFileSync(join(project, ".ignore"), "!.env\n");
     writeFileSync(join(project, "visible.txt"), "needle\n");
     const { parseShell, rgReadsStdin } = await import("../extensions/guard/shell.ts");
-    const { safeAllow, searchNeedsJudgement, sensitive } = await import("../extensions/guard/policy.ts");
+    const { inspectBuiltinSearchExecutable, safeAllow, searchNeedsJudgement, sensitive } = await import("../extensions/guard/policy.ts");
     const { clearPathCache, protectedRoots } = await import("../extensions/guard/paths.ts");
+    if (existsSync("/usr/bin/rg")) {
+      const previousPath = process.env.PATH;
+      process.env.PATH = "/usr/bin:/bin";
+      try { assert.equal(inspectBuiltinSearchExecutable("grep", project).risk, undefined, "system ripgrep does not require extra confirmation"); }
+      finally { if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath; }
+    }
     for (const [args, readsInput] of [
       [["needle"], true],
       [["-e", "needle"], true],

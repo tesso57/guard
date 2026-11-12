@@ -82,7 +82,7 @@ if (http.setGlobalProxyFromEnv) {
 }
 
 const { parseShell, normalizeArgv, isReadOnlyArgv, unwrapCommandWrappers } = await import("../extensions/guard/shell.ts");
-const { enclosingRepository, executablePathRisk, inspectExecutablePath, hardDeny, sensitive, safeAllow, usesGrepOptions, usesRipgrepConfig, writesStayPlain } = await import("../extensions/guard/policy.ts");
+const { enclosingRepository, executablePathRisk, inspectBuiltinSearchExecutable, inspectExecutablePath, hardDeny, sensitive, safeAllow, usesGrepOptions, usesRipgrepConfig, writesStayPlain } = await import("../extensions/guard/policy.ts");
 const { clearPathCache, protectedRoots, secretFilesUnder, isInside, isInsideExact, isFreelyReadable, sensitiveReason, walkBounded, ignoreFilesReinclude, expandGlobFully, gitConfigIsSafe } = await import("../extensions/guard/paths.ts");
 const { derivePatterns, deriveDenyPatterns, describeMatch, examples, newId, RuleStore } = await import("../extensions/guard/rules.ts");
 const { evaluate, buildRequest, callDecisions } = await import("../extensions/guard/judge.ts");
@@ -142,6 +142,35 @@ mkdirSync(join(enclosingRepo, "subdir"));
 ok("policy: repository detection includes an enclosing Git repository", enclosingRepository(join(enclosingRepo, "subdir")) === enclosingRepo);
 ok("policy: Windows external commands require confirmation when executable lookup cannot be verified", !!executablePathRisk(P("git status"), PROJ, "win32") && !!executablePathRisk(P("command git status"), PROJ, "win32") && !!executablePathRisk(P("./echo hi"), PROJ, "win32"));
 ok("policy: Windows shell builtins do not require executable lookup", executablePathRisk(P("echo hello"), PROJ, "win32") === undefined);
+if (process.platform !== "win32") {
+  const dir = mkdtempSync(join(tmpdir(), "guard-builtin-search-"));
+  const before = process.env.PATH;
+  process.env.PATH = dir;
+  try {
+    const missing = inspectBuiltinSearchExecutable("grep", PROJ);
+    ok("policy: a missing built-in search executable may trigger a download", !!missing.risk);
+    for (const [tool, binary] of [["grep", "rg"], ["find", "fd"]]) {
+      const path = join(dir, binary);
+      writeFileSync(path, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+      const first = inspectBuiltinSearchExecutable(tool, PROJ);
+      ok(`policy: built-in ${tool} detects a temporary executable`, !!first.risk);
+      writeFileSync(path, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+      const second = inspectBuiltinSearchExecutable(tool, PROJ);
+      ok(`policy: built-in ${tool} notices executable changes`, first.fingerprint !== second.fingerprint);
+    }
+    rmSync(join(dir, "fd"));
+    writeFileSync(join(dir, "fdfind"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    ok("policy: built-in find checks the fdfind fallback", !!inspectBuiltinSearchExecutable("find", PROJ).risk);
+    const managed = join(AGENT, "bin", "rg");
+    mkdirSync(join(AGENT, "bin"), { recursive: true });
+    const beforeManaged = inspectBuiltinSearchExecutable("grep", PROJ);
+    writeFileSync(managed, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    try {
+      const selected = inspectBuiltinSearchExecutable("grep", PROJ);
+      ok("policy: Pi-managed search binaries take precedence over PATH", !!selected.risk && selected.fingerprint !== beforeManaged.fingerprint);
+    } finally { rmSync(managed); }
+  } finally { if (before === undefined) delete process.env.PATH; else process.env.PATH = before; }
+}
 if (process.platform !== "win32") {
   const shadow = mkdtempSync(join(tmpdir(), "guard-grep-shadow-"));
   const before = process.env.PATH;
@@ -2421,6 +2450,35 @@ branch.push({ type: "message", message: { role: "user", content: "run the tests 
 
 let n = 0;
 const run = async (toolName: string, input: any) => h.tool_call({ type: "tool_call", toolCallId: `c${++n}`, toolName, input }, ctx);
+
+if (process.platform !== "win32") {
+  const dir = mkdtempSync(join(tmpdir(), "guard-builtin-integration-"));
+  const binary = join(dir, "rg");
+  const previousPath = process.env.PATH;
+  const previousSelect = ctx.ui.select;
+  const previousResponder = responder;
+  writeFileSync(binary, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  process.env.PATH = `${dir}:/usr/bin:/bin`;
+  responder = (body) => ({ answers: answersFor([1, 0, 0, 0, 0])(body) });
+  let title = "";
+  ctx.ui.select = async (message: string) => { title = message; return "Deny"; };
+  calls = [];
+  try {
+    const blocked = await run("grep", { path: "docs", pattern: "needle" });
+    ok("int: a shadowed built-in search executable requires confirmation even after a model allow", blocked?.block === true && calls.length === 1 && title.includes("built-in search tool resolves"));
+    await run("bash", { command: "echo reset-builtin-search-counter" });
+    ctx.ui.select = async (_message: string, options: string[]) => {
+      writeFileSync(binary, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+      return options.find((option) => option.includes("this time only")) ?? "Deny";
+    };
+    const changed = await run("grep", { path: "docs", pattern: "needle" });
+    ok("int: a built-in search executable change during confirmation blocks the call", changed?.block === true);
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
+    ctx.ui.select = previousSelect;
+    responder = previousResponder;
+  }
+}
 
 {
   const skillDir = join(PROJ, ".agents", "skills", "guard-bypass-test");

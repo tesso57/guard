@@ -23,7 +23,7 @@ import { MAX_FILE_BYTES, readBoundedText } from "./files.ts";
 import { buildRequest, callDecisions, evaluate, MAX_ATTACHED_FILES, type ModelVerdict } from "./judge.ts";
 import { redact } from "./redact.ts";
 import { clearPathCache, createTrustedDirState, isFreelyReadable, listTrustedDirs, trustDir, type TrustedDirState, isHardLinked, isInsideExact, pathLikeTokens, pathVariants, protectedReason, protectedRoots, realPath, recentlyChangedFiles, resolvePath, sensitiveReason } from "./paths.ts";
-import { BUILTIN_TOOLS, hardDeny, hasUninspectedToolInput, inputPaths, inspectExecutablePath, pathsStayInProject, piString, safeAllow, searchNeedsJudgement, sensitive, usesGrepOptions, usesRipgrepConfig, writesStayPlain } from "./policy.ts";
+import { BUILTIN_TOOLS, hardDeny, hasUninspectedToolInput, inputPaths, inspectBuiltinSearchExecutable, inspectExecutablePath, pathsStayInProject, piString, safeAllow, searchNeedsJudgement, sensitive, usesGrepOptions, usesRipgrepConfig, writesStayPlain } from "./policy.ts";
 import { type Decision, deriveDenyPatterns, derivePatterns, describeMatch, globalAllowPatternIsReadOnly, type Match, newId, type Rule, RuleStore, type Scope, supportsAnyInputAllow } from "./rules.ts";
 import { isReadOnlyArgv, normalizeArgv, type Parsed, parseShell, rgDisablesConfig, rgInfoOnly } from "./shell.ts";
 import { isSkillRead, type RegisteredSkill } from "./skill-read.ts";
@@ -158,13 +158,15 @@ function callWrites(tool: string, input: any, cwd: string, parsed?: Parsed): boo
 }
 
 /** Snapshot deterministic access checks and the resolved paths they examined. */
-function filesystemPolicyHash(tool: string, input: unknown, cwd: string, sessionDir: string | undefined, trustedDirs: TrustedDirState, parsed?: Parsed, checked?: { hard: string | undefined; sens: string | undefined; uncertainSearch: boolean }): string {
+function filesystemPolicyHash(tool: string, input: unknown, cwd: string, sessionDir: string | undefined, trustedDirs: TrustedDirState, parsed?: Parsed, checked?: { hard: string | undefined; sens: string | undefined; uncertainSearch: boolean; builtinExecutable: ReturnType<typeof inspectBuiltinSearchExecutable> }): string {
   const roots = protectedRoots(cwd, sessionDir);
   const paths = inputPaths(tool, input, cwd, parsed);
+  const builtinExecutable = checked ? checked.builtinExecutable : inspectBuiltinSearchExecutable(tool, cwd);
   return stableHash({
     hard: checked ? checked.hard : hardDeny(tool, input, cwd, roots, parsed),
     sens: checked ? checked.sens : sensitive(tool, input, cwd, roots, parsed),
-    uncertainSearch: checked ? checked.uncertainSearch : searchNeedsJudgement(tool, input, cwd, parsed),
+    uncertainSearch: checked ? checked.uncertainSearch : searchNeedsJudgement(tool, input, cwd, parsed) || !!builtinExecutable.risk,
+    builtinExecutable,
     trustedDirsVersion: trustedDirs.version,
     paths: { reads: paths.reads.map((path) => [path, realPath(path)]), writes: paths.writes.map((path) => [path, realPath(path)]) },
   });
@@ -679,7 +681,10 @@ export default function (pi: ExtensionAPI) {
       return { rememberAllow: false, globalAllow: false, action: "confirm", source: "concurrent", reasons: [treeReason], auditReasons: [treeAuditReason!] };
     }
     const sens = sensitive(tool, input, ctx.cwd, roots, parsed);
-    const uncertainSearch = searchNeedsJudgement(tool, input, ctx.cwd, parsed);
+    const builtinExecutable = inspectBuiltinSearchExecutable(tool, ctx.cwd);
+    const builtinSearchRisk = builtinExecutable.risk;
+    const scopeUncertain = searchNeedsJudgement(tool, input, ctx.cwd, parsed);
+    const uncertainSearch = scopeUncertain || !!builtinSearchRisk;
     // A peer can change the file before or while this call executes it.
     const siblingRun = cx.fromSiblings.length ? `runs ${cx.fromSiblings.map((p) => relative(ctx.cwd, p)).join(", ")}, which may change concurrently in this message` : undefined;
 
@@ -711,7 +716,7 @@ export default function (pi: ExtensionAPI) {
       return stableHash(context(ctx, callId, tool, parsed, opts.siblings ?? [], peers, opts.historyBoundary)) !== contextHash;
     };
     const changedContext = (): Assessment => ({ ...base, action: "block", source: "error", reasons: ["judgement context changed during judgement"] });
-    const policyHash = filesystemPolicyHash(tool, input, ctx.cwd, ctx.sessionManager.getSessionDir(), trustedDirs, parsed, { hard, sens, uncertainSearch });
+    const policyHash = filesystemPolicyHash(tool, input, ctx.cwd, ctx.sessionManager.getSessionDir(), trustedDirs, parsed, { hard, sens, uncertainSearch, builtinExecutable });
     const judgementStateKey = stableHash([shellKey, policyHash]);
     const policyChanged = () => {
       clearPathCache();
@@ -752,7 +757,7 @@ export default function (pi: ExtensionAPI) {
     }
 
     if (sens) {
-      const reasons = [`may expose secrets: ${sens}`, ...(siblingRun ? [siblingRun] : []), ...(uncertainSearch ? ["search scope could not be inspected completely"] : [])];
+      const reasons = [`may expose secrets: ${sens}`, ...(siblingRun ? [siblingRun] : []), ...(scopeUncertain ? ["search scope could not be inspected completely"] : []), ...(builtinSearchRisk ? [builtinSearchRisk] : [])];
       return { ...base, action: "confirm", source: "sensitive", reasons: [...reasons, ...(treeReason ? [treeReason] : [])], ...(treeAuditReason ? { auditReasons: [...reasons, treeAuditReason] } : {}), patterns, denyPatterns, rememberAllow: !!patterns && !siblingRun && !treeConflict && !uncertainSearch };
     }
     const shortcutsOk = !siblingRun && !siblingMayChange;
@@ -796,10 +801,10 @@ export default function (pi: ExtensionAPI) {
         a.globalAllow = false;
       }
       if (uncertainSearch) {
-        const reason = "search scope could not be inspected completely";
+        const reasons = [...(scopeUncertain ? ["search scope could not be inspected completely"] : []), ...(builtinSearchRisk ? [builtinSearchRisk] : [])];
         if (a.action === "allow") a.action = "confirm";
-        a.reasons = [...a.reasons, reason];
-        if (a.auditReasons) a.auditReasons = [...a.auditReasons, reason];
+        a.reasons = [...a.reasons, ...reasons];
+        if (a.auditReasons) a.auditReasons = [...a.auditReasons, ...reasons];
         a.rememberAllow = false;
         a.globalAllow = false;
       }
@@ -819,7 +824,7 @@ export default function (pi: ExtensionAPI) {
       if (stateChanged()) return recheck();
       if (contextChanged()) return changedContext();
       if (policyChanged()) return changedPolicy();
-      const reasons = [`could not judge: ${e.message}`, ...(siblingRun ? [siblingRun] : []), ...(uncertainSearch ? ["search scope could not be inspected completely"] : [])];
+      const reasons = [`could not judge: ${e.message}`, ...(siblingRun ? [siblingRun] : []), ...(scopeUncertain ? ["search scope could not be inspected completely"] : []), ...(builtinSearchRisk ? [builtinSearchRisk] : [])];
       return { ...base, action: "confirm", source: "error", reasons: [...reasons, ...(treeReason ? [treeReason] : [])], ...(treeAuditReason ? { auditReasons: [...reasons, treeAuditReason] } : {}), patterns, denyPatterns };
     }
   }
