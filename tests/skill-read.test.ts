@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { linkSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { isSkillRead } from "../extensions/guard/skill-read.ts";
-import { rgExplicitPaths } from "../extensions/guard/shell.ts";
+import { searchNeedsJudgement, sensitive } from "../extensions/guard/policy.ts";
+import { parseShell, rgExplicitPaths } from "../extensions/guard/shell.ts";
 
 test("ripgrep patterns and option values are not mistaken for search paths", () => {
   assert.deepEqual(rgExplicitPaths(["rg", "-e", "/skill/SKILL.md"]), []);
@@ -12,6 +13,26 @@ test("ripgrep patterns and option values are not mistaken for search paths", () 
   assert.deepEqual(rgExplicitPaths(["rg", "-e", "pattern", "/skill"]), ["/skill"]);
   assert.deepEqual(rgExplicitPaths(["rg", "--files", "/skill"]), ["/skill"]);
   assert.deepEqual(rgExplicitPaths(["rg", "--", "pattern", "/skill"]), ["/skill"]);
+});
+
+test("skill reads with an unknown hard link use the normal guard checks", () => {
+  const parent = mkdtempSync(join(tmpdir(), "guard-skill-hardlink-"));
+  const cwd = join(parent, "project");
+  const dir = join(cwd, ".agents", "skills", "example");
+  const external = join(parent, "external");
+  const skill = join(dir, "SKILL.md");
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(external, "example");
+    linkSync(external, skill);
+    assert.equal(isSkillRead("read", { path: skill }, cwd), false);
+    assert.equal(isSkillRead("bash", { command: `cat '${skill}'` }, cwd), false);
+    assert.equal(isSkillRead("bash", { command: `rg example '${dir}'` }, cwd), false);
+    assert.equal(isSkillRead("bash", { command: `grep -r example '${dir}'` }, cwd), false);
+    assert.ok(sensitive("read", { path: skill }, cwd, []));
+    for (const command of [`cat '${skill}'`, `rg example '${dir}'`, `grep -r example '${dir}'`])
+      assert.ok(sensitive("bash", { command }, cwd, [], parseShell(command)) || searchNeedsJudgement("bash", { command }, cwd, parseShell(command)), command);
+  } finally { rmSync(parent, { recursive: true, force: true }); }
 });
 
 test("only direct read-only access within standard skill directories bypasses guard", () => {

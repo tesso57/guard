@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { types as utilTypes } from "node:util";
 import { AGENT_DIR } from "./config.ts";
-import { clearPathCache, isInsideExact, pathVariants, realPath, resolvePath } from "./paths.ts";
+import { clearPathCache, isInsideExact, isProjectHardlinkSafe, isProjectPath, pathVariants, realPath, resolvePath, secretFilesUnder } from "./paths.ts";
 import { inputPaths, inspectExecutablePath, usesRipgrepConfig } from "./policy.ts";
 import { grepExplicitPaths, isReadOnlyArgv, parseShell, rgExplicitPaths, rgReadsStdin } from "./shell.ts";
 
@@ -27,7 +27,8 @@ export function isSkillRead(tool: string, input: unknown, cwd: string, registere
       registeredSkills.some((skill) => isAbsolute(skill.path) && realPath(skill.path) === skill.target && realPath(path) === skill.target);
     if (tool === "read") {
       const path = resolvePath(cwd, field.value);
-      return inside(path) && statSync(path).isFile();
+      const stat = statSync(path);
+      return inside(path) && stat.isFile() && stat.nlink <= 1;
     }
     if (process.env.BASH_ENV || process.env.ENV || process.env.BASHOPTS || process.env.SHELLOPTS || Object.keys(process.env).some((name) => name.startsWith("BASH_FUNC_") && name.endsWith("%%"))) return false;
     const parsed = parseShell(field.value);
@@ -67,7 +68,9 @@ export function isSkillRead(tool: string, input: unknown, cwd: string, registere
     return paths.length > 0 && other.writes.length === 0 && paths.every((path) => {
       if (!inside(path)) return false;
       const stat = statSync(path);
-      return stat.isFile() || (parsed.subs.some((sub) => ["rg", "grep"].includes(sub.argv[0])) && stat.isDirectory());
+      if (stat.isFile()) return stat.nlink <= 1 || isProjectHardlinkSafe(path, cwd);
+      return parsed.subs.some((sub) => ["rg", "grep"].includes(sub.argv[0])) && stat.isDirectory() &&
+        secretFilesUnder(path, isProjectPath(path, cwd) ? cwd : undefined).complete;
     });
   } catch { return false; }
 }
