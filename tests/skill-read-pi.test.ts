@@ -29,6 +29,7 @@ test("Pi can read a skill without guard handling the call", async () => {
       { content: [{ type: "toolCall", id: "skill", name: "read", arguments: { path: ".agents/skills/fixture/SKILL.md" } }] },
       { content: [{ type: "toolCall", id: "skill-grep", name: "bash", arguments: { command: "cat .agents/skills/fixture/SKILL.md | grep -n -e 'https://example.test/path'" } }] },
       ...(hasRipgrep ? [{ content: [{ type: "toolCall" as const, id: "skill-rg", name: "bash", arguments: { command: "cat .agents/skills/fixture/SKILL.md | rg skill-read-fixture" } }] }] : []),
+      ...(hasRipgrep ? [{ content: [{ type: "toolCall" as const, id: "skill-rg-dash", name: "bash", arguments: { command: "rg -e - .agents/skills/fixture/SKILL.md" } }] }] : []),
       { content: [{ type: "toolCall", id: "registered-skill", name: "read", arguments: { path: join(externalSkillDir, "SKILL.md") } }] },
       { content: [{ type: "toolCall", id: "retargeted-skill", name: "read", arguments: { path: join(externalSkillDir, "SKILL.md") } }] },
       { content: [{ type: "text", text: "done" }] },
@@ -66,6 +67,8 @@ test("Pi can read a skill without guard handling the call", async () => {
       if (hasRipgrep) {
         const rg = session.messages.find((message) => message.role === "toolResult" && message.toolCallId === "skill-rg");
         assert.ok(rg && rg.role === "toolResult" && !rg.isError && JSON.stringify(rg.content).includes("skill-read-fixture"));
+        const rgDash = session.messages.find((message) => message.role === "toolResult" && message.toolCallId === "skill-rg-dash");
+        assert.ok(rgDash && rgDash.role === "toolResult" && !rgDash.isError && JSON.stringify(rgDash.content).includes("skill-read-fixture"));
       }
       const external = session.messages.find((message) => message.role === "toolResult" && message.toolCallId === "registered-skill");
       assert.ok(external && external.role === "toolResult" && !external.isError && JSON.stringify(external.content).includes("registered-skill-fixture"));
@@ -73,6 +76,7 @@ test("Pi can read a skill without guard handling the call", async () => {
       assert.ok(retargeted && retargeted.role === "toolResult" && retargeted.isError && !JSON.stringify(retargeted.content).includes("secret-not-a-skill"));
       const audit = join(agentDir, "guard", "audit.jsonl");
       assert.equal(existsSync(audit) && readFileSync(audit, "utf8").includes("skill-read-fixture"), false);
+      assert.equal(existsSync(audit) && readFileSync(audit, "utf8").includes("rg -e -"), false);
     } finally { session.dispose(); }
   } finally {
     for (const key of Object.keys(process.env)) if (isolated(key)) delete process.env[key];
