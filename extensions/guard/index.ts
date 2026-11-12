@@ -25,7 +25,7 @@ import { redact } from "./redact.ts";
 import { clearPathCache, createTrustedDirState, isFreelyReadable, listTrustedDirs, trustDir, type TrustedDirState, isHardLinked, isInsideExact, pathLikeTokens, pathVariants, protectedReason, protectedRoots, realPath, recentlyChangedFiles, resolvePath, sensitiveReason } from "./paths.ts";
 import { BUILTIN_TOOLS, hardDeny, hasUninspectedToolInput, inputPaths, inspectExecutablePath, pathsStayInProject, piString, safeAllow, searchNeedsJudgement, sensitive, usesRipgrepConfig, writesStayPlain } from "./policy.ts";
 import { type Decision, deriveDenyPatterns, derivePatterns, describeMatch, globalAllowPatternIsReadOnly, type Match, newId, type Rule, RuleStore, type Scope, supportsAnyInputAllow } from "./rules.ts";
-import { isReadOnlyArgv, normalizeArgv, type Parsed, parseShell } from "./shell.ts";
+import { isReadOnlyArgv, normalizeArgv, type Parsed, parseShell, rgDisablesConfig, rgInfoOnly } from "./shell.ts";
 import { isSkillRead, type RegisteredSkill } from "./skill-read.ts";
 import { confirmDialog, displayText, preview } from "./ui.ts";
 
@@ -113,8 +113,11 @@ function toolInputHash(tool: string, input: unknown): string {
 
 /** Shell lookup, startup and ripgrep configuration can change while judgement is pending. */
 function shellEnvironmentHash(parsed?: Parsed): string {
-  const usesRipgrep = !parsed || !parsed.ok || parsed.dynamic.length > 0 || parsed.subcommands.some((raw) =>
-    ["rg", "git", "npm"].includes(normalizeArgv(raw, "deny").argv[0]) || !isReadOnlyArgv(raw));
+  const usesRipgrep = !parsed || !parsed.ok || parsed.dynamic.length > 0 || parsed.subcommands.some((raw) => {
+    const argv = normalizeArgv(raw, "deny").argv;
+    if (argv[0] === "rg") return !rgDisablesConfig(argv) && !rgInfoOnly(argv);
+    return ["git", "npm"].includes(argv[0]) || !isReadOnlyArgv(raw);
+  });
   return stableHash(Object.fromEntries(Object.entries(process.env).filter(([key]) =>
     key.toLowerCase() === "path" || ["BASH_ENV", "ENV", "BASHOPTS", "SHELLOPTS", "PS4"].includes(key) || (usesRipgrep && key === "RIPGREP_CONFIG_PATH") || (key.startsWith("BASH_FUNC_") && key.endsWith("%%")),
   )));

@@ -2920,6 +2920,32 @@ const run = async (toolName: string, input: any) => h.tool_call({ type: "tool_ca
   await run("bash", { command: "git status" });
   delete process.env.RIPGREP_CONFIG_PATH;
   ctx.ui.select = async () => {
+    process.env.RIPGREP_CONFIG_PATH = "active-rg-config";
+    return "Allow (this time only)";
+  };
+  try {
+    const patternResult = await run("bash", { command: "rg -e --no-config .env" });
+    ok("int: a --no-config search pattern does not suppress configuration change checks", patternResult?.block === true && patternResult.reason.includes("shell environment changed"));
+  } finally {
+    ctx.ui.select = savedSelect;
+    if (priorRgEnv === undefined) delete process.env.RIPGREP_CONFIG_PATH; else process.env.RIPGREP_CONFIG_PATH = priorRgEnv;
+  }
+  await run("bash", { command: "git status" });
+  delete process.env.RIPGREP_CONFIG_PATH;
+  ctx.ui.select = async () => {
+    process.env.RIPGREP_CONFIG_PATH = "ignored-rg-config";
+    return "Allow (this time only)";
+  };
+  try {
+    const noConfigResult = await run("bash", { command: "rg -n --no-config needle .env" });
+    ok("int: ripgrep configuration changes do not invalidate a --no-config search", noConfigResult === undefined && tail(1)[0]?.final === "run");
+  } finally {
+    ctx.ui.select = savedSelect;
+    if (priorRgEnv === undefined) delete process.env.RIPGREP_CONFIG_PATH; else process.env.RIPGREP_CONFIG_PATH = priorRgEnv;
+  }
+  await run("bash", { command: "git status" });
+  delete process.env.RIPGREP_CONFIG_PATH;
+  ctx.ui.select = async () => {
     process.env.RIPGREP_CONFIG_PATH = "indirect-rg-config";
     return "Allow (this time only)";
   };
