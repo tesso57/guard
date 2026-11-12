@@ -71,7 +71,9 @@ export function isSkillRead(tool: string, input: unknown, cwd: string, registere
       return true;
     });
     // A file operand can skip hard-link inspection only if no pipeline command reads file contents.
-    const onlyListFileOperands = onlyFileLists && parsed.subs.every((sub) => ["rg", "grep"].includes(sub.argv[0]));
+    const nonListingSubs = parsed.subs.filter((sub) => !rgListsFiles(sub.argv));
+    const nonListingPaths = nonListingSubs.length ? inputPaths("bash", { command: `${field.value}\0non-listing` }, cwd, { ...parsed, subs: nonListingSubs, subcommands: nonListingSubs.map((sub) => sub.argv) }) : { reads: [], writes: [] };
+    const onlyListFileOperands = onlyFileLists && !nonListingPaths.reads.length && !nonListingPaths.writes.length;
     return paths.length > 0 && other.writes.length === 0 && paths.every((path) => {
       if (!inside(path)) return false;
       const stat = statSync(path);
