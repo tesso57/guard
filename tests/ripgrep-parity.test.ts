@@ -1,0 +1,53 @@
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+
+test("ripgrep visibility and guard decisions agree on representative searches", async (t) => {
+  const executable = spawnSync("rg", ["--version"], { stdio: "ignore" });
+  if ((executable.error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return t.skip("ripgrep is not installed");
+  assert.equal(executable.status, 0, "ripgrep must be runnable");
+  const dir = mkdtempSync(join(tmpdir(), "guard-rg-parity-"));
+  const home = join(dir, "home"), project = join(dir, "project");
+  mkdirSync(home); mkdirSync(project);
+  const isolated = (key: string) => ["GIT_", "PI_", "RISK_", "GUARD_", "OPENAI_", "BASH_FUNC_"].some((prefix) => key.startsWith(prefix)) || ["HOME", "XDG_CONFIG_HOME", "RIPGREP_CONFIG_PATH", "BASH_ENV", "ENV", "BASHOPTS", "SHELLOPTS", "PS4"].includes(key);
+  const previous = new Map(Object.entries(process.env).filter(([key]) => isolated(key)));
+  for (const key of previous.keys()) delete process.env[key];
+  Object.assign(process.env, { HOME: home, XDG_CONFIG_HOME: join(home, "config"), PI_CODING_AGENT_DIR: join(dir, "agent"), GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" });
+  try {
+    writeFileSync(join(project, ".env"), "needle\n");
+    writeFileSync(join(project, ".ignore"), "!.env\n");
+    writeFileSync(join(project, "visible.txt"), "needle\n");
+    const { parseShell } = await import("../extensions/guard/shell.ts");
+    const { safeAllow, searchNeedsJudgement, sensitive } = await import("../extensions/guard/policy.ts");
+    const { clearPathCache, protectedRoots } = await import("../extensions/guard/paths.ts");
+    const cases = [
+      { options: [], expectSafe: false },
+      { options: ["-u"], expectSafe: true },
+      { options: ["--no-ignore"], expectSafe: true },
+      { options: ["-uu"], expectSafe: false },
+      { options: ["--hidden"], expectSafe: false },
+      { options: ["-tsh"], expectSafe: false },
+      { options: ["--type-add", "custom:.env", "-tcustom"], expectSafe: false },
+      { options: ["-g", "*.txt"], expectSafe: true },
+      { options: ["-g", "*.env"], expectSafe: false },
+    ];
+    for (const { options, expectSafe } of cases) {
+      const args = ["--no-config", ...options, "needle", "."];
+      const result = spawnSync("rg", ["-l", ...args], { cwd: project, encoding: "utf8" });
+      assert.ok(result.status === 0 || result.status === 1, result.stderr);
+      const command = ["rg", ...args.map((value) => /^[\w./=-]+$/.test(value) ? value : `'${value.replace(/'/g, "'\\''")}'`)].join(" ");
+      clearPathCache();
+      const parsed = parseShell(command);
+      const flagged = !!sensitive("bash", { command }, project, protectedRoots(project), parsed) || searchNeedsJudgement("bash", { command }, project, parsed);
+      if (result.stdout.split("\n").some((line) => line.endsWith("/.env"))) assert.equal(flagged, true, command);
+      if (expectSafe) assert.equal(!flagged && safeAllow("bash", { command }, project, { trusted: true, touched: new Set() }, parsed), true, command);
+    }
+  } finally {
+    for (const key of Object.keys(process.env)) if (isolated(key)) delete process.env[key];
+    for (const [key, value] of previous) if (value !== undefined) process.env[key] = value;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
