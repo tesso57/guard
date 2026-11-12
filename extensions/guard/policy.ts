@@ -229,8 +229,11 @@ export function inspectBuiltinSearchExecutable(tool: string, cwd: string, piVers
             const resolved = realPath(interpreter);
             if (!interpreterStat.isFile()) throw new Error("interpreter is not a file");
             selected.push([interpreter, resolved, interpreterStat.dev, interpreterStat.ino, interpreterStat.mode, interpreterStat.nlink, interpreterStat.size, interpreterStat.mtimeMs, interpreterStat.ctimeMs]);
-            const prefix = executablePrefix(interpreter, interpreterStat, 2);
-            if (prefix.length === 2 && prefix[0] === 35 && prefix[1] === 33) interpreterRisk = "the built-in search executable uses a nested script interpreter";
+            const prefix = executablePrefix(interpreter, interpreterStat, 4);
+            const nativeFormats = process.platform === "darwin" ? ["feedface", "cefaedfe", "feedfacf", "cffaedfe", "cafebabe", "bebafeca", "cafebabf", "bfbafeca"] : ["linux", "freebsd", "openbsd", "netbsd", "sunos"].includes(process.platform) ? ["7f454c46"] : [];
+            if (prefix.length >= 2 && prefix[0] === 35 && prefix[1] === 33) interpreterRisk = "the built-in search executable uses a nested script interpreter";
+            else if (!nativeFormats.includes(prefix.toString("hex")))
+              interpreterRisk = "the built-in search interpreter's executable format cannot be verified";
             if (basename(resolved) === "env" || [interpreter, resolved].some((p) => roots.some((root) => isInside(p, root))) ||
                 (interpreterStat.nlink > 1 && !immutableSystemExecutable(interpreter, resolved, interpreterStat)))
               interpreterRisk ??= "the built-in search executable uses an unverified interpreter";

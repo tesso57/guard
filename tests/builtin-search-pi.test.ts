@@ -83,6 +83,13 @@ test("Pi asks before a broken search executable can trigger a download", { skip:
     assert.equal(nestedOutput.blocked, true);
     assert.match(JSON.stringify(nestedOutput.content), /guard/i);
     assert.equal(existsSync(join(agent, "bin")), false);
+    writeFileSync(nested, "exit 0\n", { mode: 0o755 });
+    const textResult = spawnSync(process.execPath, ["--experimental-strip-types", fileURLToPath(new URL("./helpers/builtin-search-child.mjs", import.meta.url))], { env, encoding: "utf8", timeout: 30_000 });
+    assert.equal(textResult.status, 0, textResult.stderr);
+    const textOutput = JSON.parse(textResult.stdout);
+    assert.equal(textOutput.blocked, true);
+    assert.match(JSON.stringify(textOutput.content), /guard/i);
+    assert.equal(existsSync(join(agent, "bin")), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
     rmSync(bin, { recursive: true, force: true });

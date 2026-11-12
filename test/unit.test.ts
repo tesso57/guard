@@ -230,6 +230,10 @@ if (process.platform !== "win32") {
     ok("policy: an env-based nested interpreter requires confirmation", !!changedNested.risk && changedNested.fingerprint !== validNested.fingerprint);
     writeFileSync(nested, `#!${join(first, "rg")}\n`, { mode: 0o755 });
     ok("policy: interpreter cycles require confirmation", !!inspectBuiltinSearchExecutable("grep", PROJ).risk);
+    writeFileSync(nested, "exit 0\n", { mode: 0o755 });
+    ok("policy: a non-native interpreter without a shebang requires confirmation", !!inspectBuiltinSearchExecutable("grep", PROJ).risk);
+    writeFileSync(nested, Buffer.from(process.platform === "darwin" ? "7f454c46" : "cafebabe", "hex"), { mode: 0o755 });
+    ok("policy: an interpreter for a different operating system requires confirmation", !!inspectBuiltinSearchExecutable("grep", PROJ).risk);
     rmSync(nested);
     writeFileSync(join(first, "rg"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
     writeFileSync(join(later, "rg"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
