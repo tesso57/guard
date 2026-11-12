@@ -111,10 +111,10 @@ function toolInputHash(tool: string, input: unknown): string {
   return stableHash([tool, input]);
 }
 
-/** Shell lookup and startup settings can change while the approval dialog is open. */
+/** Shell lookup, startup and ripgrep configuration can change while judgement is pending. */
 function shellEnvironmentHash(): string {
   return stableHash(Object.fromEntries(Object.entries(process.env).filter(([key]) =>
-    key.toLowerCase() === "path" || ["BASH_ENV", "ENV", "BASHOPTS", "SHELLOPTS", "PS4"].includes(key) || (key.startsWith("BASH_FUNC_") && key.endsWith("%%")),
+    key.toLowerCase() === "path" || ["BASH_ENV", "ENV", "BASHOPTS", "SHELLOPTS", "PS4", "RIPGREP_CONFIG_PATH"].includes(key) || (key.startsWith("BASH_FUNC_") && key.endsWith("%%")),
   )));
 }
 

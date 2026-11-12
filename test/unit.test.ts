@@ -2767,6 +2767,20 @@ const run = async (toolName: string, input: any) => h.tool_call({ type: "tool_ca
     if (priorBashEnv === undefined) delete process.env.BASH_ENV; else process.env.BASH_ENV = priorBashEnv;
   }
   await run("bash", { command: "git status" });
+  const priorRgEnv = process.env.RIPGREP_CONFIG_PATH;
+  delete process.env.RIPGREP_CONFIG_PATH;
+  ctx.ui.select = async () => {
+    process.env.RIPGREP_CONFIG_PATH = "opaque-new-rg-config";
+    return "Allow (this time only)";
+  };
+  try {
+    const changedRgEnv = await run("bash", { command: "rg needle .env" });
+    ok("int: ripgrep configuration changes during confirmation block without leaking values", changedRgEnv?.block === true && changedRgEnv.reason.includes("shell environment changed") && !JSON.stringify(tail(1)[0]).includes("opaque-new-rg-config"));
+  } finally {
+    ctx.ui.select = savedSelect;
+    if (priorRgEnv === undefined) delete process.env.RIPGREP_CONFIG_PATH; else process.env.RIPGREP_CONFIG_PATH = priorRgEnv;
+  }
+  await run("bash", { command: "git status" });
   if (process.platform !== "win32") {
     const oldPath = process.env.PATH;
     const dialogBin = join(PROJ, "dialog-executable-bin");
@@ -3001,6 +3015,29 @@ const run = async (toolName: string, input: any) => h.tool_call({ type: "tool_ca
     } finally {
       releaseShell();
       if (pathBeforeShell === undefined) delete process.env.PATH; else process.env.PATH = pathBeforeShell;
+    }
+    await run("bash", { command: "git status" });
+    let releaseRg!: () => void, markRgStarted!: () => void;
+    const rgStarted = new Promise<void>((resolve) => { markRgStarted = resolve; });
+    const rgGate = new Promise<void>((resolve) => { releaseRg = resolve; });
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      markRgStarted();
+      await rgGate;
+      return new Response(JSON.stringify({ answers: answersFor([1, 0, 0, 0, 0])(body) }), { status: 200 });
+    }) as typeof fetch;
+    const priorRgConfig = process.env.RIPGREP_CONFIG_PATH;
+    delete process.env.RIPGREP_CONFIG_PATH;
+    try {
+      const pendingRg = run("bash", { command: "rg --engine=auto needle docs" });
+      await rgStarted;
+      process.env.RIPGREP_CONFIG_PATH = "opaque-rg-config-during-judgement";
+      releaseRg();
+      const result = await pendingRg;
+      ok("int: ripgrep configuration changes during model judgement block the call", result?.block === true && result.reason.includes("shell environment or executable lookup changed") && !JSON.stringify(tail(1)).includes("opaque-rg-config-during-judgement"));
+    } finally {
+      releaseRg();
+      if (priorRgConfig === undefined) delete process.env.RIPGREP_CONFIG_PATH; else process.env.RIPGREP_CONFIG_PATH = priorRgConfig;
     }
     await run("bash", { command: "git status" });
     let releaseContext!: () => void;
