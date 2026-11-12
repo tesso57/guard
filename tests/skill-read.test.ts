@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { isSkillRead } from "../extensions/guard/skill-read.ts";
-import { searchNeedsJudgement, sensitive } from "../extensions/guard/policy.ts";
+import { inspectBuiltinSearchExecutable, searchNeedsJudgement, sensitive } from "../extensions/guard/policy.ts";
 import { isReadOnlyArgv, parseShell, rgExplicitPaths } from "../extensions/guard/shell.ts";
 
 test("ripgrep patterns and option values are not mistaken for search paths", () => {
@@ -49,6 +49,50 @@ test("skill reads with an unknown hard link use the normal guard checks", () => 
     for (const command of [`cat '${skill}'`, `rg example '${dir}'`, `grep -r example '${dir}'`])
       assert.ok(sensitive("bash", { command }, cwd, [], parseShell(command)) || searchNeedsJudgement("bash", { command }, cwd, parseShell(command)), command);
   } finally { rmSync(parent, { recursive: true, force: true }); }
+});
+
+test("built-in skill searches bypass guard only with a verified executable and scoped inputs", (t) => {
+  const parent = mkdtempSync(join(tmpdir(), "guard-skill-tools-"));
+  const bin = mkdtempSync(join(process.cwd(), ".guard-skill-tools-"));
+  const cwd = join(parent, "project"), dir = join(cwd, ".agents", "skills", "example"), skill = join(dir, "SKILL.md");
+  const previousPath = process.env.PATH;
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(skill, "example");
+    for (const name of ["rg", "fd"]) writeFileSync(join(bin, name), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    process.env.PATH = bin;
+    if (process.platform !== "win32") {
+      if (inspectBuiltinSearchExecutable("grep", cwd).risk || inspectBuiltinSearchExecutable("find", cwd).risk) {
+        t.skip("fixture executables cannot be verified in this environment");
+        return;
+      }
+      assert.equal(isSkillRead("grep", { path: dir, pattern: "example" }, cwd), true);
+      assert.equal(isSkillRead("find", { path: dir, pattern: "*.md" }, cwd), true);
+      const previousConfig = process.env.RIPGREP_CONFIG_PATH;
+      process.env.RIPGREP_CONFIG_PATH = join(parent, "config");
+      try { assert.equal(isSkillRead("grep", { path: dir, pattern: "example" }, cwd), false); }
+      finally { if (previousConfig === undefined) delete process.env.RIPGREP_CONFIG_PATH; else process.env.RIPGREP_CONFIG_PATH = previousConfig; }
+      assert.equal(isSkillRead("grep", { path: cwd, pattern: "example" }, cwd), false);
+      assert.equal(isSkillRead("find", { path: cwd, pattern: "*.md" }, cwd), false);
+      assert.equal(isSkillRead("grep", { path: dir, pattern: { value: "example" } }, cwd), false);
+      assert.equal(isSkillRead("grep", { path: dir, pattern: "example", glob: "--pre=sh" }, cwd), false);
+      assert.equal(isSkillRead("grep", Object.create({ path: parent, pattern: "example" }), dir), false);
+      symlinkSync(parent, join(dir, "escape"));
+      assert.equal(isSkillRead("grep", { path: join(dir, "escape"), pattern: "example" }, cwd), false);
+      assert.equal(isSkillRead("find", { path: join(dir, "escape"), pattern: "*.md" }, cwd), false);
+      const external = join(parent, "outside");
+      linkSync(skill, external);
+      assert.equal(isSkillRead("grep", { path: dir, pattern: "example" }, cwd), false);
+      assert.equal(isSkillRead("find", { path: dir, pattern: "*.md" }, cwd), true);
+      process.env.PATH = parent;
+      assert.equal(isSkillRead("grep", { path: dir, pattern: "example" }, cwd), false);
+      assert.equal(isSkillRead("find", { path: dir, pattern: "*.md" }, cwd), false);
+    }
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
+    rmSync(parent, { recursive: true, force: true });
+    rmSync(bin, { recursive: true, force: true });
+  }
 });
 
 test("skill reads bypass guard only when every hard link is known and non-sensitive", () => {

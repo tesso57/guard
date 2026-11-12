@@ -4,7 +4,7 @@ import { dirname, isAbsolute, join } from "node:path";
 import { types as utilTypes } from "node:util";
 import { AGENT_DIR } from "./config.ts";
 import { clearPathCache, isInsideExact, isProjectHardlinkSafe, isProjectPath, pathVariants, realPath, resolvePath, secretFilesUnder } from "./paths.ts";
-import { inputPaths, inspectExecutablePath, usesRipgrepConfig } from "./policy.ts";
+import { inputPaths, inspectBuiltinSearchExecutable, inspectExecutablePath, usesRipgrepConfig } from "./policy.ts";
 import { grepExplicitPaths, isReadOnlyArgv, parseShell, rgExplicitPaths, rgListsFiles, rgReadsStdin, rgUsesPatternFile } from "./shell.ts";
 
 export type RegisteredSkill = { path: string; target: string };
@@ -13,12 +13,12 @@ export type RegisteredSkill = { path: string; target: string };
 export function isSkillRead(tool: string, input: unknown, cwd: string, registeredSkills: readonly RegisteredSkill[] = []): boolean {
   try {
     if (!input || typeof input !== "object" || utilTypes.isProxy(input)) return false;
-    const key = tool === "read" || tool === "ls" ? "path" : tool === "bash" ? "command" : undefined;
+    const key = ["read", "ls", "grep", "find"].includes(tool) ? "path" : tool === "bash" ? "command" : undefined;
     if (!key) return false;
     const field = Object.getOwnPropertyDescriptor(input, key);
     if (!field && key in input) return false;
     if (field && (!("value" in field) || (field.value !== undefined && typeof field.value !== "string"))) return false;
-    if (tool !== "ls" && (!field || !("value" in field) || typeof field.value !== "string")) return false;
+    if (!["ls", "grep", "find"].includes(tool) && (!field || !("value" in field) || typeof field.value !== "string")) return false;
     const value = field && "value" in field && typeof field.value === "string" ? field.value : "";
     clearPathCache();
     const roots = [join(homedir(), ".agents", "skills"), join(AGENT_DIR, "skills"), join(cwd, ".pi", "skills")];
@@ -36,6 +36,25 @@ export function isSkillRead(tool: string, input: unknown, cwd: string, registere
     if (tool === "ls") {
       const path = resolvePath(cwd, value || ".");
       return inside(path) && statSync(path).isDirectory();
+    }
+    if (tool === "grep" || tool === "find") {
+      // Older Pi versions may not suppress ripgrep's ambient configuration.
+      if (tool === "grep" && process.env.RIPGREP_CONFIG_PATH) return false;
+      const fields = tool === "grep" ? { pattern: "string", glob: "string", ignoreCase: "boolean", literal: "boolean", context: "number", limit: "number" } : { pattern: "string", limit: "number" };
+      for (const [name, type] of Object.entries(fields)) {
+        const descriptor = Object.getOwnPropertyDescriptor(input, name);
+        if (!descriptor && name in input) return false;
+        if (!descriptor) { if (name === "pattern") return false; continue; }
+        if (!("value" in descriptor) || (descriptor.value !== undefined && typeof descriptor.value !== type) || (name === "pattern" && typeof descriptor.value !== "string")) return false;
+        if (name === "glob" && typeof descriptor.value === "string" && descriptor.value.startsWith("-")) return false;
+        if (typeof descriptor.value === "number" && !Number.isFinite(descriptor.value)) return false;
+      }
+      const path = resolvePath(cwd, value || ".");
+      if (!inside(path) || inspectBuiltinSearchExecutable(tool, cwd).risk) return false;
+      const stat = statSync(path);
+      if (tool === "find") return stat.isDirectory();
+      if (stat.isFile()) return stat.nlink <= 1 || isProjectHardlinkSafe(path, cwd);
+      return stat.isDirectory() && secretFilesUnder(path, isProjectPath(path, cwd) ? cwd : undefined).complete;
     }
     if (process.env.BASH_ENV || process.env.ENV || process.env.BASHOPTS || process.env.SHELLOPTS || Object.keys(process.env).some((name) => name.startsWith("BASH_FUNC_") && name.endsWith("%%"))) return false;
     const parsed = parseShell(value);

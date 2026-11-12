@@ -5,14 +5,18 @@ import { createFakeModel } from "./fake-model.ts";
 const project = process.env.GUARD_TEST_PROJECT;
 const agentDir = process.env.PI_CODING_AGENT_DIR;
 const tool = process.env.GUARD_TEST_TOOL;
+const searchPath = process.env.GUARD_TEST_PATH || ".";
 const fake = createFakeModel([
-  { content: [{ type: "toolCall", id: "search", name: tool, arguments: { path: ".", pattern: "needle" } }] },
+  { content: [{ type: "toolCall", id: "search", name: tool, arguments: { path: searchPath, pattern: "needle" } }] },
   { content: [{ type: "text", text: "done" }] },
 ]);
 const loader = new DefaultResourceLoader({
   cwd: project, agentDir,
   additionalExtensionPaths: [fileURLToPath(new URL("../../extensions/index.ts", import.meta.url))],
   noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+  extensionFactories: process.env.GUARD_TEST_DENY ? [(pi) => { pi.on("session_start", () => {
+    pi.appendEntry("guard-rule", { op: "add", rule: { id: "deny-search", decision: "deny", tool, match: { kind: "path", path: searchPath }, scope: "session", cwd: project, createdAt: new Date().toISOString() } });
+  }); }] : [],
 });
 await loader.reload();
 if (loader.getExtensions().errors.length) throw new Error("extension failed to load");
