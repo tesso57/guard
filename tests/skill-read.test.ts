@@ -36,6 +36,12 @@ test("skill reads with an unknown hard link use the normal guard checks", () => 
     assert.equal(isSkillRead("bash", { command: `rg --files '${skill}' | grep SKILL` }, cwd), true);
     assert.equal(isSkillRead("bash", { command: `rg --files '${skill}' | cat '${skill}'` }, cwd), false);
     assert.equal(isSkillRead("bash", { command: `rg --files '${dir}' | rg example '${dir}'` }, cwd), false);
+    for (const option of ["-l", "--files-with-matches", "--files-without-match"]) {
+      const command = `rg ${option} example '${dir}'`;
+      assert.equal(isSkillRead("bash", { command }, cwd), false, `${option} searches file contents`);
+      assert.equal(searchNeedsJudgement("bash", { command }, cwd, parseShell(command)), true, `${option} requires judgement for the unknown link`);
+      assert.equal(isSkillRead("bash", { command: `rg ${option} example '${skill}'` }, cwd), false, `${option} searches explicit file contents`);
+    }
     assert.ok(sensitive("read", { path: skill }, cwd, []));
     for (const command of [`cat '${skill}'`, `rg example '${dir}'`, `grep -r example '${dir}'`])
       assert.ok(sensitive("bash", { command }, cwd, [], parseShell(command)) || searchNeedsJudgement("bash", { command }, cwd, parseShell(command)), command);
