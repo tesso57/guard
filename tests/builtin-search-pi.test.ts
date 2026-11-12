@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import test from "node:test";
@@ -117,6 +117,54 @@ test("Pi asks before a broken search executable can trigger a download", { skip:
     rmSync(dir, { recursive: true, force: true });
     rmSync(bin, { recursive: true, force: true });
   }
+});
+
+test("Pi asks before an ELF with a missing dynamic loader can trigger a download", { skip: process.platform !== "linux" }, (t) => {
+  const original = readFileSync(realpathSync("/bin/sh"));
+  if (original.subarray(0, 4).toString("hex") !== "7f454c46" || original[4] !== 2 || original[5] !== 1) return t.skip("requires a little-endian ELF64 /bin/sh");
+  const table = Number(original.readBigUInt64LE(32)), entrySize = original.readUInt16LE(54), count = original.readUInt16LE(56);
+  let offset = 0, length = 0, entry = 0;
+  for (let i = 0; i < count; i++) {
+    const base = table + i * entrySize;
+    if (base + 56 > original.length) return t.skip("program header table is unavailable");
+    if (original.readUInt32LE(base) === 3) { entry = base; offset = Number(original.readBigUInt64LE(base + 8)); length = Number(original.readBigUInt64LE(base + 32)); break; }
+  }
+  if (length < 5 || offset + length > original.length) return t.skip("/bin/sh has no usable PT_INTERP");
+  const missing = `/${"z".repeat(length - 2)}`;
+  if (existsSync(missing)) return t.skip("fixture loader unexpectedly exists");
+  const dir = mkdtempSync(join(tmpdir(), "guard-elf-loader-"));
+  const bin = mkdtempSync(join(process.cwd(), ".guard-elf-loader-"));
+  const project = join(dir, "project"), agent = join(dir, "agent");
+  try {
+    mkdirSync(project);
+    writeFileSync(join(project, "file.txt"), "needle\n");
+    original.fill(0, offset, offset + length);
+    Buffer.from(missing).copy(original, offset);
+    const executable = join(bin, "rg");
+    writeFileSync(executable, original, { mode: 0o755 });
+    assert.equal((spawnSync(executable, ["--version"]).error as NodeJS.ErrnoException | undefined)?.code, "ENOENT");
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(GUARD_|RISK_|PI_|OPENAI_|BASH_FUNC_)/.test(key) && !["BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "RIPGREP_CONFIG_PATH", "GREP_OPTIONS"].includes(key)));
+    Object.assign(env, { HOME: dir, XDG_CONFIG_HOME: join(dir, "config"), PI_CODING_AGENT_DIR: agent, GUARD_TEST_PROJECT: project, GUARD_TEST_TOOL: "grep", PATH: bin });
+    const result = spawnSync(process.execPath, ["--experimental-strip-types", fileURLToPath(new URL("./helpers/builtin-search-child.mjs", import.meta.url))], { env, encoding: "utf8", timeout: 30_000 });
+    assert.equal(result.status, 0, result.stderr);
+    const output = JSON.parse(result.stdout);
+    assert.equal(output.blocked, true);
+    assert.match(JSON.stringify(output.content), /guard/i);
+    assert.equal(existsSync(join(agent, "bin")), false);
+    const unexpected = "/usr/bin/env";
+    if (existsSync(unexpected) && unexpected.length + 1 <= length) {
+      original.fill(0, offset, offset + length);
+      Buffer.from(unexpected).copy(original, offset);
+      original.writeBigUInt64LE(BigInt(unexpected.length + 1), entry + 32);
+      writeFileSync(executable, original, { mode: 0o755 });
+      const unexpectedResult = spawnSync(process.execPath, ["--experimental-strip-types", fileURLToPath(new URL("./helpers/builtin-search-child.mjs", import.meta.url))], { env, encoding: "utf8", timeout: 30_000 });
+      assert.equal(unexpectedResult.status, 0, unexpectedResult.stderr);
+      const unexpectedOutput = JSON.parse(unexpectedResult.stdout);
+      assert.equal(unexpectedOutput.blocked, true);
+      assert.match(JSON.stringify(unexpectedOutput.content), /guard/i);
+      assert.equal(existsSync(join(agent, "bin")), false);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(bin, { recursive: true, force: true }); }
 });
 
 test("Pi skips guard for verified built-in searches inside skill directories", { skip: process.platform === "win32" }, (t) => {

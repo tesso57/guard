@@ -14,6 +14,7 @@ import * as piSdk from "@earendil-works/pi-coding-agent";
 import { grepExplicitPaths, hasGluedPathValue, innerCommands, INTERPRETER_NAMES, isLongOption, isReadOnlyArgv, isShell, nonFlags, normalizeArgv, type Parsed, parseShell, rgDisablesConfig, rgExplicitPaths, rgInfoOnly, rgListsFiles, rgListsTypes, rgSimpleIncludeSuffixes, rgVisibility, unwrapCommandWrappers } from "./shell.ts";
 import { readRegularText } from "./files.ts";
 import { AGENT_DIR } from "./config.ts";
+import { elfPrograms } from "./elf.ts";
 import { containsProtectedRoot, expandGlobFully, trustedDirFor, trustedDirRelative, type TrustedDir, type TrustedDirState, isPiCodePath, PI_CODE_DIRS, gitConfigIsSafe, globHitsOptionLikeName, globMayReach, ignoreFilesReinclude, isFreelyReadable, isHardLinked, isHomeOrAncestor, isInside, isInsideExact, isProjectPath, isProjectHardlinkSafe, isProtectedHardLink, isRiskyProjectFile, memo, pathLikeTokens, pathVariants, protectedReason, protectedRoots, readFallbackVariants, realPath, resolvePath, secretFilesUnder, sensitiveReason, UNKNOWN_PATH } from "./paths.ts";
 
 export const BUILTIN_TOOLS = new Set(["bash", "edit", "write", "read", "grep", "find", "ls"]);
@@ -21,7 +22,7 @@ const INCOMPLETE_DIRECTORY_COMPARISON = "/__guard_incomplete_directory_compariso
 
 /** An unmodifiable root-owned system binary cannot be rewritten through a project hard link. */
 function immutableSystemExecutable(candidate: string, actual: string, st: Stats): boolean {
-  const roots = ["/bin", "/sbin", "/usr/bin", "/usr/sbin"];
+  const roots = ["/bin", "/sbin", "/usr/bin", "/usr/sbin", "/lib", "/lib64", "/usr/lib", "/usr/lib64"];
   if (!st.isFile() || st.uid !== 0 || (st.mode & 0o022) !== 0 ||
       !roots.some((root) => isInsideExact(candidate, root)) || !roots.some((root) => isInsideExact(actual, root))) return false;
   const unwritable = (path: string) => {
@@ -37,18 +38,19 @@ function immutableSystemExecutable(candidate: string, actual: string, st: Stats)
 }
 
 /** Read a bounded prefix only while the opened file remains the inspected regular file. */
-function executablePrefix(path: string, expected: Stats, limit: number): Buffer {
+function executableSlice(path: string, expected: Stats, offset: number, limit: number): Buffer {
   const fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
   try {
     const before = fstatSync(fd);
     if (!before.isFile() || before.dev !== expected.dev || before.ino !== expected.ino || before.size !== expected.size || before.mtimeMs !== expected.mtimeMs || before.ctimeMs !== expected.ctimeMs) throw new Error("executable changed");
     const bytes = Buffer.alloc(limit);
-    const length = readSync(fd, bytes, 0, limit, 0);
+    const length = readSync(fd, bytes, 0, limit, offset);
     const after = fstatSync(fd);
     if (after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs) throw new Error("executable changed during inspection");
     return bytes.subarray(0, length);
   } finally { closeSync(fd); }
 }
+const executablePrefix = (path: string, expected: Stats, limit: number) => executableSlice(path, expected, 0, limit);
 
 /** Recognize structurally plausible native headers without executing the file. */
 function hasNativeExecutableHeader(header: Buffer, size: number): boolean {
@@ -241,6 +243,30 @@ export function inspectBuiltinSearchExecutable(tool: string, cwd: string, piVers
   const selected: unknown[] = [tool, local, path, offline, piVersion, process.cwd()];
   let multipleLinks = false;
   let interpreterRisk: string | undefined;
+  let elfReadBudget = 1_048_576;
+  const readElf = (file: string, st: Stats, offset: number, length: number) => {
+    if (length > elfReadBudget) throw new Error("ELF inspection budget exceeded");
+    elfReadBudget -= length;
+    return executableSlice(file, st, offset, length);
+  };
+  const inspectElfLoader = (file: string, st: Stats, header: Buffer): string | undefined => {
+    if (process.platform !== "linux" || header.subarray(0, 4).toString("hex") !== "7f454c46") return undefined;
+    const programs = elfPrograms(header, st.size, (offset, length) => readElf(file, st, offset, length));
+    if (!programs) throw new Error("ELF program headers are not verifiable");
+    if (!programs.interpreter) return undefined;
+    const loader = programs.interpreter;
+    accessSync(loader, constants.X_OK);
+    const loaderStat = statSync(loader), actual = realPath(loader);
+    if (!loaderStat.isFile()) throw new Error("ELF loader is not a file");
+    const loaderHeader = executablePrefix(loader, loaderStat, 512);
+    if (loaderHeader.subarray(0, 4).toString("hex") !== "7f454c46" || !hasNativeExecutableHeader(loaderHeader, loaderStat.size)) throw new Error("ELF loader is not verifiable");
+    const loaderPrograms = elfPrograms(loaderHeader, loaderStat.size, (offset, length) => readElf(loader, loaderStat, offset, length));
+    if (!loaderPrograms || loaderPrograms.interpreter) throw new Error("ELF loader program headers are not verifiable");
+    selected.push(["elf-loader", loader, actual, loaderStat.dev, loaderStat.ino, loaderStat.mode, loaderStat.nlink, loaderStat.size, loaderStat.mtimeMs, loaderStat.ctimeMs]);
+    if (!/^ld[^/]*\.so(?:\.[A-Za-z0-9._-]+)?$/.test(basename(loader)) || !immutableSystemExecutable(loader, actual, loaderStat))
+      return "the built-in search executable uses an untrusted ELF loader";
+    return undefined;
+  };
   const inspect = (candidate: string, requireExecutable: boolean): boolean => {
     try {
       if (requireExecutable) accessSync(candidate, constants.X_OK);
@@ -271,10 +297,12 @@ export function inspectBuiltinSearchExecutable(tool: string, cwd: string, piVers
             if (prefix.length >= 2 && prefix[0] === 35 && prefix[1] === 33) interpreterRisk = "the built-in search executable uses a nested script interpreter";
             else if (!hasNativeExecutableHeader(prefix, interpreterStat.size))
               interpreterRisk = "the built-in search interpreter's executable format cannot be verified";
+            else interpreterRisk = inspectElfLoader(interpreter, interpreterStat, prefix);
             if (basename(resolved) === "env" || [interpreter, resolved].some((p) => roots.some((root) => isInside(p, root))) ||
                 (interpreterStat.nlink > 1 && !immutableSystemExecutable(interpreter, resolved, interpreterStat)))
               interpreterRisk ??= "the built-in search executable uses an unverified interpreter";
           } else if (!hasNativeExecutableHeader(header, st.size)) interpreterRisk = "the built-in search executable's format cannot be verified";
+          else interpreterRisk = inspectElfLoader(candidate, st, header);
         } catch { interpreterRisk = "cannot verify the built-in search executable's interpreter"; }
       }
       return true;
