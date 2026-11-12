@@ -21,11 +21,11 @@ test("Pi can read a skill without guard handling the call", async () => {
     await mkdir(externalSkillDir, { recursive: true });
     await mkdir(join(dir, ".ssh"));
     await writeFile(join(dir, ".ssh", "id_rsa"), "secret-not-a-skill");
-    await writeFile(join(skillDir, "SKILL.md"), "skill-read-fixture");
+    await writeFile(join(skillDir, "SKILL.md"), "skill-read-fixture\nhttps://example.test/path\n");
     await writeFile(join(externalSkillDir, "SKILL.md"), "---\nname: registered\ndescription: Test skill\n---\nregistered-skill-fixture\n");
     const fake = createFakeModel([
       { content: [{ type: "toolCall", id: "skill", name: "read", arguments: { path: ".agents/skills/fixture/SKILL.md" } }] },
-      { content: [{ type: "toolCall", id: "skill-grep", name: "bash", arguments: { command: "grep skill-read-fixture .agents/skills/fixture/SKILL.md" } }] },
+      { content: [{ type: "toolCall", id: "skill-grep", name: "bash", arguments: { command: "grep -n -e 'https://example.test/path' .agents/skills/fixture/SKILL.md" } }] },
       { content: [{ type: "toolCall", id: "registered-skill", name: "read", arguments: { path: join(externalSkillDir, "SKILL.md") } }] },
       { content: [{ type: "toolCall", id: "retargeted-skill", name: "read", arguments: { path: join(externalSkillDir, "SKILL.md") } }] },
       { content: [{ type: "text", text: "done" }] },
@@ -58,7 +58,7 @@ test("Pi can read a skill without guard handling the call", async () => {
       const result = session.messages.find((message) => message.role === "toolResult" && message.toolCallId === "skill");
       assert.ok(result && result.role === "toolResult" && !result.isError && JSON.stringify(result.content).includes("skill-read-fixture"));
       const grep = session.messages.find((message) => message.role === "toolResult" && message.toolCallId === "skill-grep");
-      assert.ok(grep && grep.role === "toolResult" && !grep.isError && JSON.stringify(grep.content).includes("skill-read-fixture"));
+      assert.ok(grep && grep.role === "toolResult" && !grep.isError && JSON.stringify(grep.content).includes("https://example.test/path"));
       const external = session.messages.find((message) => message.role === "toolResult" && message.toolCallId === "registered-skill");
       assert.ok(external && external.role === "toolResult" && !external.isError && JSON.stringify(external.content).includes("registered-skill-fixture"));
       const retargeted = session.messages.find((message) => message.role === "toolResult" && message.toolCallId === "retargeted-skill");

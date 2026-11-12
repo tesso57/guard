@@ -28,9 +28,13 @@ test("only direct read-only access within standard skill directories bypasses gu
     assert.equal(isSkillRead("bash", { command: `cat '${skill}' | head -n 1` }, cwd), true);
     assert.equal(isSkillRead("bash", { command: `cat '${skill}' | sed -n '1p'` }, cwd), true);
     assert.equal(isSkillRead("bash", { command: `grep -n example '${skill}'` }, cwd), true);
+    assert.equal(isSkillRead("bash", { command: `grep -n 'example/path' '${skill}'` }, cwd), true);
+    assert.equal(isSkillRead("bash", { command: `grep -n -e 'https://example.test/path' '${skill}' | head -n 1` }, cwd), true);
     assert.equal(isSkillRead("bash", { command: `grep -r example '${join(cwd, ".agents", "skills", "example")}'` }, cwd), true);
     assert.equal(isSkillRead("bash", { command: `grep -f '${outside}' '${skill}'` }, cwd), false);
     assert.equal(isSkillRead("bash", { command: `grep -if '${outside}' '${skill}'` }, cwd), false);
+    assert.equal(isSkillRead("bash", { command: `grep -e example '${skill}' '${outside}'` }, cwd), false);
+    assert.equal(isSkillRead("bash", { command: `grep --exclude-from='${outside}' example '${skill}'` }, cwd), false);
     assert.equal(isSkillRead("bash", { command: `grep -R example '${join(cwd, ".agents", "skills", "example")}'` }, cwd), false);
     const previousOptions = process.env.GREP_OPTIONS;
     process.env.GREP_OPTIONS = "--version";
