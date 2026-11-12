@@ -7,6 +7,10 @@ import { isSkillRead } from "../extensions/guard/skill-read.ts";
 import { inspectBuiltinSearchExecutable, searchNeedsJudgement, sensitive } from "../extensions/guard/policy.ts";
 import { isReadOnlyArgv, parseShell, rgExplicitPaths } from "../extensions/guard/shell.ts";
 
+const isolatedEnv = new Map(Object.entries(process.env).filter(([key]) => key.startsWith("BASH_FUNC_") || ["RIPGREP_CONFIG_PATH", "GREP_OPTIONS", "BASH_ENV", "ENV", "BASHOPTS", "SHELLOPTS"].includes(key)));
+for (const key of isolatedEnv.keys()) delete process.env[key];
+test.after(() => { for (const [key, value] of isolatedEnv) if (value !== undefined) process.env[key] = value; });
+
 test("ripgrep patterns and option values are not mistaken for search paths", () => {
   assert.deepEqual(rgExplicitPaths(["rg", "-e", "/skill/SKILL.md"]), []);
   assert.deepEqual(rgExplicitPaths(["rg", "-g", "*.md", "pattern", "/skill"]), ["/skill"]);
