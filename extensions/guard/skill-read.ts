@@ -5,7 +5,7 @@ import { types as utilTypes } from "node:util";
 import { AGENT_DIR } from "./config.ts";
 import { clearPathCache, isInsideExact, pathVariants, realPath, resolvePath } from "./paths.ts";
 import { inputPaths, inspectExecutablePath, usesRipgrepConfig } from "./policy.ts";
-import { grepExplicitPaths, isReadOnlyArgv, parseShell, rgExplicitPaths } from "./shell.ts";
+import { grepExplicitPaths, isReadOnlyArgv, parseShell, rgExplicitPaths, rgReadsStdin } from "./shell.ts";
 
 export type RegisteredSkill = { path: string; target: string };
 
@@ -34,7 +34,7 @@ export function isSkillRead(tool: string, input: unknown, cwd: string, registere
     if (!parsed.ok || parsed.dynamic.length || parsed.globs.length || parsed.writes.length || parsed.heredocBodies.length || !parsed.subs.length) return false;
     const grepTargets: string[] = [];
     const pipeline = parsed.subs.length > 1 && parsed.operators.length === parsed.subs.length - 1 && parsed.operators.every((operator) => operator === "|");
-    let pipedGrep = false;
+    let pipedSearch = false;
     for (const [index, sub] of parsed.subs.entries()) {
       if (sub.assigns.length || sub.reads.length || sub.heredocs.length || !["cat", "head", "tail", "sed", "rg", "grep"].includes(sub.argv[0]) || !isReadOnlyArgv(sub.argv)) return false;
       if (sub.argv.slice(1).some((arg) => arg === "-" || /^-f/.test(arg) || /^--file(?:=|$)/.test(arg))) return false;
@@ -42,16 +42,20 @@ export function isSkillRead(tool: string, input: unknown, cwd: string, registere
       if (sub.argv[0] === "grep") {
         const paths = grepExplicitPaths(sub.argv, pipeline && index > 0);
         if (!paths) return false;
-        if (!paths.length) pipedGrep = true;
+        if (!paths.length) pipedSearch = true;
         grepTargets.push(...paths.flatMap((path) => pathVariants(cwd, path.startsWith("-") ? `./${path}` : path)));
       }
       if (sub.argv[0] === "rg") {
         const explicit = rgExplicitPaths(sub.argv);
-        if (!explicit?.length || explicit.some((path) => !inside(resolvePath(cwd, path)))) return false;
+        if (!explicit) return false;
+        if (!explicit.length) {
+          if (!pipeline || index === 0 || !rgReadsStdin(sub.argv)) return false;
+          pipedSearch = true;
+        } else if (explicit.some((path) => !inside(resolvePath(cwd, path)))) return false;
       }
     }
     if (usesRipgrepConfig(parsed) || inspectExecutablePath(parsed, cwd).risk) return false;
-    if (pipedGrep) {
+    if (pipedSearch) {
       const first = parsed.subs[0];
       if (!["cat", "grep", "rg"].includes(first.argv[0])) return false;
       const source = inputPaths("bash", { command: `${field.value}\0source` }, cwd, { ...parsed, subs: [first], subcommands: [first.argv] });

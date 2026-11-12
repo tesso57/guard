@@ -23,9 +23,20 @@ test("ripgrep visibility and guard decisions agree on representative searches", 
     writeFileSync(join(project, ".env"), "needle\n");
     writeFileSync(join(project, ".ignore"), "!.env\n");
     writeFileSync(join(project, "visible.txt"), "needle\n");
-    const { parseShell } = await import("../extensions/guard/shell.ts");
+    const { parseShell, rgReadsStdin } = await import("../extensions/guard/shell.ts");
     const { safeAllow, searchNeedsJudgement, sensitive } = await import("../extensions/guard/policy.ts");
     const { clearPathCache, protectedRoots } = await import("../extensions/guard/paths.ts");
+    for (const [args, readsInput] of [
+      [["needle"], true],
+      [["-e", "needle"], true],
+      [["--files"], false],
+      [["--type-list"], false],
+    ] as const) {
+      const result = spawnSync("rg", ["--no-config", ...args], { cwd: project, input: "needle\n", encoding: "utf8" });
+      assert.equal(result.status, 0);
+      assert.equal(result.stdout.includes("needle"), readsInput);
+      assert.equal(rgReadsStdin(["rg", "--no-config", ...args]), readsInput);
+    }
     const cases = [
       { options: [], expectSafe: false },
       { options: ["-u"], expectSafe: true },

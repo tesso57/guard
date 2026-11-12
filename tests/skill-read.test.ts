@@ -31,6 +31,11 @@ test("only direct read-only access within standard skill directories bypasses gu
     assert.equal(isSkillRead("bash", { command: `grep -n 'example/path' '${skill}'` }, cwd), true);
     assert.equal(isSkillRead("bash", { command: `grep -n -e 'https://example.test/path' '${skill}' | head -n 1` }, cwd), true);
     assert.equal(isSkillRead("bash", { command: `cat '${skill}' | grep example` }, cwd), true);
+    assert.equal(isSkillRead("bash", { command: `cat '${skill}' | rg example` }, cwd), true);
+    assert.equal(isSkillRead("bash", { command: `cat '${skill}' | rg -e 'example/path'` }, cwd), true);
+    assert.equal(isSkillRead("bash", { command: `cat '${skill}' | rg --files` }, cwd), false);
+    assert.equal(isSkillRead("bash", { command: `cat '${skill}' | rg --ignore-file '${outside}' example` }, cwd), false);
+    assert.equal(isSkillRead("bash", { command: `cat '${skill}' && rg example` }, cwd), false);
     assert.equal(isSkillRead("bash", { command: `cat '${skill}' | grep example | head -n 1` }, cwd), true);
     assert.equal(isSkillRead("bash", { command: `cat '${skill}' | grep example\n` }, cwd), true);
     assert.equal(isSkillRead("bash", { command: `cat '${skill}' && grep example` }, cwd), false);

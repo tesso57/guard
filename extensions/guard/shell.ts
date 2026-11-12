@@ -781,6 +781,14 @@ export function rgExplicitPaths(a: string[]): string[] | undefined {
   return options.listsFiles || options.patternProvided ? options.operands : options.operands.slice(1);
 }
 
+/** With piped input, a search without file operands reads stdin; listing modes do not. */
+export function rgReadsStdin(a: string[]): boolean {
+  if (a[0] !== "rg") return false;
+  const options = inspectRgOptions(a);
+  if (!options.known || options.listsFiles || options.listsTypes) return false;
+  return options.patternProvided ? options.operands.length === 0 : options.operands.length === 1;
+}
+
 /** Conservative subset of positive, basename-only globs whose suffixes can exclude files. */
 export function rgSimpleIncludeSuffixes(a: string[]): string[] | undefined {
   if (a[0] !== "rg") return undefined;
