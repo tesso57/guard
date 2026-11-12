@@ -881,6 +881,8 @@ export function isReadOnlyArgv(raw: string[]): boolean {
     case "egrep":
     case "fgrep":
       // -R and --dereference-recursive follow symlinks out of the project
+      // The restricted parser distinguishes options from pattern values such as `-e -R`.
+      if (grepExplicitPaths(["grep", ...a.slice(1)], true) !== undefined) return true;
       return !hasShort(a, "R") && !hasLong(a, "--dereference-recursive");
     case "ps":
       // BSD-style `e` (ps e, ps axeww) prints every process's environment, including API keys
