@@ -690,7 +690,7 @@ const RG_LONG_VALUES = new Set([
   "encoding", "engine", "file", "glob", "iglob", "max-columns", "max-count", "max-depth", "maxdepth", "max-filesize", "path-separator", "regexp",
   "replace", "sort", "sortr", "threads", "type", "type-not", "type-add", "type-clear", "dfa-size-limit", "regex-size-limit",
 ]);
-function inspectRgOptions(a: string[]): { known: boolean; listsFiles: boolean; listsTypes: boolean; noConfig: boolean; noIgnore: boolean; noIgnoreVcs: boolean; noIgnoreDot: boolean; hidden: boolean; unrestricted: number; patternProvided: boolean; fileTypes: boolean; operands: string[]; globs: string[] } {
+function inspectRgOptions(a: string[]): { known: boolean; listsFiles: boolean; listsTypes: boolean; noConfig: boolean; noIgnore: boolean; noIgnoreVcs: boolean; noIgnoreDot: boolean; hidden: boolean; unrestricted: number; patternProvided: boolean; patternFile: boolean; fileTypes: boolean; operands: string[]; globs: string[] } {
   let listsFiles = false;
   let listsTypes = false;
   let noConfig = false;
@@ -699,10 +699,11 @@ function inspectRgOptions(a: string[]): { known: boolean; listsFiles: boolean; l
   let hidden = false;
   let unrestricted = 0;
   let patternProvided = false;
+  let patternFile = false;
   let fileTypes = false;
   const operands: string[] = [];
   const globs: string[] = [];
-  const invalid = () => ({ known: false, listsFiles: false, listsTypes: false, noConfig: false, noIgnore: false, noIgnoreVcs: false, noIgnoreDot: false, hidden: false, unrestricted: 0, patternProvided: false, fileTypes: false, operands: [], globs: [] });
+  const invalid = () => ({ known: false, listsFiles: false, listsTypes: false, noConfig: false, noIgnore: false, noIgnoreVcs: false, noIgnoreDot: false, hidden: false, unrestricted: 0, patternProvided: false, patternFile: false, fileTypes: false, operands: [], globs: [] });
   for (let i = 1; i < a.length; i++) {
     const t = a[i];
     if (t === "--") { operands.push(...a.slice(i + 1)); break; }
@@ -723,6 +724,7 @@ function inspectRgOptions(a: string[]): { known: boolean; listsFiles: boolean; l
       }
       if (!RG_LONG_VALUES.has(name)) return invalid();
       if (name === "regexp" || name === "file") patternProvided = true;
+      if (name === "file") patternFile = true;
       if (["type", "type-not", "type-add", "type-clear"].includes(name)) fileTypes = true;
       if (eq < 0 && i + 1 >= a.length) return invalid();
       const value = eq < 0 ? a[++i] : t.slice(eq + 1);
@@ -744,7 +746,13 @@ function inspectRgOptions(a: string[]): { known: boolean; listsFiles: boolean; l
       if (c === ".") hidden = true;
     }
   }
-  return { known: true, listsFiles, listsTypes, noConfig, noIgnore, noIgnoreVcs, noIgnoreDot, hidden, unrestricted, patternProvided, fileTypes, operands, globs };
+  return { known: true, listsFiles, listsTypes, noConfig, noIgnore, noIgnoreVcs, noIgnoreDot, hidden, unrestricted, patternProvided, patternFile, fileTypes, operands, globs };
+}
+
+/** Pattern files are additional inputs, unlike pattern option values. */
+export function rgUsesPatternFile(a: string[]): boolean {
+  const options = inspectRgOptions(a);
+  return a[0] === "rg" && options.known && options.patternFile;
 }
 
 /** `--files` lists paths instead of searching their contents, when it is an actual option. */

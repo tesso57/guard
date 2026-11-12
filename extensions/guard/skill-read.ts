@@ -5,7 +5,7 @@ import { types as utilTypes } from "node:util";
 import { AGENT_DIR } from "./config.ts";
 import { clearPathCache, isInsideExact, isProjectHardlinkSafe, isProjectPath, pathVariants, realPath, resolvePath, secretFilesUnder } from "./paths.ts";
 import { inputPaths, inspectExecutablePath, usesRipgrepConfig } from "./policy.ts";
-import { grepExplicitPaths, isReadOnlyArgv, parseShell, rgExplicitPaths, rgListsFiles, rgReadsStdin } from "./shell.ts";
+import { grepExplicitPaths, isReadOnlyArgv, parseShell, rgExplicitPaths, rgListsFiles, rgReadsStdin, rgUsesPatternFile } from "./shell.ts";
 
 export type RegisteredSkill = { path: string; target: string };
 
@@ -38,8 +38,9 @@ export function isSkillRead(tool: string, input: unknown, cwd: string, registere
     let pipedSearch = false;
     for (const [index, sub] of parsed.subs.entries()) {
       if (sub.assigns.length || sub.reads.length || sub.heredocs.length || !["cat", "head", "tail", "sed", "rg", "grep"].includes(sub.argv[0]) || !isReadOnlyArgv(sub.argv)) return false;
-      if (sub.argv.slice(1).some((arg) => arg === "-" || /^-f/.test(arg) || /^--file(?:=|$)/.test(arg))) return false;
-      if (sub.argv[0] === "grep" && (process.env.GREP_OPTIONS || sub.argv.slice(1).some((arg) => /^-[^-]*f/.test(arg)))) return false;
+      if (sub.argv.slice(1).includes("-")) return false;
+      if (sub.argv[0] === "grep" && process.env.GREP_OPTIONS) return false;
+      if (sub.argv[0] === "rg" && rgUsesPatternFile(sub.argv)) return false;
       if (sub.argv[0] === "grep") {
         const paths = grepExplicitPaths(sub.argv, pipeline && index > 0);
         if (!paths) return false;
