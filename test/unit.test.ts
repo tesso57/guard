@@ -189,6 +189,7 @@ if (process.platform !== "win32") {
       process.env.PI_OFFLINE = value;
       const offline = inspectBuiltinSearchExecutable("grep", PROJ);
       ok(`policy: offline mode prevents the built-in search download (${value})`, !offline.risk && offline.fingerprint !== missing.fingerprint);
+      ok(`policy: verified Pi 1.5.2 respects offline mode (${value})`, !inspectBuiltinSearchExecutable("grep", PROJ, "1.5.2").risk);
       ok(`policy: offline behavior is not assumed for unverified Pi versions (${value})`, !!inspectBuiltinSearchExecutable("grep", PROJ, "0.54.0").risk && !!inspectBuiltinSearchExecutable("grep", PROJ, "1.5.1").risk);
     }
     process.env.PI_OFFLINE = "false";

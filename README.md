@@ -48,7 +48,7 @@ Listing skill file names with `rg --files` does not require inspecting their con
 
 Pi's built-in `grep` and `find` run `rg` and `fd` (or `fdfind`) respectively, and can download them if absent. A candidate may fail to start, so guard inspects later `PATH` entries and the `fdfind` fallback too. If any candidate is in the project, a temporary directory, or Pi's managed bin directory, is found through a relative `PATH` entry, has unverified hard links, or cannot be verified, guard asks for confirmation even when the model allows the search. On Windows these built-in searches also require confirmation because their executable lookup is not verified. Guard rechecks executable identity while a judgement or confirmation is pending.
 
-For Pi 1.5.0, guard recognizes `PI_OFFLINE=1` (also `true` or `yes`, case-insensitive): when the search executable is absent, Pi reports it as unavailable without downloading it. Other Pi versions retain the confirmation because their offline download behavior has not been verified.
+For Pi 1.5.0 and 1.5.2, guard recognizes `PI_OFFLINE=1` (also `true` or `yes`, case-insensitive): when the search executable is absent, Pi reports it as unavailable without downloading it. Other Pi versions retain the confirmation because their offline download behavior has not been verified.
 
 For script candidates, guard checks the interpreter path and its identity without running it; missing, relative, untrusted, `env`-resolved, nested script, or unrecognized interpreter formats require confirmation. Guard also checks that native executable headers are plausible for the current OS. On Linux it inspects bounded ELF program headers and verifies the dynamic loader is an unmodifiable system loader. On macOS it inspects Mach-O load commands and verifies `/usr/lib/dyld`; embedded dyld environment settings require confirmation. Other native startup failures, including missing shared libraries or platform-specific loader problems, may still cause Pi to attempt a download; these checks do not establish that every candidate can start.
 
@@ -214,6 +214,8 @@ Inside a vouched-for folder, reads are free like reads inside the project, and p
 The optional `access` field accepts `"read"` or `"write"` and defaults to `"write"` when omitted. Events with other values are ignored. Grants for overlapping folders are additive: a read-only child grant does not revoke a parent folder's write grant. Re-registering the same folder replaces its previous grant, including when the new registration uses a symlink to that folder.
 
 Folder grants belong to the current guard instance and are not inherited by another guard instance. Extensions should emit their trust events on `session_start`.
+
+For notes stored inside the project's protected `.pi` directory, a write grant for the exact parent folder permits the built-in `write` and `edit` tools to update `.pi/_notes/<sessionId>/note.md` and `.pi/_notes/<sessionId>/factory/{plan,review,learnings}.md`. Session IDs may contain letters, digits, `_` and `-`. Other `.pi` files and shell writes remain protected. To avoid bypassing that protection, these particular note paths cannot traverse symlinks or be hard-linked, even with a grant; hard-linked files in other trusted folders retain the behavior described above.
 
 ## Commands
 

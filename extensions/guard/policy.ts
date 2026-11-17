@@ -444,8 +444,8 @@ export function inspectBuiltinSearchExecutable(tool: string, cwd: string, piVers
       }
     }
     const fingerprint = createHash("sha256").update(JSON.stringify(selected)).digest("hex");
-    // Pi 1.5.0 checks PI_OFFLINE before downloading a missing search tool; do not assume that for other versions.
-    const offlinePreventsDownload = piVersion === "1.5.0" && ["1", "true", "yes"].includes(offline.toLowerCase());
+    // These Pi versions check PI_OFFLINE before downloading a missing search tool; do not assume that for others.
+    const offlinePreventsDownload = ["1.5.0", "1.5.2"].includes(piVersion) && ["1", "true", "yes"].includes(offline.toLowerCase());
     if (!found && !risk && !offlinePreventsDownload) risk = "the built-in search tool may download an executable";
     return { risk, fingerprint, available: found };
   } catch { return { risk: "cannot inspect the built-in search executable" }; }
@@ -927,12 +927,26 @@ function strictlyReadOnly(parsed: Parsed | undefined, writes: string[]): boolean
   return !!parsed && parsed.ok && !parsed.dynamic.length && !writes.length && parsed.subcommands.every(isReadOnlyArgv);
 }
 
-export function hardDeny(tool: string, input: any, cwd: string, roots: string[], parsed?: Parsed, depth = 0): string | undefined {
+/** A note grant only opens the four documented files, with no path aliases or hard links. */
+function trustedProjectNote(p: string, cwd: string, roots: string[], state?: TrustedDirState): boolean {
+  if (!state || isHomeOrAncestor(cwd)) return false;
+  const project = resolve(cwd);
+  const rel = relative(project, p);
+  if (!/^\.pi\/_notes\/[A-Za-z0-9_-]+\/(?:note\.md|factory\/(?:plan|review|learnings)\.md)$/.test(rel)) return false;
+  if (realPath(p) !== join(realPath(project), rel) || isHardLinked(p)) return false;
+  const projectPi = join(project, ".pi");
+  if (protectedReason(p, roots.filter((root) => root !== projectPi))) return false;
+  return state.trustedDirs.some((dir) => !dir.ignored && dir.write && trustedDirRelative(p, dir, state) === basename(p)
+    && state.trustedDirTargets.get(dir.path) === realPath(dir.path) && realPath(dir.path) === dirname(realPath(p)));
+}
+
+export function hardDeny(tool: string, input: any, cwd: string, roots: string[], parsed?: Parsed, depth = 0, trustedDirs?: TrustedDirState): string | undefined {
   const { reads, writes } = inputPaths(tool, input, cwd, parsed);
   const unlinkOnly = tool === "bash" && !!parsed && parsed.ok && !parsed.dynamic.length && !parsed.writes.length && parsed.subcommands.length > 0 && parsed.subcommands.every((a) => ["rm", "unlink"].includes(normalizeArgv(a, "deny").argv[0]));
+  const directNote = ["write", "edit"].includes(tool) && typeof input?.path === "string" ? resolvePath(cwd, input.path) : undefined;
   for (const w of writes) {
     const r = protectedReason(w, roots);
-    if (r) return `writes to a ${r}`;
+    if (r && !(directNote && realPath(w) === realPath(directNote) && trustedProjectNote(directNote, cwd, roots, trustedDirs))) return `writes to a ${r}`;
     if (basename(w).toLowerCase() === "authorized_keys" || basename(realPath(w)).toLowerCase() === "authorized_keys") return "writes to authorized_keys";
     if (!unlinkOnly && isProtectedHardLink(w, roots)) return "writes through a hard link to protected state";
   }

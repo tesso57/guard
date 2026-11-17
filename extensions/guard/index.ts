@@ -163,7 +163,7 @@ function filesystemPolicyHash(tool: string, input: unknown, cwd: string, session
   const paths = inputPaths(tool, input, cwd, parsed);
   const builtinExecutable = checked ? checked.builtinExecutable : inspectBuiltinSearchExecutable(tool, cwd);
   return stableHash({
-    hard: checked ? checked.hard : hardDeny(tool, input, cwd, roots, parsed),
+    hard: checked ? checked.hard : hardDeny(tool, input, cwd, roots, parsed, 0, trustedDirs),
     sens: checked ? checked.sens : sensitive(tool, input, cwd, roots, parsed, trustedDirs),
     uncertainSearch: checked ? checked.uncertainSearch : searchNeedsJudgement(tool, input, cwd, parsed, trustedDirs, roots) || !!builtinExecutable.risk,
     builtinExecutable,
@@ -639,7 +639,7 @@ export default function (pi: ExtensionAPI) {
       ? Promise.resolve({ ...base, action: "block", source: "error", reasons: ["rules or settings changed repeatedly during judgement"] })
       : assess(callId, tool, input, ctx, { ...opts, stateRechecks: (opts.stateRechecks ?? 0) + 1 });
 
-    const hard = hardDeny(tool, input, ctx.cwd, roots, parsed);
+    const hard = hardDeny(tool, input, ctx.cwd, roots, parsed, 0, trustedDirs);
     if (hard) return { ...base, action: "block", source: "hard-deny", reasons: [hard] };
 
     syncProject(ctx);
@@ -1190,7 +1190,7 @@ export default function (pi: ExtensionAPI) {
           recordAudit(ctx, { ...rec, preview: `${tool} [arguments withheld: executable lookup changed during confirmation]`, action: "block", source: "error", reasons: ["executable lookup changed during confirmation"], final: "blocked" });
           return onBlocked("executable lookup changed during confirmation");
         }
-        const hard = hardDeny(tool, input, ctx.cwd, protectedRoots(ctx.cwd, ctx.sessionManager.getSessionDir()), currentParsed);
+        const hard = hardDeny(tool, input, ctx.cwd, protectedRoots(ctx.cwd, ctx.sessionManager.getSessionDir()), currentParsed, 0, trustedDirs);
         syncProject(ctx);
         store.syncSession(ctx.sessionManager.getBranch() as any[]);
         const currentRule = store.find(tool, input, ctx.cwd, currentParsed);
