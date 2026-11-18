@@ -586,8 +586,21 @@ export function sensitiveReason(abs: string): string | undefined {
  * Places the agent must never modify: guard's rules and pi's state, pi session logs,
  * and every project resource pi loads after project trust (.pi/*, .agents/skills).
  */
+/** Match artifact's Git-first project lookup, without executing Git configuration. */
+export function artifactProjectRoot(cwd: string): string {
+  const start = resolve(cwd);
+  let piRoot: string | undefined;
+  for (let dir = start; dir !== HOME && dirname(dir) !== dir; dir = dirname(dir)) {
+    if (existsSync(join(dir, ".git"))) return dir;
+    if (!piRoot) {
+      try { if (statSync(join(dir, ".pi")).isDirectory()) piRoot = dir; } catch { /* no project .pi here */ }
+    }
+  }
+  return piRoot ?? start;
+}
+
 export function protectedRoots(cwd: string, sessionDir?: string): string[] {
-  const roots = [AGENT_DIR, join(cwd, ".pi")];
+  const roots = [AGENT_DIR, join(cwd, ".pi"), join(artifactProjectRoot(cwd), ".pi")];
   for (let d = cwd; ; d = dirname(d)) {
     roots.push(join(d, ".agents"));
     if (dirname(d) === d) break;

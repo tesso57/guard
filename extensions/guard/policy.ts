@@ -16,7 +16,7 @@ import { readRegularText } from "./files.ts";
 import { AGENT_DIR } from "./config.ts";
 import { elfPrograms } from "./elf.ts";
 import { machoLoaders } from "./macho.ts";
-import { containsProtectedRoot, expandGlobFully, trustedDirFor, trustedDirRelative, type TrustedDir, type TrustedDirState, isPiCodePath, PI_CODE_DIRS, gitConfigIsSafe, globHitsOptionLikeName, globMayReach, ignoreFilesReinclude, isFreelyReadable, isHardLinked, isHomeOrAncestor, isInside, isInsideExact, isProjectPath, isProjectHardlinkSafe, isProtectedHardLink, isRiskyProjectFile, memo, pathLikeTokens, pathVariants, protectedReason, protectedRoots, readFallbackVariants, realPath, resolvePath, secretFilesUnder, sensitiveReason, UNKNOWN_PATH } from "./paths.ts";
+import { artifactProjectRoot, containsProtectedRoot, expandGlobFully, trustedDirFor, trustedDirRelative, type TrustedDir, type TrustedDirState, isPiCodePath, PI_CODE_DIRS, gitConfigIsSafe, globHitsOptionLikeName, globMayReach, ignoreFilesReinclude, isFreelyReadable, isHardLinked, isHomeOrAncestor, isInside, isInsideExact, isProjectPath, isProjectHardlinkSafe, isProtectedHardLink, isRiskyProjectFile, memo, pathLikeTokens, pathVariants, protectedReason, protectedRoots, readFallbackVariants, realPath, resolvePath, secretFilesUnder, sensitiveReason, UNKNOWN_PATH } from "./paths.ts";
 
 export const BUILTIN_TOOLS = new Set(["bash", "edit", "write", "read", "grep", "find", "ls"]);
 const INCOMPLETE_DIRECTORY_COMPARISON = "/__guard_incomplete_directory_comparison__";
@@ -940,13 +940,29 @@ function trustedProjectNote(p: string, cwd: string, roots: string[], state?: Tru
     && state.trustedDirTargets.get(dir.path) === realPath(dir.path) && realPath(dir.path) === dirname(realPath(p)));
 }
 
+/** Artifact grants only cover ordinary artifact sources and Markdown attachments. */
+function trustedProjectArtifact(p: string, cwd: string, roots: string[], write: boolean, state?: TrustedDirState): boolean {
+  if (!state || isHomeOrAncestor(cwd)) return false;
+  const project = artifactProjectRoot(cwd);
+  const artifactRoot = join(project, ".pi", "_artifacts");
+  const rel = relative(artifactRoot, p);
+  const parts = rel.split(/[\\/]/);
+  const id = parts.shift() ?? "";
+  if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(id) || id === "shared" || id.startsWith("template-")) return false;
+  if (!(parts.length === 1 && parts[0] === "index.tsx") && !(parts.length > 0 && parts.every((part) => /^[A-Za-z0-9_][A-Za-z0-9_. -]*$/.test(part)) && /\.md$/i.test(parts.at(-1)!))) return false;
+  if (isRiskyProjectFile(rel) || realPath(p) !== join(realPath(artifactRoot), rel) || realPath(artifactRoot) !== join(realPath(project), ".pi", "_artifacts") || isHardLinked(p)) return false;
+  if (protectedReason(p, roots.filter((root) => root !== join(project, ".pi")))) return false;
+  return state.trustedDirs.some((dir) => !dir.ignored && (!write || dir.write) && dir.path === artifactRoot
+    && state.trustedDirTargets.get(dir.path) === realPath(artifactRoot) && trustedDirRelative(p, dir, state) === rel);
+}
+
 export function hardDeny(tool: string, input: any, cwd: string, roots: string[], parsed?: Parsed, depth = 0, trustedDirs?: TrustedDirState): string | undefined {
   const { reads, writes } = inputPaths(tool, input, cwd, parsed);
   const unlinkOnly = tool === "bash" && !!parsed && parsed.ok && !parsed.dynamic.length && !parsed.writes.length && parsed.subcommands.length > 0 && parsed.subcommands.every((a) => ["rm", "unlink"].includes(normalizeArgv(a, "deny").argv[0]));
   const directNote = ["write", "edit"].includes(tool) && typeof input?.path === "string" ? resolvePath(cwd, input.path) : undefined;
   for (const w of writes) {
     const r = protectedReason(w, roots);
-    if (r && !(directNote && realPath(w) === realPath(directNote) && trustedProjectNote(directNote, cwd, roots, trustedDirs))) return `writes to a ${r}`;
+    if (r && !(directNote && realPath(w) === realPath(directNote) && (trustedProjectNote(directNote, cwd, roots, trustedDirs) || trustedProjectArtifact(directNote, cwd, roots, true, trustedDirs)))) return `writes to a ${r}`;
     if (basename(w).toLowerCase() === "authorized_keys" || basename(realPath(w)).toLowerCase() === "authorized_keys") return "writes to authorized_keys";
     if (!unlinkOnly && isProtectedHardLink(w, roots)) return "writes through a hard link to protected state";
   }
@@ -1214,7 +1230,8 @@ export function sensitive(tool: string, input: any, cwd: string, roots: string[]
   for (const p of [...reads, ...writes]) {
     const r = sensitiveReason(p);
     if (r) return r;
-    if (protectedReason(p, outerRoots) && !(isPiCodePath(p) && !writes.includes(p))) return "reads guard or pi internal state";
+    const directArtifact = ["read", "write", "edit"].includes(tool) && typeof input?.path === "string" ? resolvePath(cwd, input.path) : undefined;
+    if (protectedReason(p, outerRoots) && !(isPiCodePath(p) && !writes.includes(p)) && !(directArtifact && realPath(p) === realPath(directArtifact) && trustedProjectArtifact(directArtifact, cwd, roots, writes.includes(p), trustedDirs))) return "reads guard or pi internal state";
     if (isHardLinked(p)) {
       const writing = writes.includes(p);
       const plainOperation = writing ? ["write", "edit"].includes(tool) : ["read", "grep", "find", "ls"].includes(tool) || projectRead;

@@ -217,6 +217,8 @@ Folder grants belong to the current guard instance and are not inherited by anot
 
 For notes stored inside the project's protected `.pi` directory, a write grant for the exact parent folder permits the built-in `write` and `edit` tools to update `.pi/_notes/<sessionId>/note.md` and `.pi/_notes/<sessionId>/factory/{plan,review,learnings}.md`. Session IDs may contain letters, digits, `_` and `-`. Other `.pi` files and shell writes remain protected. To avoid bypassing that protection, these particular note paths cannot traverse symlinks or be hard-linked, even with a grant; hard-linked files in other trusted folders retain the behavior described above.
 
+For project artifacts, a grant for the project's exact `.pi/_artifacts` folder permits built-in reads and plain writes or edits of `<artifact-id>/index.tsx` and Markdown attachments under that artifact. The project is the nearest Git root, or the nearest `.pi` root if there is no Git root, matching the artifact extension even when Pi starts in a subdirectory. Artifact IDs follow the extension's lowercase slug rules. The exception does not cover metadata, executable configuration, daemon state, shell writes, symlinks or hard links.
+
 ## Commands
 
 | Command | What it does |
