@@ -157,15 +157,17 @@ function callWrites(tool: string, input: any, cwd: string, parsed?: Parsed): boo
   return parsed.writes.length > 0 || !parsed.subcommands.every(isReadOnlyArgv) || inputPaths(tool, input, cwd, parsed).writes.length > 0;
 }
 
-/** Snapshot deterministic access checks and the resolved paths they examined. */
-function filesystemPolicyHash(tool: string, input: unknown, cwd: string, sessionDir: string | undefined, trustedDirs: TrustedDirState, parsed?: Parsed, checked?: { hard: string | undefined; sens: string | undefined; uncertainSearch: boolean; builtinExecutable: ReturnType<typeof inspectBuiltinSearchExecutable> }): string {
-  const roots = protectedRoots(cwd, sessionDir);
+function filesystemPolicyHash(tool: string, input: unknown, cwd: string, roots: string[], trustedDirs: TrustedDirState, parsed?: Parsed, checked?: {
+  hard: string | undefined;
+  details?: { sens: string | undefined; uncertainSearch: boolean; builtinExecutable: ReturnType<typeof inspectBuiltinSearchExecutable> };
+}): string {
   const paths = inputPaths(tool, input, cwd, parsed);
-  const builtinExecutable = checked ? checked.builtinExecutable : inspectBuiltinSearchExecutable(tool, cwd);
+  const details = checked?.details;
+  const builtinExecutable = details?.builtinExecutable ?? inspectBuiltinSearchExecutable(tool, cwd);
   return stableHash({
     hard: checked ? checked.hard : hardDeny(tool, input, cwd, roots, parsed, 0, trustedDirs),
-    sens: checked ? checked.sens : sensitive(tool, input, cwd, roots, parsed, trustedDirs),
-    uncertainSearch: checked ? checked.uncertainSearch : searchNeedsJudgement(tool, input, cwd, parsed, trustedDirs, roots) || !!builtinExecutable.risk,
+    sens: details ? details.sens : sensitive(tool, input, cwd, roots, parsed, trustedDirs),
+    uncertainSearch: details?.uncertainSearch ?? (searchNeedsJudgement(tool, input, cwd, parsed, trustedDirs, roots) || !!builtinExecutable.risk),
     builtinExecutable,
     trustedDirsVersion: trustedDirs.version,
     paths: { reads: paths.reads.map((path) => [path, realPath(path)]), writes: paths.writes.map((path) => [path, realPath(path)]) },
@@ -716,11 +718,11 @@ export default function (pi: ExtensionAPI) {
       return stableHash(context(ctx, callId, tool, parsed, opts.siblings ?? [], peers, opts.historyBoundary)) !== contextHash;
     };
     const changedContext = (): Assessment => ({ ...base, action: "block", source: "error", reasons: ["judgement context changed during judgement"] });
-    const policyHash = filesystemPolicyHash(tool, input, ctx.cwd, ctx.sessionManager.getSessionDir(), trustedDirs, parsed, { hard, sens, uncertainSearch, builtinExecutable });
+    const policyHash = filesystemPolicyHash(tool, input, ctx.cwd, roots, trustedDirs, parsed, { hard, details: { sens, uncertainSearch, builtinExecutable } });
     const judgementStateKey = stableHash([shellKey, policyHash]);
     const policyChanged = () => {
       clearPathCache();
-      return filesystemPolicyHash(tool, input, ctx.cwd, ctx.sessionManager.getSessionDir(), trustedDirs, parsed) !== policyHash;
+      return filesystemPolicyHash(tool, input, ctx.cwd, protectedRoots(ctx.cwd, ctx.sessionManager.getSessionDir()), trustedDirs, parsed) !== policyHash;
     };
     const changedPolicy = (): Assessment => ({ ...base, action: "block", source: "error", reasons: ["filesystem policy changed during judgement"] });
     const stateChanged = () => {
@@ -950,6 +952,7 @@ export default function (pi: ExtensionAPI) {
     if (isSkillRead(event.toolName, event.input, ctx.cwd, registeredSkillPaths())) return;
     const tool = event.toolName;
     const input: any = event.input;
+    const callEpoch = stateEpoch;
     const onBlocked = (reason: string, retry: "ask-user" | "none" = "none") => {
       consecutiveBlocks++;
       totalBlocks++;
@@ -1010,11 +1013,13 @@ export default function (pi: ExtensionAPI) {
       const reason = rulesScope ? `cannot read ${rulesScope} rules` : "could not judge: context unavailable";
       a = { action: "confirm", source: "error", reasons: [reason], rememberAllow: false, globalAllow: false };
     }
+    const inputMatches = () => event.toolName === tool && event.input === input && toolInputHash(tool, input) === hash;
     let inputChanged = true;
-    try { inputChanged = toolInputHash(tool, input) !== hash; } catch { /* treat uninspectable input as changed */ }
+    try { inputChanged = !inputMatches(); } catch { /* treat uninspectable input as changed */ }
     const judgementAborted = !!ctx.signal?.aborted;
     if (judgementAborted) a = { action: "block", source: "error", reasons: ["judgement was aborted"], rememberAllow: false, globalAllow: false };
     else if (inputChanged) a = { action: "block", source: "error", reasons: ["input changed during judgement"], rememberAllow: false, globalAllow: false };
+    else if (stateEpoch !== callEpoch) a = { action: "block", source: "error", reasons: ["session changed during judgement"], rememberAllow: false, globalAllow: false };
     let retryRulesVersion: number | undefined;
     try {
       store.syncSession(ctx.sessionManager.getBranch() as any[]);
@@ -1098,9 +1103,37 @@ export default function (pi: ExtensionAPI) {
     }
     const v = a.verdict;
     const head = `${retryOverride ? "Previously blocked — " : ""}${tool}: ${v?.risk !== undefined ? `risk ${v.risk.toFixed(2)}/4` : "confirm"}${v?.category ? ` [${v.category}]` : ""}`;
-    const dialogEpoch = stateEpoch;
+    const confirmationFailure = (reason: string, message = reason, withheld = reason) => {
+      recordAudit(ctx, { ...rec, preview: `${tool} [arguments withheld: ${withheld}]`, action: "block", source: "error", reasons: [reason], final: "blocked" });
+      return onBlocked(message);
+    };
+    const sessionChanged = () => {
+      if (stateEpoch !== callEpoch) return true;
+      const id = ctx.sessionManager.getSessionId();
+      if (typeof id !== "string" || !id) throw new Error("invalid session id");
+      return id !== session;
+    };
+    const readSessionDir = () => {
+      const dir = ctx.sessionManager.getSessionDir();
+      // Pi uses an empty directory string for in-memory sessions.
+      if (typeof dir !== "string") throw new Error("invalid session directory");
+      return dir;
+    };
     const dialogConfig = cfg;
     const dialogCwd = ctx.cwd;
+    const dialogSignal = ctx.signal;
+    const isCancelled = () => dialogSignal?.aborted || ctx.signal?.aborted;
+    const cancelConfirmation = () => {
+      recordAudit(ctx, { ...rec, preview: `${tool} [arguments withheld: confirmation was aborted]`, action: "block", source: "error", reasons: ["confirmation was aborted"], final: "blocked" });
+      return onCancelled("confirmation was aborted");
+    };
+    let dialogSessionDir: string;
+    try {
+      if (sessionChanged()) return confirmationFailure("session changed during confirmation", "the session changed during confirmation");
+      dialogSessionDir = readSessionDir();
+    } catch {
+      return confirmationFailure("session context unavailable before confirmation");
+    }
     let dialogTrusted: boolean;
     let dialogShellEnvironment: string | undefined;
     let dialogExecutable: ReturnType<typeof inspectExecutablePath> | undefined;
@@ -1112,102 +1145,92 @@ export default function (pi: ExtensionAPI) {
       dialogShellEnvironment = dialogParsed ? shellEnvironmentHash(dialogParsed) : undefined;
       clearPathCache();
       dialogContextHash = stableHash(context(ctx, event.toolCallId, tool, dialogParsed, batch.earlier, batch.peers, batch.historyBoundary));
-      dialogPolicyHash = filesystemPolicyHash(tool, input, ctx.cwd, ctx.sessionManager.getSessionDir(), trustedDirs, dialogParsed);
+      dialogPolicyHash = filesystemPolicyHash(tool, input, dialogCwd, protectedRoots(dialogCwd, dialogSessionDir), trustedDirs, dialogParsed);
       if (dialogParsed) dialogExecutable = inspectExecutablePath(dialogParsed, ctx.cwd);
     } catch {
-      recordAudit(ctx, { ...rec, preview: `${tool} [arguments withheld: confirmation context could not be inspected]`, action: "block", source: "error", reasons: ["could not inspect context before confirmation"], final: "blocked" });
-      return onBlocked("could not inspect context before confirmation");
+      return confirmationFailure("could not inspect context before confirmation", undefined, "confirmation context could not be inspected");
     }
     let choice: Awaited<ReturnType<typeof confirmDialog>>;
     try {
       choice = await confirmDialog(ctx, {
-      title: head,
-      body: `${what}\n\nWhy: ${a.reasons.join("; ") || "-"}`,
-      tool,
-      patterns: a.patterns,
-      denyPatterns: a.denyPatterns,
-      rememberAllow: a.rememberAllow,
-      globalAllow: a.globalAllow,
-      projectName: basename(ctx.cwd),
-      timeoutMs: cfg.dialogTimeoutMs,
+        title: head,
+        body: `${what}\n\nWhy: ${a.reasons.join("; ") || "-"}`,
+        tool,
+        patterns: a.patterns,
+        denyPatterns: a.denyPatterns,
+        rememberAllow: a.rememberAllow,
+        globalAllow: a.globalAllow,
+        projectName: basename(dialogCwd),
+        timeoutMs: dialogConfig.dialogTimeoutMs,
       });
     } catch {
-      if (ctx.signal?.aborted) {
-        recordAudit(ctx, { ...rec, preview: `${tool} [arguments withheld: confirmation was aborted]`, action: "block", source: "error", reasons: ["confirmation was aborted"], final: "blocked" });
-        return onCancelled("confirmation was aborted");
-      }
+      if (isCancelled()) return cancelConfirmation();
       warn(ctx, "guard: approval dialog failed");
       recordAudit(ctx, { ...rec, preview: `${tool} [arguments withheld: approval dialog failed]`, final: "blocked", choice: "dialog-error" });
       return onBlocked("the approval dialog failed");
     }
-    if (ctx.signal?.aborted) {
-      recordAudit(ctx, { ...rec, preview: `${tool} [arguments withheld: confirmation was aborted]`, action: "block", source: "error", reasons: ["confirmation was aborted"], final: "blocked" });
-      return onCancelled("confirmation was aborted");
-    }
-    if (stateEpoch !== dialogEpoch) {
-      recordAudit(ctx, { ...rec, preview: `${tool} [arguments withheld: session changed during confirmation]`, action: "block", source: "error", reasons: ["session changed during confirmation"], final: "blocked" });
-      return onBlocked("the session changed during confirmation");
+    if (isCancelled()) return cancelConfirmation();
+    try {
+      if (sessionChanged() || readSessionDir() !== dialogSessionDir) {
+        return confirmationFailure("session changed during confirmation", "the session changed during confirmation");
+      }
+    } catch {
+      return confirmationFailure("session context unavailable after confirmation");
     }
     if (cfg !== dialogConfig) {
-      recordAudit(ctx, { ...rec, preview: `${tool} [arguments withheld: settings changed during confirmation]`, action: "block", source: "error", reasons: ["settings changed during confirmation"], final: "blocked" });
-      return onBlocked("the settings changed during confirmation");
+      return confirmationFailure("settings changed during confirmation", "the settings changed during confirmation");
     }
     let trustAfterDialog: boolean;
     try { trustAfterDialog = ctx.isProjectTrusted(); }
     catch {
-      recordAudit(ctx, { ...rec, preview: `${tool} [arguments withheld: project trust could not be inspected]`, action: "block", source: "error", reasons: ["could not inspect project trust after confirmation"], final: "blocked" });
-      return onBlocked("could not inspect project trust after confirmation");
+      return confirmationFailure("could not inspect project trust after confirmation", undefined, "project trust could not be inspected");
     }
     if (ctx.cwd !== dialogCwd || trustAfterDialog !== dialogTrusted) {
-      recordAudit(ctx, { ...rec, preview: `${tool} [arguments withheld: project changed during confirmation]`, action: "block", source: "error", reasons: ["project or trust changed during confirmation"], final: "blocked" });
-      return onBlocked("the project or trust changed during confirmation");
+      return confirmationFailure("project or trust changed during confirmation", "the project or trust changed during confirmation", "project changed during confirmation");
     }
     try {
       clearPathCache();
-      rec.preview = toolInputHash(tool, input) === hash ? auditPreview(ctx, tool, input) : `${tool} [arguments withheld: input changed during confirmation]`;
+      rec.preview = inputMatches() ? auditPreview(ctx, tool, input) : `${tool} [arguments withheld: input changed during confirmation]`;
     } catch {
       rec.preview = `${tool} [arguments withheld: input could not be inspected]`;
     }
     if (choice.decision === "allow") {
       try {
-        if (toolInputHash(tool, input) !== hash) {
-          recordAudit(ctx, { ...rec, action: "block", source: "error", reasons: ["input changed during confirmation"], final: "blocked" });
-          return onBlocked("the input changed during confirmation");
+        if (!inputMatches()) {
+          return confirmationFailure("input changed during confirmation", "the input changed during confirmation");
         }
         const currentParsed = tool === "bash" ? parseShell(String(input?.command ?? "")) : undefined;
         if (dialogShellEnvironment !== undefined && shellEnvironmentHash(currentParsed) !== dialogShellEnvironment) {
-          recordAudit(ctx, { ...rec, preview: `${tool} [arguments withheld: shell environment changed during confirmation]`, action: "block", source: "error", reasons: ["shell environment changed during confirmation"], final: "blocked" });
-          return onBlocked("shell environment changed during confirmation");
+          return confirmationFailure("shell environment changed during confirmation");
         }
         clearPathCache();
         if (stableHash(context(ctx, event.toolCallId, tool, currentParsed, batch.earlier, batch.peers, batch.historyBoundary)) !== dialogContextHash) {
-          recordAudit(ctx, { ...rec, preview: `${tool} [arguments withheld: confirmation context changed]`, action: "block", source: "error", reasons: ["judgement context changed during confirmation"], final: "blocked" });
-          return onBlocked("judgement context changed during confirmation");
+          return confirmationFailure("judgement context changed during confirmation", undefined, "confirmation context changed");
         }
         const currentExecutable = currentParsed ? inspectExecutablePath(currentParsed, ctx.cwd) : undefined;
         if ((currentExecutable?.risk && currentExecutable.risk !== dialogExecutable?.risk) ||
             (dialogExecutable?.fingerprint !== undefined && currentExecutable?.fingerprint !== dialogExecutable.fingerprint)) {
-          recordAudit(ctx, { ...rec, preview: `${tool} [arguments withheld: executable lookup changed during confirmation]`, action: "block", source: "error", reasons: ["executable lookup changed during confirmation"], final: "blocked" });
-          return onBlocked("executable lookup changed during confirmation");
+          return confirmationFailure("executable lookup changed during confirmation");
         }
-        const hard = hardDeny(tool, input, ctx.cwd, protectedRoots(ctx.cwd, ctx.sessionManager.getSessionDir()), currentParsed, 0, trustedDirs);
         syncProject(ctx);
         store.syncSession(ctx.sessionManager.getBranch() as any[]);
         const currentRule = store.find(tool, input, ctx.cwd, currentParsed);
+        clearPathCache();
+        const currentRoots = protectedRoots(dialogCwd, dialogSessionDir);
+        const hard = hardDeny(tool, input, dialogCwd, currentRoots, currentParsed, 0, trustedDirs);
         const changedHardDeny = hard && !(retryOverride && a.source === "hard-deny" && hard === a.reasons[0]) ? hard : undefined;
         if (changedHardDeny || currentRule?.decision === "deny") {
           recordAudit(ctx, { ...rec, action: "block", source: changedHardDeny ? "hard-deny" : "rule-deny", reasons: [changedHardDeny || "deny rule applied after confirmation"], ruleIds: changedHardDeny ? undefined : currentRule?.rules.map((rule) => rule.id), final: "blocked" });
           return onBlocked(changedHardDeny ? `blocked (${changedHardDeny})` : "blocked by the user's deny rule");
         }
-        if (filesystemPolicyHash(tool, input, ctx.cwd, ctx.sessionManager.getSessionDir(), trustedDirs, currentParsed) !== dialogPolicyHash) {
-          recordAudit(ctx, { ...rec, preview: `${tool} [arguments withheld: filesystem policy changed during confirmation]`, action: "block", source: "error", reasons: ["filesystem policy changed during confirmation"], final: "blocked" });
-          return onBlocked("filesystem policy changed during confirmation");
+        if (filesystemPolicyHash(tool, input, dialogCwd, currentRoots, trustedDirs, currentParsed, { hard }) !== dialogPolicyHash) {
+          return confirmationFailure("filesystem policy changed during confirmation");
         }
       } catch {
-        recordAudit(ctx, { ...rec, action: "block", source: "error", reasons: ["could not recheck after confirmation"], final: "blocked" });
-        return onBlocked("could not recheck this call after confirmation");
+        return confirmationFailure("could not recheck after confirmation", "could not recheck this call after confirmation", "confirmation context could not be rechecked");
       }
     }
+    if (isCancelled()) return cancelConfirmation();
     const saved: Rule[] = [];
     const toSave = choice.decision === "deny" ? a.denyPatterns : a.patterns;
     if (choice.scope !== "once" && toSave) {
@@ -1264,7 +1287,12 @@ export default function (pi: ExtensionAPI) {
       if (sub === "on" || sub === "off") {
         if (rest.length) return say("usage: /guard on|off", "warning");
         blockedOnce.clear();
-        enabled = sub === "on";
+        const nextEnabled = sub === "on";
+        if (nextEnabled !== enabled) {
+          stopPreflight();
+          stateEpoch++;
+        }
+        enabled = nextEnabled;
         append(STATE_ENTRY, { enabled });
         restoreState(ctx);
         if (enabled && cfg.disabled) return say("guard: on for this session, but disabled by configuration", "warning");

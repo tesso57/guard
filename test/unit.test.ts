@@ -3022,6 +3022,134 @@ if (process.platform !== "win32") {
 
 {
   const savedSelect = ctx.ui.select;
+  const savedSessionId = ctx.sessionManager.getSessionId;
+  const savedSessionDir = ctx.sessionManager.getSessionDir;
+  const rememberedAllow = (options: string[]) => options.find((option) => option.startsWith("Allow (this session:"));
+  const ruleEntries = () => branch.filter((entry) => entry.customType === "guard-rule").length;
+  const tests = [
+    {
+      name: "changed session identity without a lifecycle event",
+      change: () => { ctx.sessionManager.getSessionId = () => "another-session"; },
+      reason: "session changed during confirmation",
+    },
+    {
+      name: "unavailable session identity",
+      change: () => { ctx.sessionManager.getSessionId = () => { throw new Error("opaque-session-context"); }; },
+      reason: "session context",
+    },
+    {
+      name: "unavailable session directory",
+      change: () => { ctx.sessionManager.getSessionDir = () => undefined; },
+      reason: "session context",
+    },
+    {
+      name: "guard toggled off and back on",
+      change: async () => { await command.handler("off", ctx); await command.handler("on", ctx); },
+      reason: "session changed during confirmation",
+    },
+  ];
+  responder = (body) => ({ answers: answersFor([1, 0, 0, 0, 0], { irreversible: 0.85 })(body) });
+  try {
+    for (const [index, { name, change, reason }] of tests.entries()) {
+      const before = ruleEntries();
+      let offered = false;
+      ctx.ui.select = async (_title: string, options: string[]) => {
+        const choice = rememberedAllow(options);
+        offered = !!choice;
+        await change();
+        return choice;
+      };
+      try {
+        const result = await run("bash", { command: `guard-approval-fixture check-${index}` });
+        ok(`int: ${name} blocks a late remembered allowance without saving a rule`, offered && result?.block === true && result.reason.includes(reason) &&
+          ruleEntries() === before && !JSON.stringify(tail(1)[0]).includes("opaque-session-context"));
+      } finally {
+        ctx.sessionManager.getSessionId = savedSessionId;
+        ctx.sessionManager.getSessionDir = savedSessionDir;
+        await run("bash", { command: "echo reset-approval-fixture" });
+      }
+    }
+    const before = ruleEntries();
+    const input = { command: "guard-approval-fixture save" };
+    ctx.ui.select = async () => undefined;
+    const cancelled = await run("bash", input);
+    ok("int: dismissing confirmation blocks without saving an allow rule", cancelled?.block === true && ruleEntries() === before);
+    const signal = new AbortController();
+    ctx.signal = signal.signal;
+    ctx.ui.select = async () => {
+      signal.abort();
+      ctx.signal = new AbortController().signal;
+      return "Allow (this time only)";
+    };
+    const abortedApproval = await run("bash", input);
+    ctx.signal = undefined;
+    ok("int: aborting the dialog's original signal invalidates a late response", abortedApproval?.block === true &&
+      abortedApproval.reason.includes("confirmation was aborted") && ruleEntries() === before);
+    ctx.ui.select = async () => "Allow (this time only)";
+    ok("int: one-time approval runs without saving an allow rule", (await run("bash", input)) === undefined && ruleEntries() === before);
+    try {
+      ctx.sessionManager.getSessionDir = () => "";
+      let offered = false;
+      ctx.ui.select = async (_title: string, options: string[]) => {
+        offered = options.includes("Allow (this time only)");
+        return offered ? "Allow (this time only)" : undefined;
+      };
+      const inMemoryApproval = await run("bash", { command: "guard-approval-fixture in-memory" });
+      ok("int: a stable in-memory session can complete a one-time approval",
+        offered && inMemoryApproval === undefined && ruleEntries() === before);
+    } finally {
+      ctx.sessionManager.getSessionDir = savedSessionDir;
+    }
+    ctx.ui.select = async (_title: string, options: string[]) => rememberedAllow(options);
+    const approval = await run("bash", input);
+    const rule = branch.at(-1)?.data?.rule;
+    ok("int: a still-valid remembered approval runs and saves a session allow rule", approval === undefined && ruleEntries() === before + 1 &&
+      rule?.decision === "allow" && rule?.scope === "session" && tail(1)[0]?.ruleIds?.includes(rule.id) === true);
+    if (rule?.id) await command.handler(`rules rm ${rule.id}`, ctx);
+
+    const savedAppend = pi.appendEntry;
+    const beforeFailedSave = ruleEntries();
+    pi.appendEntry = () => { throw new Error("mock persistence failure"); };
+    try {
+      const failedSave = await run("bash", { command: "guard-approval-fixture save-failure" });
+      ok("int: a failed rule save leaves only the current approval in effect", failedSave === undefined &&
+        ruleEntries() === beforeFailedSave && (tail(1)[0]?.ruleIds?.length ?? 0) === 0);
+    } finally {
+      pi.appendEntry = savedAppend;
+    }
+
+    const event = { type: "tool_call", toolCallId: `c${++n}`, toolName: "bash", input: { command: "guard-approval-fixture original" } };
+    ctx.ui.select = async () => {
+      event.input = { command: "guard-approval-fixture replacement" };
+      return "Allow (this time only)";
+    };
+    const replacedInput = await h.tool_call(event, ctx);
+    ok("int: a replacement argument object cannot inherit a pending approval", replacedInput?.block === true &&
+      replacedInput.reason.includes("input changed during confirmation"));
+
+    responder = (body) => ({ answers: answersFor([0, 0, 0, 0.05, 0.95])(body) });
+    const retryInput = { command: "guard-approval-fixture model-retry" };
+    let retryDialogs = 0;
+    let rememberOffered = false;
+    ctx.ui.select = async (_title: string, options: string[]) => {
+      retryDialogs++;
+      rememberOffered = options.some((option) => option.startsWith("Allow (this session:") || option.startsWith("Allow and remember"));
+      return "Allow (this time only)";
+    };
+    const firstBlock = await run("bash", retryInput);
+    const approvedRetry = await run("bash", retryInput);
+    const nextBlock = await run("bash", retryInput);
+    ok("int: a model-block retry consumes its ticket and cannot save a reusable allow", firstBlock?.block === true &&
+      approvedRetry === undefined && nextBlock?.block === true && retryDialogs === 1 && !rememberOffered && ruleEntries() === beforeFailedSave);
+    await run("bash", { command: "echo reset-approval-fixture" });
+  } finally {
+    ctx.signal = undefined;
+    ctx.ui.select = savedSelect;
+  }
+}
+
+{
+  const savedSelect = ctx.ui.select;
   let dialogDenyId: string | undefined;
   responder = (body) => ({ answers: answersFor([0, 0, 0.4, 0.6, 0])(body) });
   ctx.ui.select = async () => {
