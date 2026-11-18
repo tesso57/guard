@@ -25,8 +25,9 @@
     "knip": "knip",
     "test": "node --experimental-strip-types --test test/unit.test.ts tests/*.test.ts",
     "test:e2e": "node test/e2e.mjs",
-    "check:package": "node scripts/check-package.mjs",
-    "check": "npm run typecheck && npm run knip && npm test && npm run check:package && npm run test:e2e"
+    "check:package": "node scripts/check-package.mjs && npm run test:startup",
+    "check": "npm run typecheck && npm run knip && npm test && npm run check:package && npm run test:e2e",
+    "test:startup": "node scripts/check-pi-startup.mjs command guard"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
