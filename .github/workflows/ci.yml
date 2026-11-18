@@ -55,5 +55,6 @@ jobs:
       - uses: actions/setup-node@v7.1.0
         with:
           node-version-file: .nvmrc
+      - run: npm ci --no-audit --no-fund
       - run: npm run check:package
       - run: node --experimental-strip-types --test tests/package.test.ts
