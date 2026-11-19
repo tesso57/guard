@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { AskAnswer } from "./ask-answers.ts";
 import { validBaseUrl, type Config } from "./config.ts";
 import { clip, redact, redactString, uniqueKey } from "./redact.ts";
 import { describeMatch, type Rule } from "./rules.ts";
@@ -69,7 +70,7 @@ export type JudgeRequest = {
   input: unknown;
   cwd: string;
   callId: string;
-  userMessages: string[];
+  userMessages: (string | AskAnswer)[];
   history: { id: string; name: string; arguments: unknown }[];
   historyIncomplete?: boolean;
   attachmentsIncomplete?: boolean;
@@ -111,10 +112,13 @@ export function buildRequest(cfg: Config, req: JudgeRequest) {
     return clip(masked, cfg.maxFieldChars, state);
   };
   const items: unknown[] = [{ role: "developer", content: DEVELOPER }];
+  const askQuestions: { id: number; question: unknown }[] = [];
   req.userMessages.forEach((message, index) => {
     const latest = index === req.userMessages.length - 1;
-    const masked = redactString(message);
-    if (masked !== message) state.redacted = true;
+    const userText = typeof message === "string" ? message : `Answer to ask_user question #${message.id}:\n${message.answer}`;
+    if (typeof message !== "string") askQuestions.push({ id: message.id, question: prep(message.question, true) });
+    const masked = redactString(userText);
+    if (masked !== userText) state.redacted = true;
     const text = String(clip(masked, latest ? 12000 : 4000, state));
     items.push({ role: "user", content: [{ type: "input_text", text: latest ? `[most recent message: the current instruction]\n${text}` : `[earlier message]\n${text}` }] });
   });
@@ -149,7 +153,9 @@ export function buildRequest(cfg: Config, req: JudgeRequest) {
     budget -= c.length;
   }
   items.push({ type: "function_call", call_id: "guard-context", name: "guard_collect_context", arguments: "{}", status: "completed" });
-  items.push({ type: "function_call_output", call_id: "guard-context", output: JSON.stringify({ cwd: prep(req.cwd, true), files }) });
+  items.push({ type: "function_call_output", call_id: "guard-context", output: JSON.stringify({
+    cwd: prep(req.cwd, true), files, ...(askQuestions.length ? { questionsAskedByAssistant: askQuestions } : {}),
+  }) });
   if (redactString(req.tool) !== req.tool) state.redacted = true;
   items.push({ type: "function_call", call_id: callId(req.callId), name: safeName(req.tool), arguments: JSON.stringify(prep(req.input, true)), status: "in_progress" });
 

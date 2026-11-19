@@ -845,7 +845,7 @@ function strictlyReadOnly(parsed: Parsed | undefined, writes: string[]): boolean
   return !!parsed && parsed.ok && !parsed.dynamic.length && !writes.length && parsed.subcommands.every(isReadOnlyArgv);
 }
 
-function trustedProjectNote(p: string, cwd: string, roots: string[], state?: TrustedDirState): boolean {
+function trustedProjectNote(p: string, cwd: string, roots: string[], state?: TrustedDirState, sessionNoteRead = false): boolean {
   if (!state || isHomeOrAncestor(cwd)) return false;
   const project = resolve(cwd);
   const rel = relative(project, p);
@@ -853,8 +853,14 @@ function trustedProjectNote(p: string, cwd: string, roots: string[], state?: Tru
   if (realPath(p) !== join(realPath(project), rel) || isHardLinked(p)) return false;
   const projectPi = join(project, ".pi");
   if (protectedReason(p, roots.filter((root) => root !== projectPi))) return false;
-  return state.trustedDirs.some((dir) => !dir.ignored && dir.write && trustedDirRelative(p, dir, state) === basename(p)
+  return state.trustedDirs.some((dir) => !dir.ignored && dir.write && (!sessionNoteRead || (dir.by === "note" && dir.path === dirname(p)))
+    && trustedDirRelative(p, dir, state) === basename(p)
     && state.trustedDirTargets.get(dir.path) === realPath(dir.path) && realPath(dir.path) === dirname(realPath(p)));
+}
+
+export function isTrustedSessionNoteRead(p: unknown, cwd: string, sessionId: string, roots: string[], state: TrustedDirState): boolean {
+  if (typeof p !== "string" || !/^[A-Za-z0-9_-]+$/.test(sessionId) || p !== join(cwd, ".pi", "_notes", sessionId, "note.md")) return false;
+  return trustedProjectNote(p, cwd, roots, state, true) && statSync(p, { throwIfNoEntry: false })?.isFile() === true;
 }
 
 function trustedProjectArtifact(p: string, cwd: string, roots: string[], write: boolean, state?: TrustedDirState): boolean {
