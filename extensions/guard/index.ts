@@ -3,6 +3,7 @@ import { existsSync, statSync } from "node:fs";
 import { basename, isAbsolute, relative } from "node:path";
 import { types as utilTypes } from "node:util";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { readAskAnswers, type AskAnswer } from "./ask-answers.ts";
 import { audit, tail, type AuditRecord } from "./audit.ts";
 import { type Config, loadConfig } from "./config.ts";
 import { predictEdits } from "./edits.ts";
@@ -10,13 +11,14 @@ import { MAX_FILE_BYTES, readBoundedText } from "./files.ts";
 import { buildRequest, callDecisions, evaluate, MAX_ATTACHED_FILES, type ModelVerdict } from "./judge.ts";
 import { redact } from "./redact.ts";
 import { clearPathCache, createTrustedDirState, isFreelyReadable, listTrustedDirs, trustDir, type TrustedDirState, isHardLinked, isInsideExact, pathLikeTokens, pathVariants, protectedReason, protectedRoots, realPath, recentlyChangedFiles, resolvePath, sensitiveReason } from "./paths.ts";
-import { BUILTIN_TOOLS, dynamicLoaderEnvironment, hardDeny, hasUninspectedToolInput, inputPaths, inspectBuiltinSearchExecutable, inspectExecutablePath, pathsStayInProject, piString, safeAllow, searchNeedsJudgement, sensitive, usesGrepOptions, usesRipgrepConfig, writesStayPlain } from "./policy.ts";
+import { BUILTIN_TOOLS, dynamicLoaderEnvironment, hardDeny, hasUninspectedToolInput, inputPaths, inspectBuiltinSearchExecutable, inspectExecutablePath, isTrustedSessionNoteRead, pathsStayInProject, piString, safeAllow, searchNeedsJudgement, sensitive, usesGrepOptions, usesRipgrepConfig, writesStayPlain } from "./policy.ts";
 import { type Decision, deriveDenyPatterns, derivePatterns, describeMatch, globalAllowPatternIsReadOnly, type Match, newId, type Rule, RuleStore, type Scope, supportsAnyInputAllow } from "./rules.ts";
 import { isReadOnlyArgv, normalizeArgv, type Parsed, parseShell, rgDisablesConfig, rgInfoOnly } from "./shell.ts";
 import { isSkillRead, type RegisteredSkill } from "./skill-read.ts";
 import { confirmDialog, displayText, preview } from "./ui.ts";
 
 const STATE_ENTRY = "guard-state";
+const NOTE_REQUEST = "pi-session-notes-request";
 const SCRIPT_RUNNERS = new Set([
   "npm", "pnpm", "yarn", "bun", "npx", "make", "gmake", "just", "pytest", "tox", "nox", "cargo", "go", "gradle", "gradlew", "mvn", "rake", "bundle",
   "deno", "uv", "poetry", "turbo", "nx", "jest", "vitest", "pre-commit", "docker", "docker-compose",
@@ -214,6 +216,7 @@ export default function (pi: ExtensionAPI) {
   let auditFailureNotified = false;
   let auditRecoveryPending = false;
   let stateEpoch = 0;
+  let noteRunSession: string | undefined;
 
   const append = (type: string, data: unknown) => pi.appendEntry(type, data);
 
@@ -352,7 +355,8 @@ export default function (pi: ExtensionAPI) {
   }
 
   function context(ctx: ExtensionContext, callId: string, tool: string, parsed: Parsed | undefined, siblings: ToolCallLike[], peers: ToolCallLike[], historyBoundary?: number) {
-    const users: unknown[] = [];
+    const users: ({ content: unknown } | AskAnswer)[] = [];
+    const readAnswer = readAskAnswers();
     const calls: ToolCallLike[] = [];
     const siblingIds = new Set(siblings.map((s) => s.id));
     const seenSiblings = new Set<string>();
@@ -369,9 +373,14 @@ export default function (pi: ExtensionAPI) {
     const boundary = historyBoundary ?? branch.length;
     for (let entryIndex = 0; entryIndex < branch.length; entryIndex++) {
       const e = branch[entryIndex];
+      if (e.type === "custom" || e.type === "custom_message") {
+        const answer = readAnswer(e);
+        if (answer) pushBounded(users, answer, cfg.contextUserMessages);
+        continue;
+      }
       if (e.type !== "message") continue;
       const m = e.message;
-      if (m?.role === "user") pushBounded(users, m.content, cfg.contextUserMessages);
+      if (m?.role === "user") pushBounded(users, { content: m.content }, cfg.contextUserMessages);
       if (m?.role === "assistant" && Array.isArray(m.content)) {
         const current = entryIndex < boundary ? -1 : m.content.findIndex((c: any) => c?.type === "toolCall" && c.id === callId);
         const end = current < 0 ? m.content.length : current;
@@ -525,7 +534,7 @@ export default function (pi: ExtensionAPI) {
     }
     const history = calls.map(historyForJudge);
     return {
-      userMessages: users.map(textOf),
+      userMessages: users.map(user => "content" in user ? textOf(user.content) : user),
       history,
       historyIncomplete,
       attachmentsIncomplete,
@@ -669,9 +678,15 @@ export default function (pi: ExtensionAPI) {
       store.all();
       return cfg !== config || stateEpoch !== epoch || store.version !== ruleVersion;
     };
-    if (rule?.decision === "allow" && !sens && !uncertainSearch && !historyIncomplete && !siblingRun && !cx.changedFilesRun && !siblingMayChange) {
+    const approvedNoteRead = noteRunSession !== undefined && noteRunSession === ctx.sessionManager.getSessionId()
+      && historyIncomplete && !cx.historyIncomplete && !peers.length && tool === "read" && cfg.skipModelTools.includes(tool)
+      && rule?.decision === "allow" && allRelated.length > 0 && allRelated.every((r) => r.decision === "allow"
+        && (r.scope === "project" || r.scope === "session") && r.match.kind === "path" && r.match.path === input.path)
+      && isTrustedSessionNoteRead(input.path, ctx.cwd, noteRunSession, roots, trustedDirs);
+    if (rule?.decision === "allow" && !sens && !uncertainSearch && (!historyIncomplete || approvedNoteRead) && !siblingRun && !cx.changedFilesRun && !siblingMayChange) {
       const reasons = rule.rules.map((r) => `${r.scope} allow rule: ${describeMatch(r.tool, r.match)}`);
       const auditReasons = rule.rules.map((r) => `${r.scope} allow rule [${r.id}]`);
+      if (approvedNoteRead) return { ...base, action: "allow", source: "rule-allow", reasons, auditReasons, rules: rule.rules };
       if (!process.env.GUARD_OPENAI_API_KEY) return { ...base, action: "allow", source: "rule-allow", reasons: [...reasons, "rules-only mode (no API key)"], auditReasons: [...auditReasons, "rules-only mode (no API key)"], rules: rule.rules };
       try {
         const v = await judgeWithModel(tool, input, ctx, callId, cx, [], true, judgementStateKey, opts.signal);
@@ -799,6 +814,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.on("session_start", async (_e, ctx) => {
+    noteRunSession = undefined;
     stopPreflight();
     stateEpoch++;
     registeredSkillTargets.clear();
@@ -818,9 +834,17 @@ export default function (pi: ExtensionAPI) {
       warn(ctx, "guard: GUARD_OPENAI_API_KEY is not set. Running in rules-only mode: calls that need a model judgement will ask you first.");
   });
 
-  pi.on("before_agent_start", () => { snapshotRegisteredSkills(); });
+  pi.on("before_agent_start", (event, ctx) => {
+    noteRunSession = event.messageType === "custom" && event.message.customType === NOTE_REQUEST ? ctx.sessionManager.getSessionId() : undefined;
+    snapshotRegisteredSkills();
+  });
+  pi.on("message_start", ({ message }) => {
+    if (message.role === "user" || (message.role === "custom" && message.customType !== NOTE_REQUEST)) noteRunSession = undefined;
+  });
+  pi.on("session_compact", () => { noteRunSession = undefined; });
 
   pi.on("session_tree", async (_e, ctx) => {
+    noteRunSession = undefined;
     stopPreflight();
     stateEpoch++;
     modelMemo.clear();
@@ -863,6 +887,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("agent_end", async () => {
+    noteRunSession = undefined;
     stopPreflight();
     stateEpoch++;
     modelMemo.clear();
