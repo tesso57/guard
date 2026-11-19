@@ -1,10 +1,8 @@
 import { MAX_FILE_BYTES } from "./files.ts";
 
 export type TextEdit = { oldText: string; newText: string };
-// Each edit scans both views; bound total synchronous search work per file.
 const MAX_SEARCH_CHARS = 100_000_000;
 
-/** Match Pi's fuzzy equivalence when checking whether an exact edit is unique. */
 function fuzzyComparable(text: string): string {
   return text.normalize("NFKC").split("\n").map((line) => line.trimEnd()).join("\n")
     .replace(/[\u2018\u2019\u201A\u201B]/g, "'")
@@ -13,7 +11,6 @@ function fuzzyComparable(text: string): string {
     .replace(/[\u00A0\u2002-\u200A\u202F\u205F\u3000]/g, " ");
 }
 
-/** Mirror pi's accepted edit argument forms without mutating tool input. */
 export function extractEdits(input: any): TextEdit[] | undefined {
   let value = input?.edits;
   if (typeof value === "string") {
@@ -26,7 +23,6 @@ export function extractEdits(input: any): TextEdit[] | undefined {
   return edits.map((e) => ({ oldText: e.oldText, newText: e.newText }));
 }
 
-/** Predict only unique, non-overlapping exact matches. Fuzzy matches must be confirmed by the user. */
 export function predictEdits(content: string, input: any): string | undefined {
   const edits = extractEdits(input);
   if (!edits) return undefined;
@@ -50,7 +46,6 @@ export function predictEdits(content: string, input: any): string | undefined {
     const text = normalize(edit.newText);
     added += text.length;
     removed += oldText.length;
-    // Non-overlapping edits cannot remove more than the original content.
     if (added >= MAX_FILE_BYTES + base.length) return undefined;
     replacements.push({ start, end: start + oldText.length, text });
   }
@@ -65,7 +60,7 @@ export function predictEdits(content: string, input: any): string | undefined {
   }
   parts.push(base.slice(cursor));
   const result = parts.join("");
-  if (result === base) return undefined; // Pi rejects edits that make no changes.
+  if (result === base) return undefined;
   const final = bom + (crlf ? result.replace(/\n/g, "\r\n") : result);
   return Buffer.byteLength(final, "utf8") < MAX_FILE_BYTES ? final : undefined;
 }

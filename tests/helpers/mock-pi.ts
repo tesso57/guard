@@ -10,7 +10,6 @@ type Responses = {
   select?: (string | undefined)[];
 };
 
-/** A deliberately partial Pi double. Unsupported APIs fail instead of silently succeeding. */
 export function createMockPi(responses: Responses = {}) {
   const commands = new Map<string, Command>();
   const tools = new Map<string, Tool>();

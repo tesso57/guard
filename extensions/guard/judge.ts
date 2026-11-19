@@ -1,15 +1,3 @@
-/**
- * Judgement with the OpenAI Decisions API.
- *
- * Input layout (following Claude Code's auto mode, assistant text and tool outputs are never sent):
- *   1. developer: fixed evaluation policy
- *   2. user: the human's recent messages (intent)
- *   3. function_call: recent tool calls, including earlier calls from the same assistant message
- *   4. user (input_json): past decisions the human made in the dialog, if any
- *   5. function_call + function_call_output "guard_collect_context": cwd and the contents of files the pending call
- *      runs or that changed in this session, presented as untrusted tool output, not as the human's words
- *   6. function_call: the call being judged
- */
 import { createHash } from "node:crypto";
 import { validBaseUrl, type Config } from "./config.ts";
 import { clip, redact, redactString, uniqueKey } from "./redact.ts";
@@ -23,7 +11,6 @@ type Answer = ScoreAnswer | PredicateAnswer | ChoiceAnswer | { type: "refusal"; 
 export type ModelVerdict = {
   action: "allow" | "confirm" | "block";
   reasons: string[];
-  /** True if every confirm reason may be lowered by a past approval. */
   onlySoftReasons: boolean;
   risk?: number;
   pHigh?: number;
@@ -82,18 +69,12 @@ export type JudgeRequest = {
   input: unknown;
   cwd: string;
   callId: string;
-  /** The human's recent messages, oldest first. */
   userMessages: string[];
-  /** Recent tool calls, oldest first. */
   history: { id: string; name: string; arguments: unknown }[];
-  /** True when a prior call could not be inspected safely and its arguments were withheld. */
   historyIncomplete?: boolean;
-  /** True when attachment preparation stopped before collecting all relevant files. */
   attachmentsIncomplete?: boolean;
-  /** Current (or about-to-be-written) contents of files the pending call executes or that were changed this session. */
   attachedFiles: Record<string, string>;
   past: Rule[];
-  /** Light check for calls that match an allow rule. */
   light: boolean;
   sessionId?: string;
 };
@@ -105,7 +86,6 @@ class DecisionResponseError extends Error {}
 
 function safeName(n: string) {
   const name = redactString(n).replace(/[^a-zA-Z0-9_.-]/g, "_").slice(0, 128) || "tool";
-  // Only guard's own synthetic call may use this name; other tools are untrusted inputs.
   return name === "guard_collect_context" ? "tool_guard_collect_context" : name;
 }
 function safeCallId(id: string) {
@@ -127,12 +107,10 @@ export function buildRequest(cfg: Config, req: JudgeRequest) {
   };
   const prep = (v: unknown, relevant = false) => {
     const masked = redact(v);
-    // A model cannot safely approve executable input or context it could not inspect.
     if (relevant && JSON.stringify(masked) !== JSON.stringify(v)) state.redacted = true;
     return clip(masked, cfg.maxFieldChars, state);
   };
   const items: unknown[] = [{ role: "developer", content: DEVELOPER }];
-  // Keep the current instruction identifiable while preserving redaction and truncation signals.
   req.userMessages.forEach((message, index) => {
     const latest = index === req.userMessages.length - 1;
     const masked = redactString(message);
@@ -155,8 +133,6 @@ export function buildRequest(cfg: Config, req: JudgeRequest) {
       ],
     });
   }
-  // Context that guard itself collected, as a tool output: outside the agent's arguments (so it cannot be forged)
-  // and not in a user message (so attached file contents are not mistaken for the human's request).
   const files: Record<string, unknown> = Object.create(null);
   let budget = MAX_ATTACHED_CHARS;
   for (const [path, content] of Object.entries(req.attachedFiles)) {
@@ -213,14 +189,12 @@ async function readDecisionResponse(res: Response, signal: AbortSignal): Promise
       chunks.push(value);
     }
   } finally {
-    // Cancellation is best effort; a broken stream must not hold the judgement open indefinitely.
-    if (!finished) try { void reader.cancel().catch(() => {}); } catch { /* preserve the read error */ }
-    try { reader.releaseLock(); } catch { /* preserve the read error */ }
+    if (!finished) try { void reader.cancel().catch(() => {}); } catch {   }
+    try { reader.releaseLock(); } catch {   }
   }
   try {
     return JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(Buffer.concat(chunks, total)));
   } catch {
-    // Native JSON parse errors may contain a fragment of the response.
     throw new DecisionResponseError("Decisions API: invalid JSON response");
   }
 }
@@ -231,7 +205,6 @@ export async function callDecisions(cfg: Config, body: unknown, signal?: AbortSi
   const key = process.env.GUARD_OPENAI_API_KEY;
   if (!key) throw new Error("GUARD_OPENAI_API_KEY is not set");
   let lastErr: Error | undefined;
-  // One deadline covers both attempts, including response streaming.
   const timeout = AbortSignal.timeout(cfg.timeoutMs);
   const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -242,15 +215,13 @@ export async function callDecisions(cfg: Config, body: unknown, signal?: AbortSi
       if (requestSignal.aborted) throw requestSignal.reason ?? new Error("aborted");
       const pending = fetch(`${cfg.baseUrl}/decisions`, {
         method: "POST",
-        // Never forward judgement context to a URL selected by the endpoint.
         redirect: "manual",
         signal: requestSignal,
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
         body: serializedBody,
       });
-      // If a nonconforming fetch resolves after cancellation, discard its body too.
       void pending.then((late) => {
-        if (requestSignal.aborted) try { void late.body?.cancel().catch(() => {}); } catch { /* best effort */ }
+        if (requestSignal.aborted) try { void late.body?.cancel().catch(() => {}); } catch {   }
       }, () => {});
       const res = await waitWithSignal(pending, requestSignal);
       if (res.ok) {
@@ -258,8 +229,7 @@ export async function callDecisions(cfg: Config, body: unknown, signal?: AbortSi
         if (!Array.isArray(data?.answers)) throw new DecisionResponseError("Decisions API: response has no answers");
         return data.answers;
       }
-      // Error bodies may echo request data and can be arbitrarily large. Do not persist or display them.
-      try { void res.body?.cancel().catch(() => {}); } catch { /* the status remains usable */ }
+      try { void res.body?.cancel().catch(() => {}); } catch {   }
       const hints: Record<number, string> = { 400: "invalid request", 401: "authentication failed", 403: "access denied", 404: "endpoint not found", 429: "rate limited" };
       lastErr = new Error(`Decisions API ${res.status}${hints[res.status] ? ` (${hints[res.status]})` : ""}`);
       if (res.status !== 429 && res.status < 500) break;
@@ -305,7 +275,6 @@ export function evaluate(cfg: Config, answers: Answer[], opts: { light: boolean;
     raise("confirm", `${name}: no answer or refused`);
     return 0;
   };
-  // Ambiguous duplicates still require confirmation, but must not hide an explicit block signal.
   let duplicateExfilBlock = false;
   let duplicateRiskBlock = false;
   for (const answer of answers) {
@@ -361,7 +330,6 @@ export function evaluate(cfg: Config, answers: Answer[], opts: { light: boolean;
   if ((opts.expectPastDenial || cd) && (!cd || duplicates.has("similar_to_past_denial") || cd.type !== "predicate" || !probability(cd.probability))) raise("confirm", "similar_to_past_denial: invalid or missing answer");
   else if (cd?.type === "predicate" && cd.probability >= t.pastDenialCovered) raise("confirm", `similar to a past denial p=${cd.probability.toFixed(2)}`);
 
-  // A past approval may only lower confirms that come from risk, irreversibility or low confidence
   const ca = by.get("covered_by_past_approval");
   if ((opts.expectPastApproval || ca) && (!ca || duplicates.has("covered_by_past_approval") || ca.type !== "predicate" || !probability(ca.probability)))
     raise("confirm", "covered_by_past_approval: invalid or missing answer");

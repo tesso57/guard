@@ -1,11 +1,3 @@
-/**
- * Remembered decisions.
- *
- * Scopes: session (pi session log) / project / global / repo (.pi/guard.json, trusted projects only, deny/ask only).
- * Precedence follows strictness, not scope: deny > ask > allow.
- * A bash allow applies only when every subcommand matches and the command has no dynamic parts.
- * Global allow rules apply only in trusted projects, so a freshly cloned repository cannot reuse them.
- */
 import { createHash, randomBytes } from "node:crypto";
 import { closeSync, mkdirSync, openSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
@@ -29,11 +21,9 @@ export type Rule = {
   tool: string;
   match: Match;
   scope: Scope;
-  /** cwd a session rule was created in; it does not apply elsewhere. */
   cwd?: string;
   createdAt: string;
   expiresAt?: string;
-  /** Model and risk at decision time, for investigating drift. */
   model?: string;
   risk?: number;
   note?: string;
@@ -41,24 +31,17 @@ export type Rule = {
 
 const SESSION_ENTRY = "guard-rule";
 
-/** Commands that are dangerous to allow by prefix. Allow rules for them must match the whole argv. */
 const EXACT_ONLY: string[][] = [
   ["rm"], ["rmdir"], ["mv"], ["dd"], ["chmod"], ["chown"], ["kill"], ["pkill"], ["killall"], ["truncate"], ["shred"],
   ["git", "push"], ["git", "reset"], ["git", "clean"], ["git", "checkout"], ["git", "restore"], ["git", "rebase"], ["git", "branch"],
   ["git", "tag"], ["git", "remote"], ["git", "config"], ["git", "filter-branch"], ["git", "update-ref"],
   ["curl"], ["wget"], ["ssh"], ["scp"], ["rsync"], ["docker"], ["kubectl"], ["terraform"], ["helm"], ["aws"], ["gcloud"], ["az"],
   ["npm", "publish"], ["pnpm", "publish"], ["yarn", "publish"], ["cargo", "publish"], ["gem", "push"], ["twine"], ["gh"],
-  // Installing packages runs their install scripts, so each package must be approved on its own
   ["npm", "install"], ["npm", "i"], ["npm", "add"], ["pnpm", "add"], ["pnpm", "install"], ["pnpm", "i"], ["yarn", "add"],
   ["bun", "add"], ["bun", "install"], ["pip", "install"], ["pip3", "install"], ["uv", "add"], ["uv", "pip"], ["cargo", "install"],
   ["go", "install"], ["gem", "install"], ["brew", "install"],
 ];
-/**
- * Tools whose second word is a subcommand. Only these get prefix rules (`npm test …`); for every other command
- * the arguments are paths or data (`cp a b`), so the rule must match the whole argv.
- */
 const SUBCOMMAND_TOOLS = new Set(["git", "npm", "pnpm", "yarn", "bun", "cargo", "go", "make", "gmake", "just", "uv", "poetry", "deno", "mvn", "gradle", "dotnet", "mix", "bundle", "rake", "tox", "nox", "turbo", "nx", "pre-commit"]);
-/** Subcommands whose next word picks an arbitrary script, so the rule needs three words. */
 const SCRIPT_SUBCOMMANDS = new Set(["run", "run-script", "exec", "x", "dlx"]);
 
 const requiresExactAllow = (a: string[]) => EXACT_ONLY.some((p) => p.every((t, i) => a[i] === t));
@@ -68,7 +51,6 @@ export function newId(): string {
   return randomBytes(8).toString("hex");
 }
 
-/** Preserve argument boundaries when presenting a command to a user or the judge. */
 const showArg = (value: string) => /^[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : `'${value.replace(/'/g, "'\\''")}'`;
 const showArgv = (argv: string[]) => argv.map(showArg).join(" ");
 
@@ -81,7 +63,6 @@ export function describeMatch(tool: string, m: Match): string {
   }
 }
 
-/** A global allow must not grant write or command-execution capabilities in another project. */
 export function globalAllowPatternIsReadOnly(tool: string, m: Match): boolean {
   if (tool === "bash") return (m.kind === "argv" || m.kind === "argv-exact") && isReadOnlyArgv(m.kind === "argv" ? m.prefix : m.argv);
   return ["read", "grep", "find", "ls"].includes(tool) && m.kind === "path";
@@ -99,7 +80,6 @@ function commandLikeInput(value: unknown): boolean {
   return false;
 }
 
-/** Whether any input for this tool can qualify for an any-input allow rule. */
 export function supportsAnyInputAllow(tool: string): boolean {
   return !["bash", "edit", "write", "read", "powershell"].includes(tool);
 }
@@ -108,16 +88,11 @@ function nonBashPattern(tool: string, input: any, cwd: string): Match[] | undefi
   const { reads, writes } = inputPaths(tool, input, cwd);
   const paths = [...new Set([...reads, ...writes])];
   if (paths.length === 1 && ["edit", "write", "read", "grep", "find", "ls"].includes(tool)) return [{ kind: "path", path: paths[0] }];
-  // "Any input" is only offered for tools whose arguments contain no command-like text
   const serialized = JSON.stringify(input ?? {});
   if (serialized.length < 16 * 1024 && paths.length === 0 && !commandLikeInput(input) && supportsAnyInputAllow(tool)) return [{ kind: "tool" }];
   return undefined;
 }
 
-/**
- * Patterns for remembering an allow. Undefined when the call cannot be generalized safely.
- * npm test -- foo → ["npm","test"] / npm run lint → ["npm","run","lint"] / cp a b → exact / python x.py → none
- */
 export function derivePatterns(tool: string, input: any, cwd: string, parsed?: Parsed): Match[] | undefined {
   if (tool !== "bash") return nonBashPattern(tool, input, cwd);
   if (!parsed || !parsed.ok || parsed.dynamic.length || !parsed.subcommands.length) return undefined;
@@ -132,10 +107,6 @@ export function derivePatterns(tool: string, input: any, cwd: string, parsed?: P
   );
 }
 
-/**
- * Patterns for remembering a deny: the command words plus its flags, without values.
- * `git push --force origin main` → ["git","push","--force"], which also blocks `git push -f origin dev`.
- */
 export function deriveDenyPatterns(tool: string, input: any, cwd: string, parsed?: Parsed): Match[] | undefined {
   if (tool !== "bash") return nonBashPattern(tool, input, cwd);
   if (!parsed || !parsed.subcommands.length) return undefined;
@@ -151,7 +122,6 @@ export function deriveDenyPatterns(tool: string, input: any, cwd: string, parsed
   );
 }
 
-/** An example the rule matches and one it does not, for the dialog. */
 export function examples(m: Match): { yes: string; no: string } | undefined {
   if (m.kind === "argv") {
     const words = m.prefix.filter((t) => !t.startsWith("-"));
@@ -161,7 +131,6 @@ export function examples(m: Match): { yes: string; no: string } | undefined {
   return undefined;
 }
 
-/** Strict matching for allow rules. Location options never match, and prefix rules never cover EXACT_ONLY commands. */
 function allowMatchesArgv(m: Match, raw: string[]): boolean {
   const { argv: a, unknownOption } = normalizeArgv(raw);
   if (unknownOption) return false;
@@ -170,7 +139,6 @@ function allowMatchesArgv(m: Match, raw: string[]): boolean {
   return false;
 }
 
-/** `-rf` → `-r`, `-f`, so remembered flags match in any order or grouping. */
 function splitFlags(flags: string[]): string[] {
   return [...new Set(flags.flatMap((f) => (/^-[A-Za-z0-9]{2,}$/.test(f) ? [...f.slice(1)].map((c) => `-${c}`) : [f])))];
 }
@@ -189,11 +157,6 @@ const FLAG_ALIASES: Record<string, string[]> = {
   "-a": ["--all"],
 };
 
-/**
- * Loose matching for deny and ask rules: the rule's words must prefix the command's words (flags ignored),
- * and each flag in the rule must be present in any spelling (`--force` also matches `-f`, `-fu`, `--force-with-lease`,
- * and a `+refspec` for git push).
- */
 function strictMatchesArgv(m: Match, raw: string[]): boolean {
   const ruleTokens = m.kind === "argv" ? m.prefix : m.kind === "argv-exact" ? m.argv : undefined;
   if (!ruleTokens) return false;
@@ -206,9 +169,7 @@ function strictMatchesArgv(m: Match, raw: string[]): boolean {
       (t) =>
         t === f ||
         t.startsWith(`${f}=`) ||
-        // abbreviations of long options (--force-w for --force-with-lease)
         (f.startsWith("--") && isLongOption(t, f)) ||
-        // a letter inside a cluster of short options (-fr, -Rf)
         (f.length === 2 && /^-[A-Za-z0-9]+$/.test(t) && t.includes(f[1])),
     );
   const forcePush = a[0] === "git" && words[1] === "push" && words.slice(2).some((w) => w.startsWith("+"));
@@ -216,10 +177,6 @@ function strictMatchesArgv(m: Match, raw: string[]): boolean {
     .every((f) => present(f) || (Object.hasOwn(FLAG_ALIASES, f) ? FLAG_ALIASES[f] : []).some(present) || ((f === "--force" || f === "-f") && forcePush));
 }
 
-/**
- * Subcommands plus the commands hidden inside `bash -c '…'`, `eval '…'` and similar (up to 3 levels),
- * so deny and ask rules also see them.
- */
 function expandSubcommands(subs: string[][], depth = 0): string[][] {
   const out: string[][] = [];
   for (const raw of subs) {
@@ -252,7 +209,6 @@ function validRule(r: any): r is Rule {
   return m.kind === "tool" && r.tool !== "bash";
 }
 
-/** Parses a rule file line by line. Broken lines are kept verbatim so a later write never drops them. */
 function readJsonl(file: string, scope: "project" | "global"): { rules: Rule[]; broken: string[] } {
   let text = "";
   try {
@@ -278,10 +234,6 @@ function readJsonl(file: string, scope: "project" | "global"): { rules: Rule[]; 
 
 const sleep = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
-/**
- * Runs fn on the freshly read file contents under a lock, then writes atomically.
- * Prevents lost updates when several pi processes change rules at the same time.
- */
 function updateFile(file: string, scope: "project" | "global", fn: (rules: Rule[]) => Rule[]): Rule[] {
   mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
   const lock = `${file}.lock`;
@@ -292,7 +244,6 @@ function updateFile(file: string, scope: "project" | "global", fn: (rules: Rule[
       break;
     } catch (e: any) {
       if (e?.code !== "EEXIST") throw e;
-      // Age alone cannot tell a crashed process from a paused or slow one.
       if (performance.now() > deadline) throw new Error(`guard: could not lock ${file}; if no guard process is updating it, remove ${lock}`);
       sleep(20);
     }
@@ -327,7 +278,6 @@ function projectFile(cwd: string): string {
   return join(DATA_DIR, "projects", `${basename(cwd).replace(/[^\w.-]/g, "_")}-${h}.jsonl`);
 }
 
-// Expiration is a limit on permissions, never a way to drop a remembered denial or confirmation.
 const live = (r: Rule) => r.decision !== "allow" || !r.expiresAt || Date.parse(r.expiresAt) >= Date.now();
 
 function fileVersion(file: string): string {
@@ -344,9 +294,7 @@ export class RuleStore {
   global: Rule[] = [];
   project: Rule[] = [];
   repo: Rule[] = [];
-  /** Problems found while reading rule files, for the user. */
   warnings: string[] = [];
-  /** Bumped on every change, so pre-judged results made before a change can be discarded. */
   version = 0;
   private sessionFromBranch: Rule[] = [];
   private sessionPending: Rule[] = [];
@@ -376,7 +324,6 @@ export class RuleStore {
         try { cfg = JSON.parse(contents); } catch { throw new Error("invalid JSON"); }
         if (!cfg || typeof cfg !== "object" || Array.isArray(cfg) || ["deny", "ask"].some((key) => cfg[key] !== undefined && (!Array.isArray(cfg[key]) || !cfg[key].every((p: unknown) => typeof p === "string" && p.trim()))))
           throw new Error("deny and ask must be arrays of non-empty command strings");
-        // A repository may only add deny and ask rules, never allow rules
         for (const d of ["deny", "ask"] as const) {
           for (const [index, p] of (cfg[d] ?? []).entries()) {
             const parsed = parseShell(p);
@@ -399,7 +346,6 @@ export class RuleStore {
     this.version++;
   }
 
-  /** Re-reads rule files that another pi process changed. */
   private refresh(force = false) {
     const f = this.files();
     for (const scope of ["global", "project"] as const) {
@@ -407,8 +353,6 @@ export class RuleStore {
         const version = fileVersion(f[scope]);
         if (force || this.fileVersions.get(scope) !== version || this.fileErrors.has(scope)) {
           const { rules, broken } = readJsonl(f[scope], scope);
-          // A concurrent replacement or removal can otherwise make this decision use a stale or
-          // accidentally empty rule set. Retain known rules and require confirmation until retry.
           if (fileVersion(f[scope]) !== version) throw new Error("rule file changed while reading");
           this[scope] = rules;
           this.fileVersions.set(scope, version);
@@ -428,7 +372,6 @@ export class RuleStore {
     }
   }
 
-  /** Rebuilds session rules from the current branch of the pi session, so rewinding with /tree drops later approvals. */
   syncSession(branch: { type: string; customType?: string; data?: any }[]) {
     const rules = new Map<string, Rule>();
     const invalidIds = new Set<string>();
@@ -485,7 +428,6 @@ export class RuleStore {
     return [...this.session(), ...this.repo, ...this.project, ...this.global].filter(live);
   }
 
-  /** The strictest decision that applies. A bash allow needs every subcommand to match an allow rule. */
   find(tool: string, input: any, cwd: string, parsed?: Parsed): { decision: Decision; rules: Rule[] } | undefined {
     const allRules = this.all();
     const rules = allRules.filter((r) => r.tool === tool && (r.scope !== "session" || !r.cwd || r.cwd === cwd));
@@ -514,7 +456,6 @@ export class RuleStore {
     return hit.length ? { decision: "allow", rules: hit } : undefined;
   }
 
-  /** Past decisions on the same tool with a similar pattern, ordered by strictness. */
   related(tool: string, input: any, cwd: string, parsed?: Parsed): Rule[] {
     const heads = new Set(parsed ? expandSubcommands(parsed.subcommands).map((a) => normalizeArgv(a, "deny").argv[0]) : []);
     const { reads, writes } = inputPaths(tool, input, cwd, parsed);
@@ -528,7 +469,6 @@ export class RuleStore {
         if (m.kind === "path") return dirs.has(dirname(m.path));
         return true;
       })
-      // Limited context should retain restrictive decisions before approvals.
       .sort((a, b) => ({ deny: 0, ask: 1, allow: 2 })[a.decision] - ({ deny: 0, ask: 1, allow: 2 })[b.decision]);
   }
 
@@ -540,7 +480,6 @@ export class RuleStore {
     } else if (rule.scope === "project" || rule.scope === "global") {
       const file = this.files()[rule.scope];
       this[rule.scope] = updateFile(file, rule.scope, (rs) => [...rs, rule]);
-      // Another process can replace the file as soon as the lock is released. Re-read on next use.
       this.fileVersions.delete(rule.scope);
     }
     this.version++;
@@ -569,7 +508,6 @@ export class RuleStore {
     return removed;
   }
 
-  /** Hit counts are kept in memory only, so counting never rewrites rule files. */
   hit(rules: Rule[]) {
     for (const r of rules) this.hits.set(r.id, this.hitCount(r.id) + 1);
   }

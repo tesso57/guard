@@ -6,21 +6,15 @@ export const AGENT_DIR = getAgentDir();
 export const DATA_DIR = join(AGENT_DIR, "guard");
 
 export type Config = {
-  /** Explicit opt-out: turns guard off completely. */
   disabled: boolean;
   model: string;
   baseUrl: string;
   timeoutMs: number;
-  /** Tools that skip the model. Sensitive-path and protected-path checks still run. */
   skipModelTools: string[];
   thresholds: {
-    /** Confirm when the weighted score (0-4) reaches this. */
     confirmScore: number;
-    /** Block when the probability of level 4 (catastrophic) reaches this. */
     blockPCatastrophic: number;
-    /** Block when the probability of level 3 or above reaches this. */
     blockPHigh: number;
-    /** Confirm when the probability of level 3 or above reaches this. */
     confirmPHigh: number;
     blockExfil: number;
     confirmExfil: number;
@@ -28,23 +22,17 @@ export type Config = {
     confirmUntrustedCode: number;
     confirmOutsideIntent: number;
     confirmAddressesEvaluator: number;
-    /** Confirm when score >= 1 and confidence is below this. */
     lowConfidence: number;
-    /** A past approval may lower confirm to allow when this probability is reached. */
     pastApprovalCovered: number;
     pastDenialCovered: number;
   };
-  /** Days a project or global allow rule stays valid. */
   allowRuleTtlDays: number;
-  /** Maximum length of each string sent to the judge (head and tail are kept). */
   maxFieldChars: number;
   contextUserMessages: number;
   contextToolCalls: number;
   escalateConsecutive: number;
   escalateTotal: number;
-  /** How long the approval dialog waits before it counts as a deny. */
   dialogTimeoutMs: number;
-  /** How long an "allow" verdict from the model is reused for an identical call. */
   verdictCacheMs: number;
 };
 
@@ -95,7 +83,6 @@ const INTEGER_SETTINGS = new Set<keyof Config>([
   "escalateConsecutive", "escalateTotal", "dialogTimeoutMs", "verdictCacheMs",
 ]);
 
-/** A base URL must identify an HTTP endpoint, without embedded credentials or a query. */
 export function validBaseUrl(value: unknown): value is string {
   if (typeof value !== "string" || !value.trim() || /[?#]/.test(value)) return false;
   try {
@@ -104,11 +91,6 @@ export function validBaseUrl(value: unknown): value is string {
   } catch { return false; }
 }
 
-/**
- * Defaults ← ~/.pi/agent/guard/config.json ← environment variables.
- * Invalid file numbers fall back to defaults; invalid environment overrides retain the validated file value.
- * Both are reported in `warnings` instead of silently disabling a check.
- */
 export function loadConfig(): Config & { warnings: string[] } {
   const warnings: string[] = [];
   let file: any = {};

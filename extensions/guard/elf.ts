@@ -1,7 +1,6 @@
 import { isUtf8 } from "node:buffer";
 import { posix } from "node:path";
 
-/** Read bounded ELF program headers without executing the candidate. */
 export function elfPrograms(header: Buffer, size: number, read: (offset: number, length: number) => Buffer): { interpreter?: string; libraryPaths?: string[]; dependencies?: string[]; audit?: boolean } | undefined {
   try {
     if (!Number.isSafeInteger(size) || size < 0 || header.length < 52 || header.subarray(0, 4).toString("hex") !== "7f454c46" || ![1, 2].includes(header[4]) || ![1, 2].includes(header[5]) || header[6] !== 1) return undefined;

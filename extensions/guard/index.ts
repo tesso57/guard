@@ -1,16 +1,3 @@
-/**
- * guard — judges the risk of every pi tool call before it runs.
- *
- * Evaluation order:
- *   1. hard deny (protected paths, obvious destruction)          → block; an exact retry may ask once
- *   2. deny / ask rules (any scope)                               → block / confirm
- *   3. allow rule matching every subcommand                       → light model check (exfiltration, intent, judge manipulation)
- *   4. sensitive paths                                            → confirm
- *   5. safe list (read-only bash, plain edits inside the project) → allow without the model
- *   6. skipModelTools (read/grep/find/ls)                         → allow
- *   7. Decisions API with intent, history and past decisions      → allow / confirm / block
- *   Failures confirm (or block without a UI). Without GUARD_OPENAI_API_KEY guard runs in rules-only mode.
- */
 import { createHash } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
 import { basename, isAbsolute, relative } from "node:path";
@@ -30,11 +17,9 @@ import { isSkillRead, type RegisteredSkill } from "./skill-read.ts";
 import { confirmDialog, displayText, preview } from "./ui.ts";
 
 const STATE_ENTRY = "guard-state";
-/** Commands that run project scripts, tests or build files, which an earlier edit may have changed. */
 const SCRIPT_RUNNERS = new Set([
   "npm", "pnpm", "yarn", "bun", "npx", "make", "gmake", "just", "pytest", "tox", "nox", "cargo", "go", "gradle", "gradlew", "mvn", "rake", "bundle",
   "deno", "uv", "poetry", "turbo", "nx", "jest", "vitest", "pre-commit", "docker", "docker-compose",
-  // Interpreters load project code too (python -m pytest, node --test, sh script.sh)
   "python", "python3", "node", "ruby", "perl", "php", "sh", "bash", "zsh",
 ]);
 const MAX_CACHE = 500;
@@ -60,7 +45,6 @@ type Assessment = {
   action: "allow" | "confirm" | "block";
   source: "hard-deny" | "rule-deny" | "rule-ask" | "rule-allow" | "sensitive" | "safe" | "skip" | "model" | "cache" | "concurrent" | "error";
   reasons: string[];
-  /** A separately sanitized explanation for persistent audit records, when needed. */
   auditReasons?: string[];
   verdict?: ModelVerdict;
   patterns?: Match[];
@@ -76,14 +60,12 @@ function stableHash(v: unknown): string {
   return createHash("sha256").update(JSON.stringify(norm(v))).digest("hex");
 }
 
-/** Tool arguments must remain JSON data for comparisons to be reliable. */
 function toolInputHash(tool: string, input: unknown): string {
   const ancestors = new WeakSet<object>();
   let remaining = 100_000;
   const visit = (value: unknown): void => {
     if (--remaining < 0) throw new Error("tool input is too complex");
     if (value === null || typeof value === "string" || typeof value === "boolean") return;
-    // JSON.stringify collapses -0 to 0, but a tool can distinguish them.
     if (typeof value === "number" && Number.isFinite(value) && !Object.is(value, -0)) return;
     if (typeof value !== "object") throw new Error("tool input is not JSON data");
     if (utilTypes.isProxy(value)) throw new Error("tool input contains a proxy");
@@ -111,7 +93,6 @@ function toolInputHash(tool: string, input: unknown): string {
   return stableHash([tool, input]);
 }
 
-/** Shell lookup, startup and ripgrep configuration can change while judgement is pending. */
 function shellEnvironmentHash(parsed?: Parsed): string {
   const unknown = !parsed || !parsed.ok || parsed.dynamic.length > 0;
   const usesRipgrep = !parsed || !parsed.ok || parsed.dynamic.length > 0 || parsed.subcommands.some((raw) => {
@@ -132,11 +113,9 @@ function textOf(content: unknown): string {
 }
 
 const TREE_TOOLS = new Set(["tar", "unzip", "7z", "bsdtar", "rsync", "cp", "mv", "ln", "patch", "curl", "wget", "git-lfs"]);
-/** Package-manager subcommands that replace dependency trees (and their bin links). */
 const PM_TREE = new Set(["install", "i", "ci", "add", "update", "upgrade", "up", "remove", "rm", "uninstall", "rebuild", "link", "sync", "dedupe", "prune"]);
 const PACKAGE_MANAGERS = new Set(["npm", "pnpm", "yarn", "bun", "pip", "pip3", "uv", "poetry", "cargo", "go", "gem", "bundle", "composer"]);
 
-/** Calls that may replace or add many files at once (and so create symlinks guard has not seen). */
 function changesTrees(c: ToolCallLike): boolean {
   if (c.name !== "bash") return !["read", "grep", "find", "ls", "write", "edit"].includes(c.name);
   const p = parseShell(String(c.arguments?.command ?? ""));
@@ -144,12 +123,10 @@ function changesTrees(c: ToolCallLike): boolean {
   return p.subcommands.some((raw) => {
     const a = normalizeArgv(raw, "deny").argv;
     const sub = a.find((t, i) => i > 0 && !t.startsWith("-")) ?? "";
-    // Git operations that change state can run hooks, which may modify arbitrary files.
     return TREE_TOOLS.has(a[0]) || (a[0] === "git" && !isReadOnlyArgv(raw)) || (PACKAGE_MANAGERS.has(a[0]) && PM_TREE.has(sub));
   });
 }
 
-/** Whether the call writes anything (tools that write, or bash that is not strictly read-only). */
 function callWrites(tool: string, input: any, cwd: string, parsed?: Parsed): boolean {
   if (tool === "write" || tool === "edit") return true;
   if (tool !== "bash") return !["read", "grep", "find", "ls"].includes(tool);
@@ -183,12 +160,9 @@ function siblingWrites(c: ToolCallLike, cwd: string): string[] {
   }
 }
 
-/** Ignore files change what later searches (rg, fd, git grep) read. */
 const IGNORE_FILES = new Set([".ignore", ".rgignore", ".gitignore", ".fdignore"]);
-/** Read-only shell commands that operate on strings or process identity without opening project paths. */
 const NO_PATH_READ_COMMANDS = new Set(["echo", "printf", "pwd", "true", "false", "whoami", "uname", "id", "groups", "basename", "dirname"]);
 
-/** Plain edits of ordinary project files and mkdir/touch: they cannot create links or reach outside the project. */
 function isPlainChange(c: ToolCallLike, cwd: string, trustedDirs: TrustedDirState): boolean {
   if (siblingWrites(c, cwd).some((p) => IGNORE_FILES.has(basename(p)))) return false;
   if (c.name === "write" || c.name === "edit") return safeAllow(c.name, c.arguments, cwd, { trusted: false, touched: new Set(), trustedDirs });
@@ -197,7 +171,6 @@ function isPlainChange(c: ToolCallLike, cwd: string, trustedDirs: TrustedDirStat
   return p.subcommands.every((a) => ["mkdir", "touch"].includes(normalizeArgv(a).argv[0])) && safeAllow("bash", c.arguments, cwd, { trusted: false, touched: new Set(), trustedDirs }, p);
 }
 
-/** True for calls that cannot change the file system: read tools and strictly read-only bash. */
 function isPureRead(c: ToolCallLike, cwd: string, trustedDirs: TrustedDirState): boolean {
   if (["read", "grep", "find", "ls"].includes(c.name)) return true;
   if (c.name !== "bash") return false;
@@ -221,10 +194,6 @@ export default function (pi: ExtensionAPI) {
   let enabled = true;
   let trusted = false;
   let storeCwd = "";
-  /**
-   * Model verdicts started at message_end, reused by tool_call. Only the model call is reused:
-   * every deterministic check runs again at tool_call, because earlier calls may have changed the file system.
-   */
   const modelMemo = new Map<string, Promise<ModelVerdict>>();
   const obsoletePreflight = new Error("preflight no longer valid");
   let preflightController: AbortController | undefined;
@@ -232,16 +201,12 @@ export default function (pi: ExtensionAPI) {
     preflightController?.abort(obsoletePreflight);
     preflightController = undefined;
   };
-  /** Earlier calls for context and all other calls for concurrent filesystem risks. */
   const siblingsById = new Map<string, BatchContext>();
   const judged = new Map<string, { hash: string; session: string }>();
   const verdictCache = new Map<string, { at: number; a: Assessment }>();
-  /** Files written or edited in this session. */
   const touched = new Set<string>();
-  /** True once an allowed call changed files in ways guard cannot list (git checkout, tar x, rsync, ...). */
   let opaqueChanges = false;
   const promoted = new Set<string>();
-  /** Calls guard blocked this session (tool + input); the same call again asks the user instead of blocking. */
   const blockedOnce = new Set<string>();
   let consecutiveBlocks = 0;
   let totalBlocks = 0;
@@ -258,7 +223,7 @@ export default function (pi: ExtensionAPI) {
       if (ctx.hasUI) ctx.ui.notify(text, "warning");
       else process.stderr.write(`${text}\n`);
       return true;
-    } catch { return false; /* notifications must not affect decisions */ }
+    } catch { return false;   }
   }
 
   function recordAudit(ctx: ExtensionContext, record: AuditRecord) {
@@ -275,7 +240,6 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  /** A preview in a persistent log must not copy contents supplied for sensitive files. */
   function auditPreview(ctx: ExtensionContext, tool: string, input: unknown): string {
     try {
       const parsed = tool === "bash" ? parseShell(String((input as any)?.command ?? "")) : undefined;
@@ -317,25 +281,18 @@ export default function (pi: ExtensionAPI) {
     for (const warning of store.warnings) warn(ctx, `guard: ${warning}`);
   }
 
-  /**
-   * Tools other extensions vouch for (`pi.events.emit("guard:trust-tool", { tool, by })`), e.g. a notes extension's
-   * notes_write. They run without judgement. Extensions are code the user installed and run with full privileges anyway;
-   * built-in tools cannot be vouched for, and tools of project-local extensions count only in trusted projects.
-   */
   const extensionTrust = new Map<string, string>();
   pi.events.on("guard:trust-tool", (data) => {
     const d = data as { tool?: unknown; by?: unknown } | undefined;
     if (typeof d?.tool !== "string" || !d.tool) return;
     extensionTrust.set(d.tool, typeof d.by === "string" && d.by ? d.by.slice(0, 64) : "an extension");
   });
-  // Folders another extension vouches for: { path: "~/.pi/artifacts", by: "artifacts", access?: "read" | "write" }
   pi.events.on("guard:trust-dir", (data) => {
     const d = data as { path?: unknown; by?: unknown; access?: unknown } | undefined;
     if (typeof d?.path !== "string" || !d.path) return;
     if (d.access !== undefined && d.access !== "read" && d.access !== "write") return;
     trustDir(d.path, d.access !== "read", typeof d.by === "string" && d.by ? d.by.slice(0, 64) : "an extension", trustedDirs);
   });
-  /** Why a vouched-for tool name does not count (undefined when it does). */
   function trustProblem(tool: string): string | undefined {
     if (BUILTIN_TOOLS.has(tool)) return "built-in tools cannot be vouched for";
     try {
@@ -362,9 +319,9 @@ export default function (pi: ExtensionAPI) {
         const path = command.sourceInfo?.path;
         if (command.source !== "skill" || typeof path !== "string" || !isAbsolute(path)) continue;
         if (registeredSkillTargets.has(path)) continue;
-        try { if (statSync(path).isFile()) registeredSkillTargets.set(path, realPath(path)); } catch { /* unavailable skills do not qualify */ }
+        try { if (statSync(path).isFile()) registeredSkillTargets.set(path, realPath(path)); } catch {   }
       }
-    } catch { /* unavailable registry does not grant new bypasses */ }
+    } catch {   }
   }
 
   function registeredSkillPaths(): RegisteredSkill[] {
@@ -377,7 +334,6 @@ export default function (pi: ExtensionAPI) {
     } catch { return []; }
   }
 
-  /** Other tool calls of the assistant message that contains callId, from the session branch. */
   function siblingsFromBranch(ctx: ExtensionContext, callId: string): BatchContext {
     const branch = ctx.sessionManager.getBranch() as any[];
     for (let i = branch.length - 1; i >= 0; i--) {
@@ -395,7 +351,6 @@ export default function (pi: ExtensionAPI) {
     return { earlier: [], peers: [] };
   }
 
-  /** Builds the judge's context from the session branch plus earlier calls of the same assistant message. */
   function context(ctx: ExtensionContext, callId: string, tool: string, parsed: Parsed | undefined, siblings: ToolCallLike[], peers: ToolCallLike[], historyBoundary?: number) {
     const users: unknown[] = [];
     const calls: ToolCallLike[] = [];
@@ -427,10 +382,8 @@ export default function (pi: ExtensionAPI) {
         if (current >= 0) break;
       }
     }
-    // At message_end the current message is not in the branch yet, so add earlier siblings explicitly
     for (const s of siblings) if (!seenSiblings.has(s.id)) addCall(s, true);
 
-    // Proposed contents from concurrent calls; Pi has not executed them when this call is judged.
     const roots = protectedRoots(ctx.cwd, ctx.sessionManager.getSessionDir());
     let historyIncomplete = false;
     let historyLiteralBudget = 128;
@@ -442,7 +395,6 @@ export default function (pi: ExtensionAPI) {
       const parsedCall = call.name === "bash" ? parseShell(String(call.arguments?.command ?? "")) : undefined;
       if ((parsedCall && !parsedCall.ok) || hasUninspectedToolInput(call.name, call.arguments)) return withholdUninspectable();
       const paths = inputPaths(call.name, call.arguments, ctx.cwd, parsedCall);
-      // Interpreter snippets can hide path strings inside code rather than as shell operands.
       const embedded: string[] = [];
       if (parsedCall?.dynamic.length) for (const word of parsedCall.subcommands.flat()) {
         for (const match of word.matchAll(/(['"])([\s\S]*?)\1/g)) {
@@ -457,7 +409,6 @@ export default function (pi: ExtensionAPI) {
     const virtual = new Map<string, string>();
     const unknownEdits = new Set<string>();
     const concurrentPaths = new Map<string, string[]>();
-    // Only bash assessments attach project files; other tools need history, not edit predictions.
     for (const s of tool === "bash" ? peers : []) {
       const path = piString(s.arguments?.path);
       const p = path === undefined ? undefined : resolvePath(ctx.cwd, path);
@@ -507,14 +458,12 @@ export default function (pi: ExtensionAPI) {
         attached[p] = text;
         attachmentCount++;
       };
-      // Its other name may be a secret outside the project, which cannot be inferred from this path.
       if (isHardLinked(p)) {
         record("[contents withheld by guard: file has multiple hard links]");
         hardlinkedFiles.add(p);
         if (mustInspect) unreadableFiles.push(p);
         return;
       }
-      // Never send secrets (or guard's own state) to the judge; the name is enough for it to know the file is involved
       if (sensitiveReason(p) || protectedReason(p, roots)) {
         record("[contents withheld by guard: file likely holds secrets]");
         return;
@@ -547,11 +496,9 @@ export default function (pi: ExtensionAPI) {
     let changedCount = 0;
     if (tool === "bash" && parsed) {
       for (const tok of parsed.subcommands.flat()) attach(resolvePath(ctx.cwd, tok));
-      // Interpreters, runners, and scripts run by path (./run.sh) execute file contents
       const versionQuery = (a: string[]) => a.length === 2 && !a[0].includes("/") && /^(--version|-V|--help)$/.test(a[1]) && isReadOnlyArgv(a);
       runsScripts = parsed.subcommands.some((a) => !versionQuery(a) && (SCRIPT_RUNNERS.has(normalizeArgv(a, "deny").argv[0]) || (a[0] ?? "").includes("/")));
       if (runsScripts) {
-        // The script an interpreter or runner is given is what will run, whoever wrote it
         for (const tok of parsed.subcommands.flat()) {
           const p = resolvePath(ctx.cwd, tok);
           if (isRegularFile(p)) attach(p, true, true);
@@ -559,12 +506,9 @@ export default function (pi: ExtensionAPI) {
             try {
               const st = statSync(p);
               if (!st.isDirectory()) unreadableFiles.push(p);
-            } catch { /* missing path */ }
+            } catch {   }
           }
         }
-        // Test runners and build tools also load project files that are not named in the command
-        // (tests, conftest.py, package.json scripts, node_modules/.bin): attach every file changed in this session,
-        // and recently changed project files (which may come from an earlier session or a git checkout)
         let candidates = 0;
         candidateScan: for (const paths of [virtual.keys(), unknownEdits.values(), touched.values()]) for (const p of paths) {
           if (!isInsideExact(p, ctx.cwd)) continue;
@@ -572,9 +516,7 @@ export default function (pi: ExtensionAPI) {
           attach(p, false, true);
           if (attachmentsIncomplete) break candidateScan;
         }
-        // Changes guard could not follow (git checkout, extracting archives) also call for a full judgement
         changedCount = Object.keys(attached).length + (opaqueChanges ? 1 : 0);
-        // Context only: recently changed files do not by themselves force a full judgement
         if (!attachmentsIncomplete) for (const p of recentlyChangedFiles(ctx.cwd)) {
           attach(p, true);
           if (attachmentsIncomplete) break;
@@ -605,7 +547,6 @@ export default function (pi: ExtensionAPI) {
         expectPastApproval: !light && past.some((r) => r.decision === "allow"),
       });
     };
-    // Unknown changes may alter files without changing any of the visible context.
     if (opaqueChanges && cx.changedFilesRun) return run();
     const memo = modelMemo.get(key);
     if (memo) {
@@ -615,7 +556,7 @@ export default function (pi: ExtensionAPI) {
       } catch (e) {
         if (e === obsoletePreflight) throw e;
         if (signal?.aborted) throw new Error("aborted");
-        return run(); // the early call failed (e.g. aborted turn); judge again now
+        return run();
       }
     }
     const p = run();
@@ -647,7 +588,6 @@ export default function (pi: ExtensionAPI) {
     syncProject(ctx);
     store.syncSession(ctx.sessionManager.getBranch() as any[]);
     const found = store.find(tool, input, ctx.cwd, parsed);
-    // An allow rule only covers calls whose paths stay inside the project, writing only plain files
     const rule = found?.decision === "allow" && (!writesStayPlain(tool, input, ctx.cwd, parsed, trustedDirs, roots) || !pathsStayInProject(tool, input, ctx.cwd, parsed)) ? undefined : found;
     const patterns = derivePatterns(tool, input, ctx.cwd, parsed);
     const denyPatterns = deriveDenyPatterns(tool, input, ctx.cwd, parsed);
@@ -658,11 +598,9 @@ export default function (pi: ExtensionAPI) {
     if (usesRipgrepConfig(parsed)) return { ...base, action: "confirm", source: "sensitive", reasons: ["ripgrep may load options from RIPGREP_CONFIG_PATH"], denyPatterns };
     if (usesGrepOptions(parsed)) return { ...base, action: "confirm", source: "sensitive", reasons: ["grep may load options from GREP_OPTIONS"], denyPatterns };
 
-    // Pi may execute all calls in this message concurrently, regardless of their order in the message.
     const peers = opts.peers ?? opts.siblings ?? [];
     const cx = context(ctx, callId, tool, parsed, opts.siblings ?? [], peers, opts.historyBoundary);
     const siblingMayChange = peers.some((sb) => !isPureRead(sb, ctx.cwd, trustedDirs) && !isPlainChange(sb, ctx.cwd, trustedDirs));
-    // Concurrent tree changes and non-plain writes can change paths or execution configuration.
     const treeChanger = peers.find((sb) => {
       if (changesTrees(sb)) return true;
       const writes = siblingWrites(sb, ctx.cwd);
@@ -687,7 +625,6 @@ export default function (pi: ExtensionAPI) {
     const builtinSearchRisk = builtinExecutable.risk;
     const scopeUncertain = searchNeedsJudgement(tool, input, ctx.cwd, parsed, trustedDirs, roots);
     const uncertainSearch = scopeUncertain || !!builtinSearchRisk;
-    // A peer can change the file before or while this call executes it.
     const siblingRun = cx.fromSiblings.length ? `runs ${cx.fromSiblings.map((p) => relative(ctx.cwd, p)).join(", ")}, which may change concurrently in this message` : undefined;
 
     if (cx.unreadableFiles.length) {
@@ -729,7 +666,7 @@ export default function (pi: ExtensionAPI) {
       if (cfg !== config || stateEpoch !== epoch) return true;
       syncProject(ctx);
       store.syncSession(ctx.sessionManager.getBranch() as any[]);
-      store.all(); // Refresh rule files that may have changed in another process.
+      store.all();
       return cfg !== config || stateEpoch !== epoch || store.version !== ruleVersion;
     };
     if (rule?.decision === "allow" && !sens && !uncertainSearch && !historyIncomplete && !siblingRun && !cx.changedFilesRun && !siblingMayChange) {
@@ -763,12 +700,9 @@ export default function (pi: ExtensionAPI) {
       return { ...base, action: "confirm", source: "sensitive", reasons: [...reasons, ...(treeReason ? [treeReason] : [])], ...(treeAuditReason ? { auditReasons: [...reasons, treeAuditReason] } : {}), patterns, denyPatterns, rememberAllow: !!patterns && !siblingRun && !treeConflict && !uncertainSearch };
     }
     const shortcutsOk = !siblingRun && !siblingMayChange;
-    // Files earlier calls of this message will write count as touched for this judgement (git dirs, ignore files)
     const touchedNow = new Set([...touched, ...peers.flatMap((sb) => siblingWrites(sb, ctx.cwd))]);
     if (shortcutsOk && !cx.changedFilesRun && safeAllow(tool, input, ctx.cwd, { trusted, touched: touchedNow, trustedDirs, protectedPaths: roots }, parsed)) return { ...base, action: "allow", source: "safe", reasons: [] };
     if (shortcutsOk && !cx.changedFilesRun && !historyIncomplete && !uncertainSearch && cfg.skipModelTools.includes(tool)) {
-      // read/grep/find/ls skip the model only inside the project (or public system directories). pi's read tries
-      // other spellings (curly quotes, NFD, AM/PM) when a path does not exist, so a read must name an existing file.
       const reads = inputPaths(tool, input, ctx.cwd).reads;
       const exists = tool !== "read" || reads.every((p) => existsSync(p));
       if (exists && (reads.length ? reads : [ctx.cwd]).every((p) => isFreelyReadable(p, ctx.cwd, trustedDirs, roots))) return { ...base, action: "allow", source: "skip", reasons: [] };
@@ -792,7 +726,6 @@ export default function (pi: ExtensionAPI) {
       const rememberAllow =
         !!patterns && v.action !== "block" && (v.pHigh ?? 1) < t.confirmPHigh && (v.exfiltration ?? 1) < t.confirmExfil &&
         (v.addressesEvaluator ?? 1) < t.confirmAddressesEvaluator && !v.truncated && !v.redacted;
-      // Global allow rules apply in every trusted project, so only read-only calls may become one
       const globalAllow = rememberAllow && trusted && v.category === "read_only" && (v.risk ?? 9) < t.confirmScore && !!patterns?.every((p) => globalAllowPatternIsReadOnly(tool, p));
       const a: Assessment = { action: v.action, source: "model", reasons: v.reasons, verdict: v, patterns, denyPatterns, rememberAllow, globalAllow };
       if (siblingRun) {
@@ -832,7 +765,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   function status(ctx: ExtensionContext, text: string) {
-    try { ctx.ui.setStatus("guard", displayText(text)); } catch { /* status display must not affect decisions */ }
+    try { ctx.ui.setStatus("guard", displayText(text)); } catch {   }
   }
 
   function addRule(decision: Decision, scope: Exclude<Scope, "repo">, tool: string, match: Match, cwd: string, risk?: number, note?: string): Rule {
@@ -885,10 +818,8 @@ export default function (pi: ExtensionAPI) {
       warn(ctx, "guard: GUARD_OPENAI_API_KEY is not set. Running in rules-only mode: calls that need a model judgement will ask you first.");
   });
 
-  // Pi may bind its command registry after session_start.
   pi.on("before_agent_start", () => { snapshotRegisteredSkills(); });
 
-  // Rewinding with /tree changes which session rules and on/off state apply
   pi.on("session_tree", async (_e, ctx) => {
     stopPreflight();
     stateEpoch++;
@@ -901,13 +832,10 @@ export default function (pi: ExtensionAPI) {
     restoreState(ctx);
   });
 
-  // Start judging every tool call of an assistant message in parallel as soon as the message ends
-  // (pi preflights sibling calls one by one, which would otherwise add up the latency).
   pi.on("message_end", async (event, ctx) => {
     if (cfg.disabled || !enabled) return;
     const m: any = event.message;
     if (m?.role !== "assistant" || !Array.isArray(m.content)) return;
-    // A provider may reuse an ID in a later message; no preflight belongs to two messages.
     stopPreflight();
     stateEpoch++;
     modelMemo.clear();
@@ -921,8 +849,6 @@ export default function (pi: ExtensionAPI) {
       for (const c of calls) siblingsById.set(c.id, invalid);
       return;
     }
-    // Synchronize trust and project state before creating the controller, so this message's
-    // own preflight cannot cancel itself when Pi's context changes after session_start.
     syncProject(ctx);
     preflightController = new AbortController();
     const preflightSignal = ctx.signal ? AbortSignal.any([ctx.signal, preflightController.signal]) : preflightController.signal;
@@ -932,7 +858,6 @@ export default function (pi: ExtensionAPI) {
       const siblings = calls.slice(0, i);
       const peers = calls.filter((_, j) => j !== i);
       siblingsById.set(c.id, { earlier: siblings, peers, historyBoundary });
-      // Bound speculative work; later calls are assessed normally when Pi reaches tool_call.
       if (i < MAX_PREFLIGHT_CALLS) assess(c.id, c.name, c.arguments, ctx, { signal: preflightSignal, siblings, peers, historyBoundary }).catch(() => {});
     });
   });
@@ -945,8 +870,6 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("tool_call", async (event, ctx) => {
-    // Providers may reuse an ID; a blocked or disabled call must not inherit
-    // drift tracking from an earlier allowed call with that ID.
     judged.delete(event.toolCallId);
     if (cfg.disabled || !enabled) return;
     if (isSkillRead(event.toolName, event.input, ctx.cwd, registeredSkillPaths())) return;
@@ -958,10 +881,10 @@ export default function (pi: ExtensionAPI) {
       totalBlocks++;
       if (consecutiveBlocks >= cfg.escalateConsecutive || totalBlocks >= cfg.escalateTotal) {
         const message = `guard: too many blocked calls (${consecutiveBlocks} in a row, ${totalBlocks} total). Stopped the agent.`;
-        if (ctx.hasUI) { try { ctx.ui.notify(message, "error"); } catch { /* notification failure must not prevent stopping */ } }
+        if (ctx.hasUI) { try { ctx.ui.notify(message, "error"); } catch {   } }
         else warn(ctx, message);
         consecutiveBlocks = 0;
-        try { ctx.abort(); } catch { /* the current call must still be blocked */ }
+        try { ctx.abort(); } catch {   }
         return { ...blockResult(reason, retry), terminate: true };
       }
       return blockResult(reason, retry);
@@ -977,9 +900,7 @@ export default function (pi: ExtensionAPI) {
     }
     let vouched: string | undefined;
     let trustAvailable = false;
-    // Project trust may have changed since the last event. If it cannot be
-    // refreshed, continue through the guarded path instead of taking a shortcut.
-    try { syncProject(ctx); trustAvailable = true; vouched = trustedByExtension(tool); } catch { /* assess will fail closed */ }
+    try { syncProject(ctx); trustAvailable = true; vouched = trustedByExtension(tool); } catch {   }
     if (vouched) {
       siblingsById.delete(event.toolCallId);
       recordAudit(ctx, { session, tool, preview: auditPreview(ctx, tool, input), action: "allow", source: "extension", reasons: [`trusted by ${vouched}`], final: "run" });
@@ -1002,20 +923,17 @@ export default function (pi: ExtensionAPI) {
     status(ctx, `guard: judging ${tool}…`);
     let a: Assessment;
     try {
-      // Deterministic checks always run on the current state; a model verdict started at message_end is reused
-      // only if the input, attachments and past decisions it was based on are unchanged
       a = batch.problem
         ? { action: "block", source: "error", reasons: [batch.problem], rememberAllow: false, globalAllow: false }
         : await assess(event.toolCallId, tool, input, ctx, { signal: ctx.signal, siblings: batch.earlier, peers: batch.peers, historyBoundary: batch.historyBoundary });
     } catch (error) {
-      // Context and extension errors can contain credentials or file contents.
       const rulesScope = error instanceof Error ? /(?:^|; )cannot read (global|project|repository) rules \(/.exec(error.message)?.[1] : undefined;
       const reason = rulesScope ? `cannot read ${rulesScope} rules` : "could not judge: context unavailable";
       a = { action: "confirm", source: "error", reasons: [reason], rememberAllow: false, globalAllow: false };
     }
     const inputMatches = () => event.toolName === tool && event.input === input && toolInputHash(tool, input) === hash;
     let inputChanged = true;
-    try { inputChanged = !inputMatches(); } catch { /* treat uninspectable input as changed */ }
+    try { inputChanged = !inputMatches(); } catch {   }
     const judgementAborted = !!ctx.signal?.aborted;
     if (judgementAborted) a = { action: "block", source: "error", reasons: ["judgement was aborted"], rememberAllow: false, globalAllow: false };
     else if (inputChanged) a = { action: "block", source: "error", reasons: ["input changed during judgement"], rememberAllow: false, globalAllow: false };
@@ -1025,7 +943,7 @@ export default function (pi: ExtensionAPI) {
       store.syncSession(ctx.sessionManager.getBranch() as any[]);
       store.all();
       if (!store.hasErrors) retryRulesVersion = store.version;
-    } catch { /* no retry shortcut when rules cannot be refreshed */ }
+    } catch {   }
     const retryKey = stableHash([hash, ctx.cwd, trustAvailable ? trusted : "unavailable", session, trustedDirs.version, retryRulesVersion]);
     const what = inputChanged || judgementAborted || batch.problem ? `${tool} [arguments withheld: input could not be inspected]` : preview(tool, input);
     const risk = a.verdict?.risk;
@@ -1038,14 +956,11 @@ export default function (pi: ExtensionAPI) {
     const onAllowed = () => {
       judged.set(event.toolCallId, { hash, session });
       consecutiveBlocks = 0;
-      // Files this call changes; running them later attaches their new contents
       try {
         if (changesTrees({ id: "", name: tool, arguments: input })) opaqueChanges = true;
         const parsedNow = tool === "bash" ? parseShell(String(input?.command ?? "")) : undefined;
         if (tool === "edit" || tool === "write" || tool === "bash") for (const p of inputPaths(tool, input, ctx.cwd, parsedNow).writes) touched.add(p);
       } catch {
-        // The approved call may still change files, even if tracking failed.
-        // Force later script runners through full judgement instead of shortcuts.
         opaqueChanges = true;
       }
       if (a.rules && a.source === "rule-allow") {
@@ -1055,7 +970,7 @@ export default function (pi: ExtensionAPI) {
             try {
               ctx.ui.notify(displayText(`guard: "${describeMatch(r.tool, r.match)}" was allowed ${store.hitCount(r.id)} times this session. Remember it for this project with /guard rules promote ${r.id} project`), "info");
               promoted.add(r.id);
-            } catch { /* notification failure must not affect an allowed call */ }
+            } catch {   }
           }
         }
       }
@@ -1066,8 +981,6 @@ export default function (pi: ExtensionAPI) {
       return blockResult(reason);
     };
 
-    // A repeated model or hard-deny block can be approved once, with the same
-    // context and policy rechecks used for every other confirmation.
     const retryOverride = retryRulesVersion !== undefined && a.action === "block" && (a.source === "hard-deny" || a.source === "model") && blockedOnce.has(retryKey) && ctx.hasUI;
     if (retryOverride) {
       blockedOnce.delete(retryKey);
@@ -1086,7 +999,7 @@ export default function (pi: ExtensionAPI) {
         return onCancelled("judgement was aborted");
       }
       status(ctx, `guard: ${tool} BLOCKED (${tag})`);
-      try { ctx.ui.notify(displayText(`guard: blocked ${tool} — ${a.reasons.join("; ")}`), "error"); } catch { /* notification failure must not prevent blocking */ }
+      try { ctx.ui.notify(displayText(`guard: blocked ${tool} — ${a.reasons.join("; ")}`), "error"); } catch {   }
       recordAudit(ctx, { ...rec, final: "blocked" });
       if (retryRulesVersion !== undefined && (a.source === "hard-deny" || a.source === "model") && ctx.hasUI) {
         blockedOnce.delete(retryKey);
@@ -1115,7 +1028,6 @@ export default function (pi: ExtensionAPI) {
     };
     const readSessionDir = () => {
       const dir = ctx.sessionManager.getSessionDir();
-      // Pi uses an empty directory string for in-memory sessions.
       if (typeof dir !== "string") throw new Error("invalid session directory");
       return dir;
     };
@@ -1241,7 +1153,7 @@ export default function (pi: ExtensionAPI) {
       }
     }
     if (saved.length) {
-      try { ctx.ui.notify(displayText(`guard: saved ${choice.scope} ${choice.decision} rule: ${saved.map((r) => `${describeMatch(r.tool, r.match)} [${r.id}]`).join(", ")} (undo: /guard rules rm <id>)`), "info"); } catch { /* notification failure must not affect the decision */ }
+      try { ctx.ui.notify(displayText(`guard: saved ${choice.scope} ${choice.decision} rule: ${saved.map((r) => `${describeMatch(r.tool, r.match)} [${r.id}]`).join(", ")} (undo: /guard rules rm <id>)`), "info"); } catch {   }
     }
     recordAudit(ctx, { ...rec, ...(retryOverride ? { event: "override" as const } : {}), final: choice.decision === "allow" ? "run" : "blocked", choice: `${choice.decision}:${choice.scope}`, ruleIds: [...(rec.ruleIds ?? []), ...saved.map((r) => r.id)] });
 
@@ -1249,11 +1161,10 @@ export default function (pi: ExtensionAPI) {
       onAllowed();
       return;
     }
-    consecutiveBlocks = 0; // the user's own denials do not count towards escalation
+    consecutiveBlocks = 0;
     return blockResult(choice.reason ? `the user denied this call: ${choice.reason}` : "the user denied this call");
   });
 
-  // Detect input that changed after guard judged it (an extension loaded after guard rewrote it)
   pi.on("tool_result", async (event, ctx) => {
     const previous = judged.get(event.toolCallId);
     judged.delete(event.toolCallId);
@@ -1358,7 +1269,6 @@ export default function (pi: ExtensionAPI) {
           const r = store.all().find((x) => x.id === id);
           if (!r || (to !== "project" && to !== "global")) return say("usage: /guard rules promote <id> project|global", "warning");
           const globalAllow = to === "global" && r.decision === "allow";
-          // Global allows apply in every trusted project: only read-only commands, and only with the human confirming
           if (globalAllow && !globalAllowPatternIsReadOnly(r.tool, r.match))
             return say("guard: only read-only commands can become global allow rules", "warning");
           if (globalAllow && !ctx.hasUI) return say("guard: promoting to a global allow rule needs the interactive UI", "warning");
@@ -1408,7 +1318,6 @@ export default function (pi: ExtensionAPI) {
         }
         return say("usage: /guard rules [list|rm <id>|promote <id> project|global|add …]", "warning");
       }
-      // Anything else is scored as a bash command without running it (/guard check <cmd> or /guard <cmd>)
       const raw = (args ?? "").trim();
       const cmd = sub === "check" ? raw.replace(/^check(?:\s+|$)/, "") : raw;
       if (!cmd) return say("usage: /guard check <command>", "warning");

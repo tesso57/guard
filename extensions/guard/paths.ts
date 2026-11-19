@@ -6,7 +6,6 @@ import { AGENT_DIR } from "./config.ts";
 import { readRegularText } from "./files.ts";
 
 const HOME = normalize(homedir());
-/** Same set pi normalizes to a plain space before resolving tool paths. */
 const UNICODE_SPACES = /[   -​  　﻿]/g;
 
 function expandHome(p: string): string {
@@ -15,10 +14,6 @@ function expandHome(p: string): string {
   return p.replace(/^\$HOME(?=\/|$)/, HOME).replace(/^\$\{HOME\}(?=\/|$)/, HOME);
 }
 
-/**
- * Mirrors pi's own path handling for tool arguments (utils/paths normalizePath): unicode spaces, a leading @, ~,
- * and file:// URLs (with percent-decoding). An unparseable file URL keeps a `file:` marker that is treated as sensitive.
- */
 function normalizeInput(p: string): string {
   let q = p.replace(UNICODE_SPACES, " ");
   if (q.startsWith("@")) q = q.slice(1);
@@ -33,7 +28,6 @@ function normalizeInput(p: string): string {
   return q;
 }
 
-/** Resolves a path against cwd the way pi does, then normalizes it lexically. Trailing slashes are removed. */
 export function resolvePath(cwd: string, p: string): string {
   const q = normalizeInput(p);
   return normalize(isAbsolute(q) ? q : resolve(cwd, q)).replace(/(.)\/+$/, "$1");
@@ -42,11 +36,9 @@ export function resolvePath(cwd: string, p: string): string {
 const realCache = new Map<string, string>();
 const memoCache = new Map<string, unknown>();
 let globBudget = 8;
-/** Milliseconds spent expanding globs in the current judgement. */
 let globSpent = 0;
 const GLOB_TIME_BUDGET = 300;
 
-/** Clears per-judgement caches, so every judgement sees the current file system. */
 export function clearPathCache() {
   realCache.clear();
   memoCache.clear();
@@ -54,11 +46,6 @@ export function clearPathCache() {
   globSpent = 0;
 }
 
-/**
- * Expands a pattern the way bash does: segment by segment, following symlinked directories (node's globSync does
- * not descend into them), with dotfiles matched only by patterns that start with a dot. Its time is charged to the
- * per-judgement budget; `truncated` when there were more than 500 matches or too many entries to look at.
- */
 function timedGlob(pattern: string, cwd: string): { list: string[]; truncated: boolean } {
   const t = Date.now();
   const p = simplifyBrackets(pattern);
@@ -127,11 +114,6 @@ function timedGlob(pattern: string, cwd: string): { list: string[]; truncated: b
   }
 }
 
-/**
- * Whether a wildcard can hand the command a word starting with `-` (an option): the expanded word is checked as
- * bash passes it (a pattern like dir-star/star.md can expand to --pre=./hit.md), and anything guard cannot
- * enumerate counts as such a word.
- */
 export function globHitsOptionLikeName(cwd: string, pattern: string): boolean {
   const p = normalizeInput(pattern).replace(/\*\*+/g, "*");
   if (globTooCostly(p, 3)) return true;
@@ -139,7 +121,6 @@ export function globHitsOptionLikeName(cwd: string, pattern: string): boolean {
   return g.truncated || g.list.some((w) => w.startsWith("-"));
 }
 
-/** Resolve a repository's Git directory and its shared worktree directory. */
 function gitDirectories(root: string): { gitdir: string; common: string } {
   const dotgit = join(root, ".git");
   let gitdir = dotgit;
@@ -153,10 +134,6 @@ function gitDirectories(root: string): { gitdir: string; common: string } {
   return { gitdir, common };
 }
 
-/**
- * Whether ripgrep may search hidden files under root although it skips them by default: ignore files can
- * re-include them with `!` patterns.
- */
 export function ignoreFilesReinclude(root: string, ignoreVcs = false, ignoreDot = false): boolean {
   return memo(`reinclude:${JSON.stringify([root, ignoreVcs, ignoreDot])}`, () => {
     if (ignoreVcs && ignoreDot) return false;
@@ -167,7 +144,6 @@ export function ignoreFilesReinclude(root: string, ignoreVcs = false, ignoreDot 
         if (text.split("\n").some((line) => /^\s*!/.test(line) && !/^\s*![A-Za-z0-9_][A-Za-z0-9._-]*\s*$/.test(line))) found = true;
       } catch (e: any) { if (e?.code !== "ENOENT" && e?.code !== "ENOTDIR") found = true; }
     };
-    // An unknown Git configuration may redirect core.excludesFile to an arbitrary ignore file.
     if (!ignoreVcs && !gitConfigIsSafe(root)) return true;
     const home = process.env.HOME;
     if (!ignoreVcs && home) check(join(process.env.XDG_CONFIG_HOME || join(home, ".config"), "git", "ignore"));
@@ -188,11 +164,6 @@ export function ignoreFilesReinclude(root: string, ignoreVcs = false, ignoreDot 
   });
 }
 
-/**
- * Whether a wildcard pattern can reach a protected root, decided from the pattern alone (no file system access), so
- * an expansion that was skipped or cut short cannot hide it. `into`: some match may lie inside a root;
- * `around`: some match may be a root or one of its parents (deleting or moving it affects the root).
- */
 export function globMayReach(cwd: string, pattern: string, roots: string[]): { into: boolean; around: boolean } {
   const raw = normalizeInput(pattern).replace(/\*\*+/g, "*");
   if (!roots.length) return { into: false, around: false };
@@ -207,7 +178,7 @@ export function globMayReach(cwd: string, pattern: string, roots: string[]): { i
     try {
       return matchesGlob(path, `/${pat.join("/")}`);
     } catch {
-      return true; // a pattern we cannot evaluate counts as reaching
+      return true;
     }
   };
   for (const r of roots) {
@@ -218,10 +189,6 @@ export function globMayReach(cwd: string, pattern: string, roots: string[]): { i
   return { into, around };
 }
 
-/**
- * Replaces bracket expressions that node's matcher does not understand ([[=c=]], [[.c.]], [[:print:]]) with `?`,
- * which matches at least as much: wider matches are the safe side for every check that uses them.
- */
 function simplifyBrackets(p: string): string {
   let out = "";
   for (let i = 0; i < p.length; i++) {
@@ -248,7 +215,6 @@ function simplifyBrackets(p: string): string {
   return out;
 }
 
-/** Avoid feeding potentially exponential patterns to Node's synchronous glob matcher. */
 function globStructureTooCostly(p: string): boolean {
   return (p.match(/\[/g)?.length ?? 0) > 16 || /[?*+@!]\(|[{}]/.test(p) || p.split("/").some((segment) => segment.length > 255 || (segment.match(/\*+/g)?.length ?? 0) > 2);
 }
@@ -257,13 +223,11 @@ function globSyntaxTooCostly(p: string): boolean {
   return p.length > 256 || globStructureTooCostly(p);
 }
 
-/** Patterns node's glob may take super-linear time on, or that the per-judgement time budget no longer allows. */
 function globTooCostly(p: string, maxWildSegments: number): boolean {
   const wild = p.split("/").filter((s) => /[*?[]/.test(s)).length;
   return globSyntaxTooCostly(p) || wild > maxWildSegments || globSpent > GLOB_TIME_BUDGET;
 }
 
-/** Memoizes work within one judgement (cleared by clearPathCache). */
 export function memo<T>(key: string, fn: () => T): T {
   if (memoCache.has(key)) return memoCache.get(key) as T;
   const v = fn();
@@ -272,14 +236,8 @@ export function memo<T>(key: string, fn: () => T): T {
   return v;
 }
 
-/** Stands for paths guard did not enumerate (glob limits); never freely readable, never sensitive. */
 export const UNKNOWN_PATH = "/__guard_unexpanded__";
 
-/**
- * Resolves a path the way the kernel would open it: component by component, following symlinks (also dangling
- * ones, whose target does not exist yet) and applying `..` after the symlinks before it. Parts that do not exist
- * are kept as written.
- */
 export function realPath(p: string): string {
   const cached = realCache.get(p);
   if (cached !== undefined) return cached;
@@ -315,18 +273,15 @@ export function realPath(p: string): string {
   return cur;
 }
 
-/** Every way a path token may be interpreted: lexically, and physically (symlinks and `..` resolved in order). */
 export function pathVariants(cwd: string, p: string): string[] {
   const q = normalizeInput(p);
   const lexical = resolvePath(cwd, p);
   const physical = realPath(isAbsolute(q) ? q : `${cwd}/${q}`);
   const out = physical === lexical ? [lexical] : [lexical, physical];
-  // Keep /proc/<pid>/{root,cwd,fd} visible: normalizing `..` away would hide that the path goes through them
   if (/^\/proc\/[^/]+\/(root|cwd|fd)(\/|$)/.test(q)) out.push(q);
   return out;
 }
 
-/** Extra spellings pi's read tool tries, in its lookup order, when the requested path is absent. */
 export function readFallbackVariants(cwd: string, p: string): string[] {
   const original = resolvePath(cwd, p);
   if (existsSync(original)) return [];
@@ -348,32 +303,23 @@ function containsPath(child: string, parent: string): boolean {
   return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 
-/** Case-insensitive containment for protective checks, including case-insensitive file systems. */
 export function isInside(child: string, parent: string): boolean {
   return containsPath(child.toLowerCase(), parent.toLowerCase());
 }
 
-/** Permission shortcuts require an exact match; case folding can join distinct directories on Linux. */
 export function isInsideExact(child: string, parent: string): boolean {
   return containsPath(child, parent);
 }
 
-/** True for `/`, the home directory and every directory between them. */
 export function isHomeOrAncestor(p: string): boolean {
   return isInside(HOME, p) || isInside(realPath(HOME), realPath(p));
 }
 
-/** System locations whose contents are public on a normal machine. */
 const PUBLIC_DIRS = [
   "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/opt/homebrew", "/System", "/Library/Developer", "/dev/null",
   "/etc/os-release", "/etc/lsb-release", "/etc/hosts", "/etc/timezone", "/etc/debian_version", "/etc/alpine-release",
 ];
 
-/**
- * Code under the agent directory: pi's own releases and the packages, extensions, skills, prompts and themes it
- * loads. Reading it is like reading /usr (writing stays hard-denied). Credentials, settings, sessions and guard's
- * own state live elsewhere in the agent directory and stay protected.
- */
 export const PI_CODE_DIRS = ["install", "git", "npm", "extensions", "skills", "prompts", "themes"];
 export function isPiCodePath(p: string): boolean {
   const real = realPath(p);
@@ -384,7 +330,6 @@ export function isPiCodePath(p: string): boolean {
   });
 }
 
-/** Folders another extension vouched for (guard:trust-dir), e.g. an artifacts extension's output folder. */
 export type TrustedDir = { path: string; write: boolean; by: string; ignored?: string };
 export type TrustedDirState = {
   trustedDirs: TrustedDir[];
@@ -396,14 +341,11 @@ export const createTrustedDirState = (): TrustedDirState => ({ trustedDirs: [], 
 const defaultTrustedDirState = createTrustedDirState();
 const trustedStateIds = new WeakMap<TrustedDirState, number>();
 let nextTrustedStateId = 1;
-// Home-level folders that hold credentials, tool configuration or executables on PATH
 const UNTRUSTABLE_HOME_DIRS = new Set([".ssh", ".gnupg", ".aws", ".azure", ".gcloud", ".kube", ".docker", ".config", ".local", ".npm", ".cargo", ".rustup", ".gem", ".bun", ".deno", ".volta", ".nvm", ".pyenv", ".rbenv", "library", "bin"]);
 
-/** Registers a folder; returns why it was refused, if it was. Only folders inside the home directory (or tmp) qualify. */
 export function trustDir(raw: string, write: boolean, by: string, state: TrustedDirState): string | undefined {
   const { trustedDirs, trustedDirTargets, trustedDirAliases } = state;
   state.version++;
-  // Trust events may arrive after a path or symlink changed since the last call.
   realCache.clear();
   memoCache.clear();
   const reason = ((): string | undefined => {
@@ -423,8 +365,6 @@ export function trustDir(raw: string, write: boolean, by: string, state: Trusted
   const entry: TrustedDir = { path: raw.startsWith("~") || isAbsolute(raw) ? resolvePath(HOME, raw) : raw, write, by, ignored: reason };
   const target = realPath(entry.path);
   const aliases = new Set([entry.path, target]);
-  // A new grant for the same physical folder replaces its old permissions,
-  // even if an extension used a different symlink or canonical spelling.
   for (let i = trustedDirs.length - 1; i >= 0; i--) {
     const previous = trustedDirs[i];
     if (previous.path === entry.path || (!entry.ignored && !previous.ignored && trustedDirTargets.get(previous.path) === target)) {
@@ -443,13 +383,11 @@ export function trustDir(raw: string, write: boolean, by: string, state: Trusted
 }
 export const listTrustedDirs = (state: TrustedDirState): readonly TrustedDir[] => state.trustedDirs;
 
-/** Return the path relative to a registered spelling of the trusted folder. */
 export function trustedDirRelative(p: string, dir: TrustedDir, state: TrustedDirState = defaultTrustedDirState): string | undefined {
   const base = [...(state.trustedDirAliases.get(dir.path) ?? [])].find((alias) => isInsideExact(p, alias));
   return base === undefined ? undefined : relative(base, p);
 }
 
-/** The trusted folder p is in (literally and after resolving symlinks), if any; `write` requires write access. */
 export function trustedDirFor(p: string, write: boolean, state: TrustedDirState = defaultTrustedDirState): TrustedDir | undefined {
   if (p === UNKNOWN_PATH) return undefined;
   const real = realPath(p);
@@ -460,10 +398,8 @@ export function trustedDirFor(p: string, write: boolean, state: TrustedDirState 
   });
 }
 
-/** A regular file with more than one hard link may be the same file as something outside the project. */
 export function isHardLinked(p: string): boolean {
   try {
-    // A symlink can point to an in-project hard link whose other name is outside the project.
     const st = statSync(p);
     return st.isFile() && st.nlink > 1;
   } catch {
@@ -471,7 +407,6 @@ export function isHardLinked(p: string): boolean {
   }
 }
 
-/** Find an existing hard link to protected state without following directory links or scanning indefinitely. */
 export function isProtectedHardLink(p: string, roots: string[]): boolean {
   let target: import("node:fs").BigIntStats;
   try {
@@ -501,21 +436,19 @@ export function isProtectedHardLink(p: string, roots: string[]): boolean {
             directory.closeSync();
           }
         }
-      } catch { /* unavailable paths cannot establish identity */ }
+      } catch {   }
     }
     return ids;
   });
   return protectedFiles.has(`${target.dev}:${target.ino}`);
 }
 
-/** A project path must remain in the project after resolving symlinks. */
 export function isProjectPath(p: string, cwd: string): boolean {
   const real = realPath(p);
   return p !== UNKNOWN_PATH && !isHomeOrAncestor(cwd) &&
     (isInsideExact(p, cwd) || isInsideExact(p, realPath(cwd))) && isInsideExact(real, realPath(cwd));
 }
 
-/** Whether all links to a project file are visible inside the project and none has a sensitive name. */
 export function isProjectHardlinkSafe(p: string, cwd: string): boolean {
   if (!isProjectPath(p, cwd)) return false;
   try {
@@ -542,7 +475,6 @@ export function isProjectHardlinkSafe(p: string, cwd: string): boolean {
   } catch { return false; }
 }
 
-/** Reads inside a vouched-for directory are allowed; other shortcuts exclude hard-linked files. */
 export function isFreelyReadable(p: string, cwd: string, state?: TrustedDirState, protectedPaths = protectedRoots(cwd)): boolean {
   if (p === UNKNOWN_PATH) return false;
   if (trustedDirFor(p, false, state)) return !isProtectedHardLink(p, protectedPaths);
@@ -556,7 +488,6 @@ function sensitiveOne(abs: string): string | undefined {
   if (abs.startsWith("/__guard_unparseable_file_url__/")) return "unparseable file:// URL";
   if (abs === UNKNOWN_PATH) return undefined;
   const home = isInside(abs, HOME) ? HOME : realPath(HOME);
-  // Containment is case-insensitive for protection, so compute the relative path the same way.
   const rel = isInside(abs, home) ? relative(home.toLowerCase(), abs.toLowerCase()) : undefined;
   const first = rel?.split(sep)[0];
   if (rel !== undefined && first) {
@@ -577,23 +508,17 @@ function sensitiveOne(abs: string): string | undefined {
   return undefined;
 }
 
-/** Paths that are likely to hold secrets. Checked on both the literal and the symlink-resolved path. */
 export function sensitiveReason(abs: string): string | undefined {
   return sensitiveOne(abs) ?? sensitiveOne(realPath(abs));
 }
 
-/**
- * Places the agent must never modify: guard's rules and pi's state, pi session logs,
- * and every project resource pi loads after project trust (.pi/*, .agents/skills).
- */
-/** Match artifact's Git-first project lookup, without executing Git configuration. */
 export function artifactProjectRoot(cwd: string): string {
   const start = resolve(cwd);
   let piRoot: string | undefined;
   for (let dir = start; dir !== HOME && dirname(dir) !== dir; dir = dirname(dir)) {
     if (existsSync(join(dir, ".git"))) return dir;
     if (!piRoot) {
-      try { if (statSync(join(dir, ".pi")).isDirectory()) piRoot = dir; } catch { /* no project .pi here */ }
+      try { if (statSync(join(dir, ".pi")).isDirectory()) piRoot = dir; } catch {   }
     }
   }
   return piRoot ?? start;
@@ -615,20 +540,13 @@ export function protectedReason(abs: string, roots: string[]): string | undefine
   return hit ? `protected path (${hit})` : undefined;
 }
 
-/** True if moving, deleting or overwriting p would also affect a protected root (p is the root or one of its parents). */
 export function containsProtectedRoot(p: string, roots: string[]): boolean {
   const real = realPath(p);
-  // Only roots that exist can be moved or deleted along with a parent; this keeps `mv build ..` usable
   return roots.some((r) => existsSync(r) && (isInside(r, p) || isInside(realPath(r), real)));
 }
 
-/**
- * Files that tools run or load later (build scripts, test hooks, CI, editor and agent settings).
- * Editing them is never treated as a plain project edit. Matched case-insensitively at any depth.
- */
 const RISKY_DIRS = new Set([
   ".git", ".github", ".gitlab", ".husky", ".pi", ".agents", ".vscode", ".idea", ".claude", ".cursor", ".cargo", ".devcontainer", ".circleci", ".buildkite", ".yarn",
-  // Code that package managers and interpreters load implicitly
   "node_modules", ".venv", "venv", "site-packages", "dist-packages", ".tox", ".nox", "__pypackages__", "vendor",
 ]);
 const RISKY_FILES = new Set([
@@ -649,9 +567,7 @@ export function isRiskyProjectFile(rel: string): boolean {
   const parts = rel.toLowerCase().split(sep);
   const b = parts[parts.length - 1];
   return (
-    // Names that look like options (--pre=sh) turn into options when a wildcard expands to them
     parts.some((x) => x.startsWith("-")) ||
-    // Names carrying shell syntax become code when a wildcard hands them to something that evaluates them
     /\$\(|`|[\n\r]/.test(rel) ||
     parts.slice(0, -1).some((d) => RISKY_DIRS.has(d)) ||
     RISKY_FILES.has(b) ||
@@ -663,7 +579,6 @@ export function isRiskyProjectFile(rel: string): boolean {
   );
 }
 
-/** Tokens that look like paths, resolved to absolute paths. Globs are expanded when possible. */
 export function pathLikeTokens(cwd: string, tokens: string[], globs: string[] = []): string[] {
   const out: string[] = [];
   for (const t of tokens) {
@@ -671,13 +586,10 @@ export function pathLikeTokens(cwd: string, tokens: string[], globs: string[] = 
     let v: string;
     if (t.startsWith("--")) v = t.includes("=") ? t.slice(t.indexOf("=") + 1) : "";
     else if (t.startsWith("-")) {
-      // A value glued to a cluster of short options (-m/path, -bf/etc/x, -f~/x): the tail from the first
-      // path-like character counts, however many option letters come before it
       const m = /[/~.$]/.exec(t.slice(1));
       v = m ? t.slice(1 + m.index) : "";
     } else v = t.includes("=") ? t.slice(t.indexOf("=") + 1) : t;
     if (!v) continue;
-    // Bare names count when they look secret (id_rsa, cert.p12) or name an existing file in cwd
     if (/^(~|\/|\.|\$HOME|file:)/i.test(v) || v.includes("/") || /\.(env|pem|key|p12|pfx)$/i.test(v) || /^id_[a-z0-9]+/.test(v) || existsSync(resolve(cwd, v)))
       out.push(...pathVariants(cwd, v));
   }
@@ -685,7 +597,6 @@ export function pathLikeTokens(cwd: string, tokens: string[], globs: string[] = 
   return out;
 }
 
-/** The directory a glob starts from (the part before the first wildcard). */
 function globBase(cwd: string, pattern: string): string {
   const p = normalizeInput(pattern);
   const segs = p.split("/");
@@ -693,19 +604,12 @@ function globBase(cwd: string, pattern: string): string {
   return resolvePath(cwd, segs.slice(0, Math.max(firstGlob, 0)).join("/") || (isAbsolute(p) ? "/" : "."));
 }
 
-/**
- * The static directory a glob starts from, plus its matches.
- * Returns UNKNOWN_PATH as well when the shell might match more than guard can enumerate: hidden-file patterns
- * (bash 3.2 lets `.*` match `..`), more than three wildcard segments, or the per-judgement expansion budget.
- * `**` is not recursive in bash without globstar, so it is treated as `*`.
- */
 function expandGlob(cwd: string, pattern: string): string[] {
   const p = normalizeInput(pattern).replace(/\*\*+/g, "*");
   const segs = p.split("/");
   const out = [globBase(cwd, pattern)];
   const wild = segs.filter((s) => /[*?[]/.test(s));
   if (globTooCostly(p, 3) || globBudget-- <= 0) return [...out, UNKNOWN_PATH];
-  // bash 3.2 lets `.*` match `..` and node's glob does not, so hidden-file patterns may reach more than we see
   if (wild.some((s) => s.startsWith("."))) out.push(UNKNOWN_PATH);
   try {
     const g = timedGlob(p, cwd);
@@ -717,10 +621,6 @@ function expandGlob(cwd: string, pattern: string): string[] {
   return out;
 }
 
-/**
- * Existing matches of a write or delete target pattern, plus its static base directory.
- * `complete` is false when the pattern was too costly to expand; callers then treat the base as the target.
- */
 export function expandGlobFully(cwd: string, pattern: string): { matches: string[]; base: string; complete: boolean } {
   const p = normalizeInput(pattern).replace(/\*\*+/g, "*");
   const base = globBase(cwd, pattern);
@@ -735,7 +635,6 @@ export function expandGlobFully(cwd: string, pattern: string): { matches: string
 
 const SKIP_WALK = new Set(["node_modules", ".git", ".hg", ".svn", "dist", "build", "target", ".venv", "venv", "__pycache__"]);
 
-/** Walks a directory tree with bounded depth and entry count, calling fn for each file. Returns false if cut short. */
 export function walkBounded(root: string, fn: (path: string, name: string) => void, maxDepth = 6, maxEntries = 5000, skip = SKIP_WALK, descend?: (path: string, name: string) => boolean): boolean {
   let seen = 0;
   let complete = true;
@@ -773,11 +672,6 @@ export function walkBounded(root: string, fn: (path: string, name: string) => vo
   return complete;
 }
 
-/**
- * Files under root that likely hold secrets (.env, keys), for recursive content searches.
- * `complete` is false when the tree was too large or deep to check; build and dependency directories are included,
- * because `grep -r` reads them too.
- */
 export function secretFilesUnder(root: string, projectRoot?: string, suffixes?: readonly string[], includeHidden = true, trustedDirs?: TrustedDirState, protectedPaths: string[] = []): { files: string[]; complete: boolean } {
   let stateId = 0;
   if (trustedDirs) {
@@ -797,7 +691,6 @@ export function secretFilesUnder(root: string, projectRoot?: string, suffixes?: 
           if (sensitiveReason(p)) files.push(p);
         } else {
           if (sensitiveOne(p)) files.push(p);
-          // A hard link can expose a secret through an innocuous name; its other paths are unknown.
           if (st.isFile() && st.nlink > 1) {
             const trusted = !!trustedDirs && !!trustedDirFor(p, false, trustedDirs);
             if (trusted && protectedPaths.length && isProtectedHardLink(p, protectedPaths)) files.push(p);
@@ -810,7 +703,6 @@ export function secretFilesUnder(root: string, projectRoot?: string, suffixes?: 
   });
 }
 
-/** Project files changed in the last day, which a test runner may load (also from earlier sessions). */
 export function recentlyChangedFiles(root: string, limit = 20): string[] {
   return memo(`recent:${root}`, () => {
     const out: { p: string; m: number }[] = [];
@@ -819,22 +711,15 @@ export function recentlyChangedFiles(root: string, limit = 20): string[] {
       try {
         const st = statSync(p);
         if (st.mtimeMs > since && st.size < 200_000) out.push({ p, m: st.mtimeMs });
-      } catch { /* vanished */ }
+      } catch {   }
     });
     return out.sort((a, b) => b.m - a.m).slice(0, limit).map((x) => x.p);
   });
 }
 
-/**
- * Git runs commands named in a repository's config even for read-only subcommands (core.fsmonitor on `git status`,
- * diff drivers and textconv on `git diff`/`git log -p`, filters, gpg, hooks). Read-only git is only safe when the
- * repository's config (including config.worktree) sets none of them. Keys are parsed, so branch names or URLs that
- * merely contain such words do not count; anything the parser cannot read counts as unsafe.
- */
 const DANGEROUS_GIT_KEY = [
   /^core\.(fsmonitor|hookspath|sshcommand|askpass|gitproxy|alternaterefscommand|worktree|excludesfile)$/,
   /^diff\.external$/,
-  // Credential helpers and lazy fetches (partial clones) can run programs during read-only git commands
   /^credential\.(.*\.)?helper$/,
   /^extensions\.partialclone$/,
   /^remote\..*\.(promisor|partialclonefilter)$/,
@@ -846,9 +731,7 @@ const DANGEROUS_GIT_KEY = [
   /^extensions\.worktreeconfig$/,
 ];
 
-/** Parsed keys, or undefined when a line cannot be understood. */
 function gitConfigKeys(text: string): string[] | undefined {
-  // git's continuation and escaping rules (even inside comments) are subtle; any line ending in a backslash is unsafe
   if (/\\\r?$/m.test(text)) return undefined;
   const lines = text.split(/\r?\n/);
   const keys: string[] = [];
@@ -859,7 +742,6 @@ function gitConfigKeys(text: string): string[] | undefined {
       if (line.startsWith("#") || line.startsWith(";")) break;
       const sec = /^\[\s*([^\]\s"]+)(?:\s+"((?:[^"\\]|\\.)*)")?\s*\]/.exec(line);
       if (sec) {
-        // [section "sub"] and the legacy [section.sub] both become section.sub; a key may follow on the same line
         section = (sec[2] !== undefined ? `${sec[1]}.${sec[2]}` : sec[1]).toLowerCase();
         line = line.slice(sec[0].length).trim();
         continue;
@@ -874,7 +756,6 @@ function gitConfigKeys(text: string): string[] | undefined {
 }
 
 function configIsClean(file: string): boolean {
-  // Git documents /dev/null as a way to disable configuration; it cannot supply executable settings.
   if (file === "/dev/null") {
     try { return statSync(file).isCharacterDevice(); } catch { return false; }
   }
@@ -888,7 +769,6 @@ function configIsClean(file: string): boolean {
   return !!keys && !keys.some((k) => DANGEROUS_GIT_KEY.some((re) => re.test(k)));
 }
 
-/** A directory git would use as a repository by itself (HEAD, objects/ and refs/). */
 function looksLikeGitDir(d: string): boolean {
   return existsSync(join(d, "HEAD")) && existsSync(join(d, "objects")) && existsSync(join(d, "refs"));
 }
@@ -916,7 +796,6 @@ function gitHooksAreSafe(dir: string): boolean {
   return safe;
 }
 
-/** Git can load executable settings outside the repository and redirect discovery through its environment. */
 function gitEnvironmentIsSafe(cwd: string): boolean {
   const env = process.env;
   if (["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_EXTERNAL_DIFF"].some((key) => !!env[key])) return false;
@@ -926,15 +805,12 @@ function gitEnvironmentIsSafe(cwd: string): boolean {
     ? [resolve(cwd, env.GIT_CONFIG_GLOBAL)]
     : home ? [join(env.XDG_CONFIG_HOME || join(home, ".config"), "git", "config"), join(home, ".gitconfig")] : [];
   if (!home && env.GIT_CONFIG_GLOBAL === undefined) return false;
-  // Git's compiled-in system config location varies by installation; do not guess it or run git
-  // before approval. A shortcut is safe only when system config is disabled or its path is explicit.
   if (!/^(1|true|yes|on)$/i.test(env.GIT_CONFIG_NOSYSTEM ?? "")) {
     if (!env.GIT_CONFIG_SYSTEM || !configIsClean(resolve(cwd, env.GIT_CONFIG_SYSTEM))) return false;
   }
   return globalConfigs.every(configIsClean);
 }
 
-/** Follows git's discovery order: `<dir>/.git` first, then `<dir>` itself as a git directory, then the parent. */
 export function gitConfigIsSafe(cwd: string): boolean {
   if (!gitEnvironmentIsSafe(cwd)) return false;
   for (let d = cwd; ; d = dirname(d)) {
@@ -942,9 +818,7 @@ export function gitConfigIsSafe(cwd: string): boolean {
     if (existsSync(dotgit)) {
       try {
         const { gitdir, common } = gitDirectories(d);
-        // Submodules have their own configs, which `git status` in the parent also honors
         if (existsSync(join(common, "modules")) || existsSync(join(d, ".gitmodules"))) return false;
-        // Some hooks run on read-only commands (post-index-change on `git status`); any real hook makes git unsafe
         if (!gitHooksAreSafe(common)) return false;
         return configIsClean(join(common, "config")) && configIsClean(join(gitdir, "config.worktree")) && configIsClean(join(common, "config.worktree"));
       } catch {
@@ -952,6 +826,6 @@ export function gitConfigIsSafe(cwd: string): boolean {
       }
     }
     if (looksLikeGitDir(d)) return gitHooksAreSafe(d) && configIsClean(join(d, "config")) && configIsClean(join(d, "config.worktree"));
-    if (dirname(d) === d) return true; // not a git repository
+    if (dirname(d) === d) return true;
   }
 }

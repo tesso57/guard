@@ -1,4 +1,3 @@
-/** Masks strings that look like secrets before they reach the judge or the audit log. */
 const PATTERNS: [RegExp, string][] = [
   [/-----BEGIN PGP PRIVATE KEY BLOCK-----[\s\S]*?(-----END PGP PRIVATE KEY BLOCK-----|$)/g, "[REDACTED PGP PRIVATE KEY]"],
   [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----|$)/g, "[REDACTED PRIVATE KEY]"],
@@ -11,7 +10,6 @@ const PATTERNS: [RegExp, string][] = [
   [/AIza[0-9A-Za-z_-]{35}/g, "[REDACTED google key]"],
   [/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, "[REDACTED jwt]"],
   [/\b(npm_[A-Za-z0-9]{30,}|glpat-[A-Za-z0-9_-]{20,})/g, "[REDACTED token]"],
-  // A shell argument can concatenate quoted, unquoted and escaped segments without whitespace.
   [/((?:^|[\s;&|])(?:[a-z_][a-z0-9_]*)?(?:password|passwd|passphrase|secret|token|api_?key|access_?key|private_?key|credentials?|authorization|auth)(?:_(?:value|hash|digest))?=)(?:\\[\s\S]|"(?:\\[\s\S]|[^"\\])*(?:"|$)|'(?:\\[\s\S]|[^'\\])*(?:'|$)|[^\s"'\\&;|])+/gi, "$1[REDACTED]"],
   [/(--(?:[a-z0-9]+[-_])*(?:password|passwd|passphrase|pass|token|secret|api-?key|access-?key|private-?key|credentials?|authorization|auth)(?:[-_](?:value|hash|digest))?(?:=|\s+))(?:\\[\s\S]|"(?:\\[\s\S]|[^"\\])*(?:"|$)|'(?:\\[\s\S]|[^'\\])*(?:'|$)|[^\s"'\\&;|])+/gi, "$1[REDACTED]"],
   [/(authorization(?:[_-](?:value|hash|digest))?["']?\s*=\s*)(?:\\[\s\S]|"(?:\\[\s\S]|[^"\\])*(?:"|$)|'(?:\\[\s\S]|[^'\\])*(?:'|$)|[^\s"'\\&;|])+/gi, "$1[REDACTED]"],
@@ -23,7 +21,6 @@ const PATTERNS: [RegExp, string][] = [
   [/(:\/\/[^\s:/@]+:)[^\s@/]+@/g, "$1[REDACTED]@"],
 ];
 
-// A structured value such as { password: "..." } does not contain its key in the value itself.
 const SECRET_FIELD = /^(?:[a-z0-9]+_)*(?:password|passwd|passphrase|secret|token|api_?key|access_?key|private_?key|authorization|auth|credential|credentials)(?:_(?:value|hash|digest))?$/i;
 
 const normalizeField = (key: string) => key.trim().replace(/([a-z0-9])([A-Z])/g, "$1_$2").replace(/[-.\s]+/g, "_");
@@ -38,7 +35,6 @@ function yamlKey(double: string | undefined, single: string | undefined, plain: 
   return single !== undefined ? single.replace(/''/g, "'") : plain;
 }
 
-/** Identify a secret-name sibling; an undecodable descriptor is treated conservatively. */
 function yamlDescriptorIsSecret(line: string): boolean | undefined {
   const match = /^(?:\?[ \t]+)?(?:(?:(?:!<[^>\r\n]+>|![^\s,\[\]{}]+)|&[a-z0-9_-]+)(?:[ \t\r\n]|#[^\r\n]*(?:\r?\n|$))+)*(?:"((?:\\[^\r\n]|[^"\\\r\n])*)"|'((?:''|[^'\r\n])*)'|([a-z0-9_.-]+(?:[ \t]+[a-z0-9_.-]+)*))(?:[ \t\r\n]|#[^\r\n]*(?:\r?\n|$))*:[ \t]*([\s\S]*?)\r?$/i.exec(line);
   if (!match) return undefined;
@@ -48,7 +44,7 @@ function yamlDescriptorIsSecret(line: string): boolean | undefined {
   const raw = match[4].replace(/[ \t]+#.*$/, "").trim();
   let value: string | undefined;
   if (raw.startsWith('"')) {
-    try { value = JSON.parse(raw); } catch { /* unknown YAML escape */ }
+    try { value = JSON.parse(raw); } catch {   }
   } else if (raw.startsWith("'") && raw.endsWith("'")) value = raw.slice(1, -1).replace(/''/g, "'");
   else if (/^[a-z0-9_. -]+$/i.test(raw)) value = raw;
   return value === undefined || isSecretField(value);
@@ -76,7 +72,6 @@ function namedYamlValueIsSecret(lines: string[], start: number, end: number, bas
   return (!beginsItem && scan(start - 1, -1)) || scan(end + 1, 1);
 }
 
-/** Find secret value ranges in YAML/JSON flow mappings. */
 function flowRedactionRanges(text: string): [number, number][] {
   if (!text.includes("{")) return [];
   type Frame = { start: number; fieldStart: number; fields: [number, number][]; brackets: number; tokenStart: boolean; colonSeen: boolean[]; quotedKey: boolean[] };
@@ -176,7 +171,6 @@ function flowRedactionRanges(text: string): [number, number][] {
   return merged;
 }
 
-/** Mask secret values in YAML/JSON flow mappings, preserving unrelated fields. */
 function redactFlowMappings(text: string): string {
   const ranges = flowRedactionRanges(text);
   let result = "", cursor = 0;
@@ -201,7 +195,6 @@ function yamlValueEnd(lines: string[], start: number, baseIndent: number, budget
   return end;
 }
 
-/** Mask indented YAML block scalars for secret-named keys without consuming sibling fields. */
 function redactYamlBlocks(text: string, flowRanges: [number, number][]): string {
   if (!text.includes("\n") || !text.includes(":")) return text;
   const lines = text.split("\n");
@@ -226,8 +219,6 @@ function redactYamlBlocks(text: string, flowRanges: [number, number][]): string 
       const scalar = /^([ \t]*)(?:-([ \t]+))?(?:(?:(?:!<[^>\r\n]+>|![^\s,\[\]{}]+)|&[a-z0-9_-]+)[ \t]+)*(?:"((?:\\[^\r\n]|[^"\\\r\n])*)"|'((?:''|[^'\r\n])*)'|([a-z0-9_.-]+(?:[ \t]+[a-z0-9_.-]+)*))([ \t]*:[ \t]*)(.*?)(\r?)$/i.exec(line);
       if (!scalar) continue;
       const valuePosition = lineOffsets[i] + line.length - scalar[7].length - scalar[8].length;
-      // A flow value is masked by the flow pass; treating its comma as block content
-      // would remove the separator and merge it with the next field.
       if (coveredByFlow(valuePosition)) continue;
       const key = yamlKey(scalar[3], scalar[4], scalar[5]);
       const secretKey = key === undefined || isSecretField(key);
@@ -286,17 +277,12 @@ function yamlReferences(text: string): { anchors: Set<string>; aliases: Map<stri
 }
 
 export function redactString(s: string): string {
-  // YAML merges can supply secret values indirectly from another mapping.
-  // The line and flow scanners do not resolve those inherited fields.
   if (/(?:^|[\r\n{,])[ \t]*(?:-[ \t]+)?(?:\?[ \t]+)?(?:(?:(?:!<[^>\r\n]+>|![^\s,\[\]{}]+)|&[a-z0-9_-]+)[ \t]+)*(?:<<|"<<"|'<<')(?:[ \t\r\n]|#[^\r\n]*(?:\r?\n|$))*:(?=[ \t\r\n\[\]{},]|$)/im.test(s)) {
     return "[REDACTED YAML merge]";
   }
-  // Explicit block keys can split a key and value across lines. The normal
-  // line-oriented scanner cannot associate their siblings reliably.
   if (/^[ \t]*(?:-[ \t]+)?\?[ \t]+[^\r\n]+\r?\n(?:[ \t]*(?:#[^\r\n]*)?\r?\n)*[ \t]*:(?:[ \t]|\r?$)/m.test(s)) {
     return "[REDACTED explicit YAML mapping]";
   }
-  // Preserve argument boundaries: adjacent shell quotes and bare text form a single word.
   let out = redactFlowMappings(redactYamlBlocks(s, flowRedactionRanges(s))).replace(/'(\s*(?:proxy-)?authorization[\t ]*:[\t ]*)(?:\\[\s\S]|[^'\\])*(?:'|$)|"(\s*(?:proxy-)?authorization[\t ]*:[\t ]*)(?:\\[\s\S]|[^"\\])*(?:"|$)|(\b(?:proxy-)?authorization["']?[\t ]*:)[\t ]*[^\r\n]+/gi,
     (_whole, single: string | undefined, double: string | undefined, raw: string | undefined) =>
       single !== undefined ? `'${single}[REDACTED]'` : double !== undefined ? `"${double}[REDACTED]"` : `${raw} [REDACTED]`);
@@ -307,14 +293,12 @@ export function redactString(s: string): string {
     const before = yamlReferences(s);
     const after = yamlReferences(out);
     for (const [name, count] of before.aliases) {
-      // A redacted alias may point to a secret still visible at its definition.
       if (before.anchors.has(name) && (after.aliases.get(name) ?? 0) < count) return "[REDACTED YAML alias]";
     }
   }
   return out;
 }
 
-/** Keep all entries even if masking makes two different keys identical. */
 export function uniqueKey(obj: Record<string, unknown>, key: string, nextIndexes?: Map<string, number>): string {
   let index = nextIndexes?.get(key) ?? 1;
   let candidate = index === 1 ? key : `${key} [${index}]`;
@@ -340,7 +324,6 @@ export function redact<T>(v: T): T {
   return v;
 }
 
-/** Truncates long strings, keeping both the head and the tail so content hidden at the end is still seen. */
 export function clip(v: unknown, max: number, state: { truncated: boolean }): unknown {
   if (typeof v === "string") {
     if (v.length <= max) return v;

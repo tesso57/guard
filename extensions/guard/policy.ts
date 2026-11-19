@@ -1,9 +1,3 @@
-/**
- * Deterministic checks that run before the model.
- *   hardDeny  : blocks without a rule shortcut; a repeated call may receive explicit one-time approval
- *   sensitive : access to paths that likely hold secrets, or to guard's own state → confirm
- *   safeAllow : obviously safe → allow without calling the model
- */
 import { homedir, tmpdir, userInfo } from "node:os";
 import { createHash } from "node:crypto";
 import { isUtf8 } from "node:buffer";
@@ -36,7 +30,6 @@ export function hasDynamicLoaderEnvironment(): boolean {
   });
 }
 
-/** An unmodifiable root-owned system binary cannot be rewritten through a project hard link. */
 function immutableSystemExecutable(candidate: string, actual: string, st: Stats): boolean {
   const roots = ["/bin", "/sbin", "/usr/bin", "/usr/sbin", "/lib", "/lib64", "/usr/lib", "/usr/lib64"];
   if (!st.isFile() || st.uid !== 0 || (st.mode & 0o022) !== 0 ||
@@ -53,7 +46,6 @@ function immutableSystemExecutable(candidate: string, actual: string, st: Stats)
   return true;
 }
 
-/** Read a bounded prefix only while the opened file remains the inspected regular file. */
 function executableSlice(path: string, expected: Stats, offset: number, limit: number): Buffer {
   const fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
   try {
@@ -68,7 +60,6 @@ function executableSlice(path: string, expected: Stats, offset: number, limit: n
 }
 const executablePrefix = (path: string, expected: Stats, limit: number) => executableSlice(path, expected, 0, limit);
 
-/** Recognize structurally plausible native headers without executing the file. */
 function hasNativeExecutableHeader(header: Buffer, size: number): boolean {
   if (header.length < 4 || !Number.isSafeInteger(size) || size < 0) return false;
   const magic = header.subarray(0, 4).toString("hex");
@@ -174,7 +165,6 @@ function enablesShellTracing(parsed: Parsed): boolean {
   });
 }
 
-/** Find the nearest repository root without running Git or loading its configuration. */
 export function enclosingRepository(cwd: string): string | undefined {
   for (let dir = resolve(cwd); ; dir = dirname(dir)) {
     if (existsSync(join(dir, ".git"))) return dir;
@@ -182,9 +172,7 @@ export function enclosingRepository(cwd: string): string | undefined {
   }
 }
 
-/** Pi prepends its bin directory to PATH. Project or temporary executables must not masquerade as safe commands. */
 export function inspectExecutablePath(parsed: Parsed, cwd: string, platform: NodeJS.Platform = process.platform): { risk?: string; fingerprint?: string } {
-  // Git Bash may use POSIX paths and Windows executable suffixes that Node's native PATH lookup cannot reproduce.
   if (platform === "win32") {
     const risky = parsed.subs.some((s) => {
       const rawHead = s.argv[0];
@@ -194,7 +182,6 @@ export function inspectExecutablePath(parsed: Parsed, cwd: string, platform: Nod
     });
     return risky ? { risk: "cannot verify executable lookup for an external command on Windows" } : {};
   }
-  // Pi updates the first case-insensitive PATH key, but Unix shells read only the uppercase key.
   const pathKey = Object.keys(process.env).find((key) => key.toLowerCase() === "path") ?? "PATH";
   const agentDir = getAgentDir();
   const agentBin = join(agentDir, "bin");
@@ -213,7 +200,6 @@ export function inspectExecutablePath(parsed: Parsed, cwd: string, platform: Nod
     if (!head || s.argv[0]?.includes("/") || BASH_BUILTINS.has(head)) continue;
     if (shellPath === undefined) return { risk: "cannot determine the shell executable search path" };
     if (unknown && pathEntries.some((entry) => !entry || !isAbsolute(entry))) return { risk: "cannot determine the executable search directory" };
-    // egrep/fgrep can be shell wrappers that resolve grep through PATH.
     const executables = head === "egrep" || head === "fgrep" ? [head, "grep"] : [head];
     for (const executable of executables) for (const base of bases) {
       let found = false;
@@ -234,7 +220,7 @@ export function inspectExecutablePath(parsed: Parsed, cwd: string, platform: Nod
         if (st.nlink > 1 && !immutableSystemExecutable(candidate, actual, st)) risk ??= "a command resolves to a hard-linked executable";
         if ([candidate, actual].some((path) => unsafeRoots.some((root) => isInside(path, root)))) risk ??= "a command resolves to a project, temporary or Pi-managed executable";
         found = true;
-        break; // Bash uses the first executable it finds.
+        break;
       }
       if (!found) selected.push([executable, base, null]);
     }
@@ -246,7 +232,6 @@ export function executablePathRisk(parsed: Parsed, cwd: string, platform: NodeJS
   return inspectExecutablePath(parsed, cwd, platform).risk;
 }
 
-/** Pi's grep/find resolve and may download executables before running the search. */
 export function inspectBuiltinSearchExecutable(tool: string, cwd: string, piVersion = piSdk.VERSION ?? ""): { risk?: string; fingerprint?: string; available?: boolean } {
   if (tool !== "grep" && tool !== "find") return {};
   const loaderEnvironment = dynamicLoaderEnvironment();
@@ -432,19 +417,16 @@ export function inspectBuiltinSearchExecutable(tool: string, cwd: string, piVers
     };
     if (existsSync(local)) {
       inspectCandidate(local, false, false);
-      // Pi chooses a present managed path without probing PATH, even if it cannot run.
       if (!found) risk = "cannot inspect the Pi-managed search executable";
     }
     else for (const name of names) {
       for (const entry of path.split(delimiter)) {
         if (++probes > 512) return { risk: "built-in search executable lookup exceeds the inspection limit" };
         const next = join(resolve(process.cwd(), entry || "."), name);
-        // An executable may fail to start (for example, its interpreter is missing), so Node can try later entries.
         inspectCandidate(next, !isAbsolute(entry), true);
       }
     }
     const fingerprint = createHash("sha256").update(JSON.stringify(selected)).digest("hex");
-    // These Pi versions check PI_OFFLINE before downloading a missing search tool; do not assume that for others.
     const offlinePreventsDownload = ["1.5.0", "1.5.2"].includes(piVersion) && ["1", "true", "yes"].includes(offline.toLowerCase());
     if (!found && !risk && !offlinePreventsDownload) risk = "the built-in search tool may download an executable";
     return { risk, fingerprint, available: found };
@@ -459,39 +441,25 @@ const HARD_DENY_BASH: [RegExp, string][] = [
   [/:\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:/, "fork bomb"],
   [/\bchmod\s+(?:-[A-Za-z]+\s+)*-R\s+(?:0?777|a\+rwx)\s+(?:\/|~|\$HOME)(?=\s|$)/, "opens permissions on / or ~"],
   [/\b(?:history\s+-c|unset\s+HISTFILE)\b/, "erases shell history"],
-  // Fallback for forms the argv check cannot see (e.g. inside substitutions)
   [/\brm\s+(?:-[A-Za-z]*\s+)*-[A-Za-z]*[rR][A-Za-z]*\s+(?:-[A-Za-z-]+\s+)*(?:"|')?(?:\/|~|\$HOME|\$\{HOME\})\/?\*?(?:"|')?(?=\s|$|;|&|\|)/, "recursive deletion of / or ~"],
 ];
 
-/** Spellings of guard's and pi's state that can appear in commands without resolving to a known path. */
 const PI_CODE_MENTION = new RegExp(`[^\\s'"]*\\.pi/agent/(?:${PI_CODE_DIRS.join("|")})(?:/[^\\s'"]*)?(?=$|[\\s'"])`, "g");
 const PROTECTED_MARKERS = ["~/.pi", "$home/.pi", "${home}/.pi", ".pi/agent"];
 
-/**
- * The command text to scan for protected names: here-document bodies the parser recognized (also inside $(…)) are
- * data such as commit messages or docs, and quoted text is left out when the command is static. Bodies fed to a
- * shell are hard-denied separately as scripts, and bodies fed to other interpreters are scanned on their own.
- */
 function nameScanText(cmd: string, parsed: Parsed | undefined): string {
   let text = cmd;
   for (const body of parsed?.heredocBodies ?? []) if (body) text = text.replace(body, "");
   return parsed && parsed.ok && !parsed.dynamic.length ? stripQuoted(text) : text;
 }
 
-/** Commands that delete their arguments. */
 const DELETERS = new Set(["rm", "rmdir", "shred", "unlink"]);
-/** Commands that put their sources into a destination (the last argument). */
 const PLACERS = new Set(["mv", "cp", "rsync", "ln", "install", "scp"]);
 const isRecursiveCopy = (a: string[]) => a[0] === "rsync" || a[0] === "mv" || a.some((t) => t === "--recursive" || t === "--archive" || (/^-[A-Za-z]+$/.test(t) && /[rRa]/.test(t)));
 const hasGlob = (t: string) => /[*?[]/.test(t);
 
-/** Top-level system directories; deleting them recursively is never intended. */
 const SYSTEM_DIRS = ["/bin", "/boot", "/dev", "/etc", "/lib", "/lib64", "/opt", "/proc", "/sbin", "/sys", "/usr", "/var", "/System", "/Library", "/Applications", "/Users", "/home"];
 
-/**
- * Removes the text inside quotes so hard-deny patterns do not fire on commit messages or search strings.
- * Double-quoted text that contains a command substitution still runs, so it is kept.
- */
 function stripQuoted(cmd: string): string {
   return cmd.replace(/'[^']*'/g, "''").replace(/"((?:[^"\\]|\\.)*)"/g, (m, inner: string) => (/\$\(|`/.test(inner) ? m : '""'));
 }
@@ -501,10 +469,8 @@ const optionValue = (a: string[], names: string[]) => {
   a.forEach((t, i) => {
     for (const n of names) {
       if (t === n && a[i + 1]) out.push(a[i + 1]);
-      // -C../x, -t../x: a value glued to a short option
       else if (n.length === 2 && n.startsWith("-") && t.startsWith(n) && t.length > 2 && !t.startsWith("--")) out.push(t.slice(2));
       else if (n.startsWith("--") && isLongOption(t, n)) {
-        // --output=x, and the abbreviations GNU tools accept (--outp=x, --outp x)
         const eq = t.indexOf("=");
         if (eq > 0) out.push(t.slice(eq + 1));
         else if (a[i + 1]) out.push(a[i + 1]);
@@ -514,7 +480,6 @@ const optionValue = (a: string[], names: string[]) => {
   return out;
 };
 
-/** Paths a bash subcommand writes to, beyond redirects. */
 function bashWriteTargets(raw: string[]): string[] {
   const { argv: a } = normalizeArgv(raw, "deny");
   const head = a[0];
@@ -553,7 +518,6 @@ function bashWriteTargets(raw: string[]): string[] {
   return out;
 }
 
-/** Keys and string values may both carry paths or commands in tools with unknown schemas. */
 function allStrings(v: unknown, out: string[] = []): string[] {
   if (typeof v === "string") out.push(v);
   else if (Array.isArray(v)) v.forEach((x) => allStrings(x, out));
@@ -561,22 +525,15 @@ function allStrings(v: unknown, out: string[] = []): string[] {
   return out;
 }
 
-/** Unknown tools may treat any string as a command or path; long strings exceed deterministic parsing limits. */
 export function hasUninspectedToolInput(tool: string, input: unknown): boolean {
   return !BUILTIN_TOOLS.has(tool) && allStrings(input).some((value) => value.length >= 16 * 1024);
 }
 
-/** Pi's validator coerces JSON primitives for required string arguments. */
 export function piString(value: unknown): string | undefined {
   if (value === null || typeof value === "string" || typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value))) return String(value);
   return undefined;
 }
 
-/**
- * The paths a tool call reads and writes, as absolute paths.
- * For bash, `cd` is followed so `cd ~/.pi && printf x >> agent/guard/rules.jsonl` resolves correctly.
- * For tools other than the built-ins, every path-like string counts as both read and written.
- */
 export function inputPaths(tool: string, input: any, cwd: string, parsed?: Parsed): { reads: string[]; writes: string[] } {
   return memo(`inputPaths:${tool}:${cwd}:${JSON.stringify(input)}`, () => computeInputPaths(tool, input, cwd, parsed));
 }
@@ -586,12 +543,8 @@ function computeInputPaths(tool: string, input: any, cwd: string, parsed?: Parse
     const reads: string[] = [];
     const writes: string[] = [];
     for (const { s, a, bases, dirs } of subsWithBases(parsed, cwd)) {
-      // cd/pushd/popd only move; what runs in the new directory is accounted for by the following subcommands.
-      // basename/dirname/echo/printf only handle strings (wildcards they expand are counted below).
       const moves = ["cd", "pushd", "popd", "basename", "dirname", "echo", "printf"].includes(a[0]);
       for (const base of bases) {
-        // Both the normalized and the raw argv: normalization drops location values (git -C x, npm --prefix x).
-        // Operands after `--` are paths even when they start with `-` (`cat -- --d/../../.ssh/key`).
         const afterDashes = (xs: string[]) => (xs.includes("--") ? xs.slice(xs.indexOf("--") + 1).map((t) => (t.startsWith("-") ? `./${t}` : t)) : []);
         const explicit = !parsed.dynamic.length && !parsed.globs.length ? s.argv[0] === "rg" ? rgExplicitPaths(s.argv) : isGrepFamily(s.argv[0]) ? grepExplicitPaths(s.argv) : undefined : undefined;
         if (explicit) {
@@ -599,23 +552,18 @@ function computeInputPaths(tool: string, input: any, cwd: string, parsed?: Parse
           reads.push(...files.flatMap((path) => pathVariants(base, path.startsWith("-") ? `./${path}` : path)));
         } else if (!moves) reads.push(...pathLikeTokens(base, a.slice(1)), ...pathLikeTokens(base, s.argv.slice(1)), ...pathLikeTokens(base, afterDashes(s.argv.slice(1))));
         reads.push(...s.reads.flatMap((r) => pathVariants(base, r)));
-        // Wildcards in write targets are expanded: `>> ~/.p?/a????/guard/rules.jsonl` writes to the real file
         writes.push(...[...s.writes, ...bashWriteTargets(s.argv)].flatMap((w) => [...pathVariants(base, w.startsWith("-") ? `./${w}` : w), ...(hasGlob(w) ? globTargets(base, w) : [])]));
       }
       if (!moves) for (const d of dirs) if (d !== cwd) reads.push(d);
-      // diff of two directories compares (and prints) every file directly inside them, following symlinks
       if (a[0] === "diff") for (const base of bases) reads.push(...dirChildren(pathLikeTokens(base, nonFlags(a))));
-      // git show REV:path and git cat-file -p REV:path print a committed file
       if (a[0] === "git") for (const t of nonFlags(a).slice(1)) { const m = /^[^:\s]*:(?!\/\/)(.+)$/.exec(t); if (m) reads.push(...pathVariants(cwd, m[1])); }
     }
     reads.push(...pathLikeTokens(cwd, [], parsed.globs));
     return { reads, writes };
   }
   if (!BUILTIN_TOOLS.has(tool)) {
-    // Unknown tools: every path-like string counts, including words inside command-like strings
     const strs = allStrings(input).filter((x) => x.length < 16 * 1024);
     const words = strs.flatMap((x) => (/\s/.test(x.trim()) ? [x, ...parseShell(x).subcommands.flat()] : [x]));
-    // Unknown schemas may carry a literal path with whitespace or '=' rather than a shell command.
     const literals = strs.filter((x) => !/[\r\n]/.test(x) && !/^https?:\/\//i.test(x) && (/^(?:\/|~\/|\.{1,2}\/|\$HOME\/|file:\/\/)/i.test(x) || x.includes("/")));
     const ps = [...pathLikeTokens(cwd, words), ...literals.flatMap((x) => pathVariants(cwd, x))];
     return { reads: ps, writes: ps };
@@ -631,7 +579,6 @@ function computeInputPaths(tool: string, input: any, cwd: string, parsed?: Parse
   return { reads: p, writes: [] };
 }
 
-/** Entries directly inside the given directories; an incomplete scan gets a sentinel. */
 function dirChildren(paths: string[]): string[] {
   const out: string[] = [];
   for (const p of paths) {
@@ -659,7 +606,6 @@ function dirChildren(paths: string[]): string[] {
   return out;
 }
 
-/** Files a `git apply`, `git am` or `patch` would change, read from the patch file itself (undefined if unreadable). */
 function patchFiles(a: string[], s: Parsed["subs"][number], bases: string[]): { files: string[]; readable: boolean } | undefined {
   const sub = a.find((t, i) => i > 0 && !t.startsWith("-"));
   const isPatch = a[0] === "patch" || (a[0] === "git" && (sub === "apply" || sub === "am"));
@@ -689,7 +635,6 @@ function patchTargets(a: string[], s: Parsed["subs"][number], bases: string[]): 
   return patchFiles(a, s, bases)?.files ?? [];
 }
 
-/** Existing matches of a wildcard target, or its static base when it was too costly to expand. */
 function globTargets(base: string, t: string): string[] {
   const e = expandGlobFully(base, t);
   return e.complete ? e.matches : [e.base];
@@ -703,11 +648,9 @@ function safeUser(): string {
   }
 }
 
-/** Where `cd target` may lead from each of the current candidates (globs, CDPATH, a failed cd). */
 function cdTargets(dirs: string[], target: string | undefined, assigns: string[], roots: string[]): { dirs: string[]; unknown: boolean } {
   const home = assigns.find((x) => x.startsWith("HOME="))?.slice(5);
   if (!target || target === "-") return { dirs: [home ? resolvePath(dirs[0], home) : homedir()], unknown: false };
-  // ~user: the current user's home is ~; anyone else's home is somewhere guard does not track
   const tilde = /^~([^/]+)(.*)$/.exec(target);
   if (tilde) {
     if (tilde[1] !== safeUser()) return { dirs, unknown: true };
@@ -721,10 +664,8 @@ function cdTargets(dirs: string[], target: string | undefined, assigns: string[]
       const e = expandGlobFully(d, target);
       if (!e.complete) unknown = true;
       out.push(...e.matches);
-      // A pattern that can reach guard's state adds that place, whatever is on disk now
       for (const r of roots) for (let x = r; x !== dirname(x); x = dirname(x)) if (globMayReach(d, target, [x]).into && globMayReach(d, target, [x]).around) out.push(x);
     } else out.push(resolvePath(d, target));
-    // With CDPATH set, a relative cd may go to <entry>/<target> instead
     if (cdpath && !/^(\/|\.\.?(\/|$)|~)/.test(target))
       for (const e of cdpath.split(":").filter(Boolean)) out.push(resolvePath(e, target));
   }
@@ -732,10 +673,6 @@ function cdTargets(dirs: string[], target: string | undefined, assigns: string[]
   return { dirs: all.slice(0, 16), unknown: unknown || all.length > 16 };
 }
 
-/**
- * Subcommands with every directory they may run in. The shell may not be where we think (a failed cd, cd inside a
- * pipeline, popd, CDPATH), so each subcommand is resolved against all candidates plus the original cwd.
- */
 function subsWithBases(parsed: Parsed, cwd: string) {
   return memo(`subs:${cwd}:${JSON.stringify(parsed.subs)}`, () => computeSubsWithBases(parsed, cwd));
 }
@@ -743,7 +680,6 @@ function subsWithBases(parsed: Parsed, cwd: string) {
 function computeSubsWithBases(parsed: Parsed, cwd: string) {
   const out: { s: Parsed["subs"][number]; a: string[]; bases: string[]; dirs: string[]; unknown: boolean }[] = [];
   const roots = protectedRoots(cwd);
-  // Once the shell's directory cannot be pinned down, it stays unknown for the rest of the command
   let unknown = false;
   const union = (...xs: string[][]) => {
     const all = [...new Set(xs.flat())];
@@ -755,29 +691,25 @@ function computeSubsWithBases(parsed: Parsed, cwd: string) {
     if (r.unknown) unknown = true;
     return r.dirs;
   };
-  // Options that make a command act in another directory: their values are extra bases for that command
   const locationDirs = (raw: string[], from: string[]) =>
     LOCATION_VALUE_OPTIONS.flatMap((o) => optionValue(raw, [o])).flatMap((v) => from.map((d) => resolvePath(d, v)));
   let dirs = [cwd];
-  let previous = [cwd]; // OLDPWD
-  const stack: string[][] = []; // pushd/popd directory stack
+  let previous = [cwd];
+  const stack: string[][] = [];
   const visited = new Set([cwd]);
   for (const s of parsed.subs) {
     const { argv: a } = normalizeArgv(s.argv, "deny");
     const loc = locationDirs(s.argv, [...new Set([...dirs, cwd])]);
     out.push({ s, a, bases: union(dirs, [cwd], loc), dirs, unknown });
-    // `cd -` names OLDPWD; a bare `-` is not an option here
     const arg = a[1] === "-" ? "-" : nonFlags(a)[0];
     const before = dirs;
     const oldpwd = s.assigns.find((x) => x.startsWith("OLDPWD="))?.slice(7);
     if (a[0] === "cd") dirs = arg === "-" ? (oldpwd ? cd(dirs, oldpwd, s.assigns) : previous) : cd(dirs, arg, s.assigns);
     else if (a[0] === "pushd" && s.argv.includes("-n")) {
-      // pushd -n adds to the stack without changing directory; a later `pushd` swaps it in
       if (arg) stack.push(cd(dirs, arg, s.assigns));
     } else if (a[0] === "pushd") {
-      if (arg && /^[+-]\d+$/.test(arg)) dirs = union([...visited]); // rotating the stack: any directory seen so far
+      if (arg && /^[+-]\d+$/.test(arg)) dirs = union([...visited]);
       else if (!arg) {
-        // pushd without an argument swaps the top two entries
         const top = stack.pop();
         stack.push(dirs);
         dirs = top ?? dirs;
@@ -786,7 +718,6 @@ function computeSubsWithBases(parsed: Parsed, cwd: string) {
         dirs = cd(dirs, arg, s.assigns);
       }
     } else if (a[0] === "popd") {
-      // popd returns to the directory before the last pushd; if that pushd failed, the shell may stay put
       dirs = arg && /^[+-]\d+$/.test(arg) ? union([...visited]) : union(stack.pop() ?? [...visited], dirs);
     }
     if (dirs !== before) previous = before;
@@ -797,17 +728,12 @@ function computeSubsWithBases(parsed: Parsed, cwd: string) {
 
 const LOCATION_VALUE_OPTIONS = ["-C", "--git-dir", "--work-tree", "--prefix", "--dir", "--cwd", "--directory", "--manifest-path"];
 
-/** Shell keywords and wrappers that run the command after them. */
 const RUNS_NEXT = new Set([
   "time", "nice", "nohup", "setsid", "timeout", "sudo", "doas", "env", "stdbuf", "ionice", "chrt", "taskset", "flock", "unbuffer",
   "fakeroot", "setarch", "unshare", "strace", "ltrace", "busybox", "command", "builtin", "exec", "xargs", "parallel", "watch", "eval",
   "nsenter", "chroot", "proot", "firejail", "systemd-run", "caffeinate", "arch", "npx", "bunx", "pnpx", "uvx",
 ]);
 
-/**
- * argv positions that may be the command actually run: 0, and the word after a wrapper and its options
- * (plus one positional such as a duration or architecture). `echo rm -rf /` has no such position at `rm`.
- */
 function commandPositions(a: string[]): number[] {
   const out = [0];
   for (let i = 0; i < a.length; i++) {
@@ -832,7 +758,6 @@ function decodeAnsiC(s: string): string {
   });
 }
 
-/** Alternatives of one brace group: a comma list (quotes respected) or a sequence {a..e} / {1..9}. */
 function braceAlternatives(inner: string): string[] | undefined {
   const seq = /^(-?\d+|[A-Za-z])\.\.(-?\d+|[A-Za-z])(?:\.\.-?\d+)?$/.exec(inner);
   if (seq) {
@@ -865,11 +790,6 @@ function braceAlternatives(inner: string): string[] | undefined {
   return parts.length > 1 ? parts.slice(0, 8) : undefined;
 }
 
-/**
- * Static expansions of brace lists and sequences, $'…' (all escapes) and $"…", so hard-deny also sees `.{p,q}i`,
- * `.p{i..i}` and `$'\056pi'`. A last variant replaces whatever is left with `*`, which the wildcard checks then
- * match against guard's state by pattern.
- */
 function staticVariants(cmd: string): string[] {
   const unquoted = cmd
     .replace(/\$'((?:[^'\\]|\\.)*)'/g, (_m, x: string) => `'${decodeAnsiC(x).replace(/'/g, "")}'`)
@@ -894,7 +814,6 @@ const isLinking = (a: string[]) =>
 
 const PATH_VARS = /^(HOME|CDPATH|OLDPWD|PWD)(\+?=|$)/;
 
-/** Whether a subcommand changes HOME, CDPATH, OLDPWD or PWD for the commands after it. */
 function setsPathVars(s: Parsed["subs"][number], a: string[]): boolean {
   if (s.argv.length === 0 && s.assigns.some((x) => PATH_VARS.test(x))) return true;
   const head = a[0];
@@ -907,7 +826,6 @@ function setsPathVars(s: Parsed["subs"][number], a: string[]): boolean {
   return head === "shopt" && a.includes("cdable_vars");
 }
 
-/** Whether text names guard's or pi's state (a root path or a marker such as ~/.pi). */
 function namesProtected(text: string, roots: string[]): boolean {
   const lower = text.toLowerCase();
   return roots.some((r) => lower.includes(r.toLowerCase())) || PROTECTED_MARKERS.some((m) => lower.includes(m));
@@ -927,7 +845,6 @@ function strictlyReadOnly(parsed: Parsed | undefined, writes: string[]): boolean
   return !!parsed && parsed.ok && !parsed.dynamic.length && !writes.length && parsed.subcommands.every(isReadOnlyArgv);
 }
 
-/** A note grant only opens the four documented files, with no path aliases or hard links. */
 function trustedProjectNote(p: string, cwd: string, roots: string[], state?: TrustedDirState): boolean {
   if (!state || isHomeOrAncestor(cwd)) return false;
   const project = resolve(cwd);
@@ -940,7 +857,6 @@ function trustedProjectNote(p: string, cwd: string, roots: string[], state?: Tru
     && state.trustedDirTargets.get(dir.path) === realPath(dir.path) && realPath(dir.path) === dirname(realPath(p)));
 }
 
-/** Artifact grants only cover ordinary artifact sources and Markdown attachments. */
 function trustedProjectArtifact(p: string, cwd: string, roots: string[], write: boolean, state?: TrustedDirState): boolean {
   if (!state || isHomeOrAncestor(cwd)) return false;
   const project = artifactProjectRoot(cwd);
@@ -967,9 +883,7 @@ export function hardDeny(tool: string, input: any, cwd: string, roots: string[],
     if (!unlinkOnly && isProtectedHardLink(w, roots)) return "writes through a hard link to protected state";
   }
   if (tool !== "bash") {
-    // Built-in tools take data (file contents, search patterns), not commands; running such data later is judged then
     if (BUILTIN_TOOLS.has(tool)) return undefined;
-    // Command-like strings in other tools (powershell, MCP shells) get the same hard-deny as bash
     for (const x of allStrings(input)) {
       if (x.length > 16 * 1024 || !/\s/.test(x.trim())) continue;
       const r = hardDeny("bash", { command: x }, cwd, roots, parseShell(x), depth + 1);
@@ -984,10 +898,8 @@ export function hardDeny(tool: string, input: any, cwd: string, roots: string[],
       if (r) return r;
     }
   const scan = parsed && parsed.ok && !parsed.dynamic.length ? stripQuoted(cmd) : cmd;
-  // Very long commands are not scanned (bounded work); they cannot be parsed either and go to the model
   if (scan.length <= 16 * 1024) for (const [re, why] of HARD_DENY_BASH) if (re.test(scan)) return why;
   if (parsed) {
-    // Commands inside $(…) run too
     if (depth < 3)
       for (const x of parsed.substitutions) {
         const r = hardDeny("bash", { command: x }, cwd, roots, parseShell(x), depth + 1);
@@ -995,19 +907,15 @@ export function hardDeny(tool: string, input: any, cwd: string, roots: string[],
       }
     const resolveAll = (b: string, t: string) => [...pathVariants(b, t), ...(hasGlob(t) ? globTargets(b, t) : [])];
     const outerRoots = roots.filter((r) => !isInsideExact(realPath(r), realPath(cwd)));
-    // Wildcards are checked against guard's state by pattern, so a skipped or truncated expansion cannot hide them
     const globInto = (b: string, t: string, rs: string[]) => hasGlob(t) && globMayReach(b, t, rs).into;
     const globAround = (b: string, t: string, rs: string[]) => hasGlob(t) && globMayReach(b, t, rs).around;
     for (const { s, a: a0, bases, unknown } of subsWithBases(parsed, cwd)) {
-      // Changing HOME, CDPATH or OLDPWD for later commands changes what ~, cd and cd - mean
       if (setsPathVars(s, a0)) return "changes HOME, CDPATH or OLDPWD, which decide where later paths point";
-      // pi's own CLI changes which packages and extensions pi loads
       for (const i of commandPositions(a0)) {
         if (basename(a0[i]) !== "pi") continue;
         const sub = a0.slice(i + 1).find((t) => !t.startsWith("-"));
         if (sub && ["install", "remove", "uninstall", "update", "config", "link"].includes(sub)) return "changes pi's packages or configuration (pi install/remove/update/config)";
       }
-      // Commands run by this one (sh -c '…', eval, trap, su -c) and scripts fed to a shell's stdin
       if (depth < 3) {
         const head = basename(a0[0] ?? "");
         const scripts = [...innerCommands(s.argv), ...(isShell(head) ? s.heredocs : [])];
@@ -1015,31 +923,24 @@ export function hardDeny(tool: string, input: any, cwd: string, roots: string[],
           const r = hardDeny("bash", { command: x }, cwd, roots, parseShell(x), depth + 1);
           if (r) return r;
         }
-        // Other interpreters reading a here-document: their code naming guard's state is blocked
         if (INTERPRETER_NAMES.has(head) && s.heredocs.some((b) => namesProtected(b, roots))) return "an interpreter script names guard's or pi's state";
       }
-      // Redirects make even `echo` a writing command
       const changing = (!isReadOnlyArgv(s.argv) || s.writes.length > 0) && !["cd", "pushd", "popd"].includes(a0[0]);
       if (unknown && changing) return "runs a changing command in a directory guard cannot determine";
       for (const t of [...s.writes, ...bashWriteTargets(s.argv)]) if (bases.some((b) => globInto(b, t, roots))) return "a wildcard write target can reach guard's or pi's state";
-      // Patches name their targets inside the patch file
       for (const target of patchTargets(a0, s, bases)) if (protectedReason(target, roots)) return "applies a patch to guard's or pi's state";
-      // Check the command after every wrapper too (time -p, setarch x86_64, fakeroot), not just position 0
       for (const i of commandPositions(a0)) {
         const a = [basename(a0[i]), ...a0.slice(i + 1)];
         const args = nonFlags(a);
         if (isRecursiveRm(a) && args.some((t) => bases.some((b) => isDangerousDeleteTarget(b, t)))) return "recursive deletion of /, ~ or a system directory";
-        // Deleting or moving away a directory that contains guard's state (`rm -rf ~/.p*`, `mv ~/.pi x`)
         const removes = DELETERS.has(a[0]) ? args : a[0] === "mv" ? args.slice(0, -1) : [];
         if (removes.some((t) => bases.some((b) => globInto(b, t, roots) || globAround(b, t, roots) || resolveAll(b, t).some((p) => containsProtectedRoot(p, roots)))))
           return "deletes or moves a directory that contains guard's or pi's state";
         if (!PLACERS.has(a[0]) || args.length < 2) continue;
         const dest = args[args.length - 1];
         const srcs = args.slice(0, -1);
-        // Links to guard's state let later plain-looking writes change it (`ln ~/.pi/…/rules.jsonl notes.txt`, `cp -al ~/.pi bk`)
         if (isLinking(a) && srcs.some((t) => bases.some((b) => resolveAll(b, t).some((p) => protectedReason(p, roots) || containsProtectedRoot(p, roots)))))
           return "links to guard's or pi's state";
-        // Placing something where guard's state lives, or creating .pi/.agents in a parent of it
         for (const b of bases)
           for (const src of srcs)
             for (const d of resolveAll(b, dest)) {
@@ -1051,10 +952,7 @@ export function hardDeny(tool: string, input: any, cwd: string, roots: string[],
                 return "copies, moves or links into guard's or pi's state";
             }
       }
-      // Any other command that changes things and names a directory containing guard's state (find ~/.p? -delete,
-      // chmod -R 000 ~/.p?, tar -xf x -C ~/.p?) is blocked; copy destinations and cd targets are handled above
       const a = a0;
-      // Staging or unstaging (git add .pi/x, git rm --cached) does not change files
       const gitSub = a[0] === "git" ? a.find((t, k) => k > 0 && !t.startsWith("-")) : undefined;
       const indexOnly =
         gitSub === "add" || gitSub === "stage" || gitSub === "commit" ||
@@ -1062,35 +960,22 @@ export function hardDeny(tool: string, input: any, cwd: string, roots: string[],
         (gitSub === "restore" && a.some((t) => t === "--staged" || /^-[A-Za-z]*S/.test(t)) && !a.some((t) => t === "--worktree" || /^-[A-Za-z]*W/.test(t))) ||
         (gitSub === "reset" && !a.some((t) => ["--hard", "--merge", "--keep"].includes(t)));
       if (changing && !indexOnly) {
-        // Raw argv too, so location values (git -C x, npm --prefix x) are seen; a copy's destination is checked above
         const named = [...new Set([...nonFlags(a), ...nonFlags(s.argv)])].filter((t) => !(PLACERS.has(a[0]) && t === nonFlags(a).at(-1)));
-        // The project's own .pi/.agents are guarded by the explicit write checks; counting the project as their
-        // parent would block every `git add .` or `prettier --write .` in projects that have .pi/guard.json
         const hits = (p: string) => containsProtectedRoot(p, outerRoots) || (protectedReason(p, roots) && !isInsideExact(realPath(p), realPath(cwd)));
         if (named.some((t) => bases.some((b) => globInto(b, t, outerRoots) || globAround(b, t, outerRoots) || resolveAll(b, t).some(hits))))
           return "changes guard's or pi's state, or a directory that contains it";
-        // Values glued to options (-C../../.pi, -t../x, --directory=../x)
         const optionPaths = bases.flatMap((b) => pathLikeTokens(b, s.argv.slice(1).filter((t) => t.startsWith("-"))));
         if (optionPaths.some(hits)) return "changes guard's or pi's state, or a directory that contains it";
-        // The project's own .pi/.agents (code pi loads): any changing command naming a path inside them
-        // (git mv x .pi/extensions/, git checkout -- .pi/x, npm i --prefix .pi/extensions). Directories that merely
-        // contain them (`.`, `src/..`) stay allowed.
-        // Read-only commands that change files only through redirects are covered by the redirect-target checks
         const innerRoots = isReadOnlyArgv(s.argv) ? [] : roots.filter((r) => isInsideExact(realPath(r), realPath(cwd)));
         const inInner = (p: string) => !!protectedReason(p, innerRoots);
         if (named.some((t) => bases.some((b) => globInto(b, t, innerRoots) || resolveAll(b, t).some(inInner))) || optionPaths.some(inInner))
           return "changes the project's .pi/ or .agents/ (code and settings pi loads)";
-        // Interpreter code naming them (python3 -c "open('.pi/extensions/e.ts','w')")
         if (INTERPRETER_NAMES.has(basename(a[0] ?? "")) && a.slice(1).some((t) => INNER_NAME.test(t) || innerRoots.some((r) => t.includes(r))))
           return "an interpreter command names the project's .pi/ or .agents/";
       }
     }
   }
-  // Reading guard's or pi's state with a strictly read-only command only needs confirmation (see sensitive);
-  // anything else that touches it, by path or by name (interpreters, cd + relative paths), is blocked.
-  // Names in quoted text and in here-documents fed to cat (commit messages, docs) are not paths
   const lower = nameScanText(cmd, parsed).toLowerCase();
-  // The project's own .pi/ is covered by the write checks above; naming it (git add .pi/x) is not a change to it
   const outer = roots.filter((r) => !isInsideExact(realPath(r), realPath(cwd)));
   const touchesProtected =
     reads.some((p) => protectedReason(p, outer)) || outer.some((r) => lower.includes(r.toLowerCase())) || PROTECTED_MARKERS.some((m) => lower.includes(m));
@@ -1100,7 +985,6 @@ export function hardDeny(tool: string, input: any, cwd: string, roots: string[],
 
 const INNER_NAME = /(?:^|[^\w.-])\.(?:pi|agents)(?:[/\\'"\s)]|$)/;
 
-/** Commands whose operands are all files (or a search pattern), so a wildcard expanding to any name only names files. */
 const GLOB_FILE_COMMANDS = new Set(["cat", "head", "tail", "wc", "ls", "grep", "egrep", "fgrep", "rg", "nl", "stat", "file", "md5sum", "sha256sum", "shasum", "du", "sort", "echo", "basename", "dirname", "realpath", "readlink"]);
 
 const CONTENT_SEARCH = new Set(["rg", "ag", "ack", "grep", "egrep", "fgrep"]);
@@ -1109,7 +993,6 @@ const recursiveGrep = (args: string[]) => {
   for (let i = 0; i < args.length; i++) {
     const t = args[i];
     if (t === "--") break;
-    // A separate regexp value is data, even when it looks like a recursive option.
     if (t === "-e" || (isLongOption(t, "--regexp") && !t.includes("="))) { i++; continue; }
     if ((/^-[A-Za-z0-9]*[rR]/.test(t) && !t.startsWith("--")) ||
       isLongOption(t, "--recursive") || isLongOption(t, "--dereference-recursive") ||
@@ -1118,10 +1001,6 @@ const recursiveGrep = (args: string[]) => {
   }
   return false;
 };
-/**
- * What a recursive content search may print: the first secret file it would reach, and whether the search tree was
- * too large to check (then the call is not treated as safe).
- */
 function searchExposure(tool: string, input: any, cwd: string, parsed?: Parsed, trustedDirs?: TrustedDirState, protectedPaths: string[] = []): { hit?: string; unknown: boolean } {
   const projectRead = tool === "bash" && !!parsed && parsed.ok && !parsed.dynamic.length && !parsed.writes.length && parsed.subcommands.every(isReadOnlyArgv);
   const check = (roots0: string[], hidden: boolean, suffixes?: string[]) => {
@@ -1137,7 +1016,6 @@ function searchExposure(tool: string, input: any, cwd: string, parsed?: Parsed, 
           continue;
         }
       } catch (error: any) {
-        // A missing explicit operand causes the search tool to report an error; it does not expose file contents.
         if (error?.code !== "ENOENT" && error?.code !== "ENOTDIR") unknown = true;
         continue;
       }
@@ -1161,7 +1039,6 @@ function searchExposure(tool: string, input: any, cwd: string, parsed?: Parsed, 
     if (rgInfoOnly(a) || rgListsFiles(a) || rgListsTypes(a)) continue;
     const explicit = !parsed.dynamic.length && !parsed.globs.length ? s.argv[0] === "rg" ? rgExplicitPaths(s.argv) : isGrepFamily(s.argv[0]) ? grepExplicitPaths(s.argv) : undefined : undefined;
     const given = explicit ? bases.flatMap((b) => explicit.filter((path) => path !== "-").flatMap((path) => pathVariants(b, path.startsWith("-") ? `./${path}` : path))) : bases.flatMap((b) => pathLikeTokens(b, nonFlags(a).slice(1)));
-    // rg skips hidden files unless told otherwise, or unless an ignore file re-includes them (`!.env`)
     const roots0 = given.length ? given : bases;
     const suffixes = a[0] === "rg" && !parsed.dynamic.length && !parsed.globs.length ? rgSimpleIncludeSuffixes(a) : undefined;
     const visibility = rgVisibility(a);
@@ -1172,7 +1049,6 @@ function searchExposure(tool: string, input: any, cwd: string, parsed?: Parsed, 
   return { unknown };
 }
 
-/** True if a content search's reachable files could not be checked completely. */
 export function searchNeedsJudgement(tool: string, input: any, cwd: string, parsed?: Parsed, trustedDirs?: TrustedDirState, protectedPaths: string[] = []): boolean {
   return searchExposure(tool, input, cwd, parsed, trustedDirs, protectedPaths).unknown;
 }
@@ -1187,7 +1063,6 @@ function shellVariableAssigned(parsed: Parsed, name: string): boolean {
   });
 }
 
-/** An ambient ripgrep config may inject options such as --pre and --follow. */
 export function usesRipgrepConfig(parsed?: Parsed): boolean {
   if (!parsed) return false;
   const configured = !!process.env.RIPGREP_CONFIG_PATH || shellVariableAssigned(parsed, "RIPGREP_CONFIG_PATH");
@@ -1197,7 +1072,6 @@ export function usesRipgrepConfig(parsed?: Parsed): boolean {
   });
 }
 
-/** Some grep implementations still honor GREP_OPTIONS, including recursive flags. */
 export function usesGrepOptions(parsed?: Parsed): boolean {
   if (!parsed || !(process.env.GREP_OPTIONS || shellVariableAssigned(parsed, "GREP_OPTIONS"))) return false;
   return parsed.subcommands.some((raw) => ["grep", "egrep", "fgrep"].includes(normalizeArgv(raw, "deny").argv[0]));
@@ -1225,7 +1099,6 @@ export function sensitive(tool: string, input: any, cwd: string, roots: string[]
   const projectRead = tool === "bash" && !!parsed && parsed.ok && !parsed.dynamic.length && !parsed.writes.length && parsed.subcommands.every(isReadOnlyArgv);
   if (reads.includes(INCOMPLETE_DIRECTORY_COMPARISON)) return "directory comparison could not be inspected completely";
   if (reads.includes(UNKNOWN_PATH)) return "some wildcard read paths could not be inspected completely";
-  // The project's own .pi/ holds project files (prompts, guard.json); reading them is fine
   const outerRoots = roots.filter((r) => !isInsideExact(realPath(r), realPath(cwd)));
   for (const p of [...reads, ...writes]) {
     const r = sensitiveReason(p);
@@ -1241,24 +1114,19 @@ export function sensitive(tool: string, input: any, cwd: string, roots: string[]
       if (!trusted && !knownProjectRead) return "a hard-linked file may share contents with a path outside the project";
     }
   }
-  // pi's grep tool searches hidden files recursively
   if (tool === "grep" && reads.concat(reads.length ? [] : [cwd]).some((p) => isHomeOrAncestor(p) || isHomeOrAncestor(realPath(p)))) return "searches file contents across the home directory";
-  // Recursive content searches print matching lines of every file they reach, including .env files and keys
   const exposure = searchExposure(tool, input, cwd, parsed, trustedDirs, roots);
   if (exposure.hit) return `the search would include ${exposure.hit}`;
   if (tool === "bash" && parsed) {
     const cmd = String(input?.command ?? "");
-    // Static commands are matched without quoted text (echo '.env' >> .gitignore names no file)
     const envScan = parsed.ok && !parsed.dynamic.length ? stripQuoted(cmd) : cmd;
     const inspectedSearchOnly = parsed.ok && !parsed.dynamic.length && !parsed.globs.length && parsed.subs.length > 0 && parsed.subs.every((sub) =>
       !sub.assigns.length && !sub.heredocs.length && (sub.argv[0] === "rg" ? rgExplicitPaths(sub.argv) !== undefined : isGrepFamily(sub.argv[0]) && grepExplicitPaths(sub.argv) !== undefined));
     if (!inspectedSearchOnly && /(?:^|[\s"'/:])\.env(?:\.[\w.-]+)?(?=$|[\s"';|&])/.test(envScan) && !/\.env\.(?:example|sample|template)/.test(envScan)) return ".env file";
-    // cd to a computed path ($(…), $VAR) and then changing files: guard cannot tell where that happens
     const subs = subsWithBases(parsed, cwd);
     const computedCd = subs.findIndex((x) => ["cd", "pushd"].includes(x.a[0]) && /[$`]/.test(x.s.argv.slice(1).join(" ")));
     if (computedCd >= 0 && subs.slice(computedCd + 1).some((x) => !isReadOnlyArgv(x.s.argv) || x.s.writes.length)) return "changes files after cd to a computed directory";
     for (const { s: sub, a, bases } of subs) {
-      // Extracting an archive where .pi/ or .agents/ could appear (pi loads them), or recursive permission changes
       const extracts =
         ((a[0] === "tar" || a[0] === "bsdtar") && a.slice(1).some((t, i) => (i === 0 && /^[A-Za-z]*x/.test(t)) || (/^-[A-Za-z]*x/.test(t) && !t.startsWith("--")) || isLongOption(t, "--extract") || isLongOption(t, "--get"))) ||
         a[0] === "unzip" || a[0] === "7z";
@@ -1273,12 +1141,9 @@ export function sensitive(tool: string, input: any, cwd: string, roots: string[]
           return extracts ? "extracts an archive where .pi/ or .agents/ could be created" : "changes permissions recursively where guard's or pi's state lives";
       }
     }
-    // Mentions of pi's code directories (~/.pi/agent/install/…, git/…, without `..`) are not its internal state; the paths
-    // themselves were resolved and checked above
     const lower = nameScanText(cmd, parsed).toLowerCase().replace(PI_CODE_MENTION, (w) => (w.includes("..") ? w : ""));
     if (PROTECTED_MARKERS.some((m) => lower.includes(m))) return "reads guard or pi internal state";
     for (const [si, raw] of parsed.subcommands.entries()) {
-      // `env` alone prints the environment; it is only a wrapper when a command follows
       const rawHead = basename(raw[0] ?? "");
       if ((rawHead === "env" || rawHead === "printenv") && raw.slice(1).every((t) => t.startsWith("-") || /^[A-Za-z_]\w*=/.test(t))) return "prints all environment variables";
       const { argv: a } = normalizeArgv(raw, "deny");
@@ -1287,9 +1152,7 @@ export function sensitive(tool: string, input: any, cwd: string, roots: string[]
       if ((head === "export" && (args.length === 0 || args.includes("-p"))) || (head === "set" && args.length === 0) || (head === "declare" && args.some((t) => /^-[a-z]*[xp]/.test(t)))) return "prints the environment";
       if (head === "jq" && args.some((t) => t.includes("$ENV") || /\benv\b/.test(t))) return "reads environment variables";
       if ((head === "jq" || head === "ps") && parsed.subs[si]?.globArgs?.length) return "a wildcard argument may make it print environment variables";
-      // Searching file contents across ~ or / reaches every secret in the home directory
       if (CONTENT_SEARCH.has(head) && (!isGrepFamily(head) || recursiveGrep(args))) {
-        // Any directory this command may search, after cd and symlinks
         if ([cwd, ...reads].some((p) => isHomeOrAncestor(p) || isHomeOrAncestor(realPath(p)))) return "searches file contents across the home directory";
       }
     }
@@ -1297,28 +1160,18 @@ export function sensitive(tool: string, input: any, cwd: string, roots: string[]
   return undefined;
 }
 
-/** Commands that only create empty files or directories; safe when every target is a plain project path. */
 const PLAIN_CREATORS = new Set(["mkdir", "touch"]);
 
 export function safeAllow(tool: string, input: any, cwd: string, opts: { trusted: boolean; touched: Set<string>; trustedDirs?: TrustedDirState; protectedPaths?: string[] }, parsed?: Parsed): boolean {
   if (tool === "bash") {
     if (!parsed || !parsed.ok || parsed.dynamic.length || parsed.writes.length || !parsed.subcommands.length) return false;
     if (usesRipgrepConfig(parsed) || usesGrepOptions(parsed)) return false;
-    // Glued option values (-f/etc/x, -bf~/x) are easy to misread; such commands always get a judgement.
-    // So are words that start with `-` and contain a path (`-- --d/../../x`, `--x/y`).
     if (parsed.subcommands.some(hasGluedPathValue)) return false;
     if (parsed.subcommands.some((x) => x.slice(1).some((t) => t.startsWith("-") && t.includes("/")))) return false;
-    // A wildcard that expands to a word like `--pre=sh` hands the command an option. Wildcards after cd/pushd
-    // expand somewhere guard would have to re-derive, so that combination is never a shortcut
     if (parsed.globs.length && parsed.subcommands.some((x) => ["cd", "pushd", "popd"].includes(normalizeArgv(x).argv[0]))) return false;
     if (parsed.globs.some((g) => globHitsOptionLikeName(cwd, g))) return false;
-    // Wildcards expand to file names the agent can choose (`touch 'y[$(sh<p)]'` then `[ -v y* ]`), so they are only a
-    // shortcut where every operand is a file anyway; elsewhere a name can become a program, a format or a subscript
     if (parsed.subs.some((x) => x.globArgs?.length && !GLOB_FILE_COMMANDS.has(normalizeArgv(x.argv).argv[0]))) return false;
-    // Here-documents hide text from the parser on purpose; if guard and bash ever disagree on where a body ends,
-    // the difference is a hidden command. Commands with them are always judged (they are almost always writes anyway)
     if (parsed.heredocBodies.length || parsed.subs.some((x) => x.heredocs.length)) return false;
-    // The directory stack (pushd -n, rotations) is too easy to get wrong; never a shortcut
     if (parsed.subcommands.some((a) => ["pushd", "popd", "dirs"].includes(normalizeArgv(a).argv[0]))) return false;
     if (searchExposure(tool, input, cwd, parsed, opts.trustedDirs, opts.protectedPaths ?? protectedRoots(cwd)).unknown) return false;
     let creates = false;
@@ -1328,12 +1181,8 @@ export function safeAllow(tool: string, input: any, cwd: string, opts: { trusted
       else if (bashWriteTargets(a).length || !isReadOnlyArgv(a)) return false;
     }
     if (creates && !writesStayPlain(tool, input, cwd, parsed, opts.trustedDirs, opts.protectedPaths)) return false;
-    // Only reads inside the project or in public system directories happen without asking
     if (!inputPaths(tool, input, cwd, parsed).reads.every((p) => isFreelyReadable(p, cwd, opts.trustedDirs, opts.protectedPaths) || (!creates && isProjectHardlinkSafe(p, cwd)))) return false;
     const heads = parsed.subcommands.map((a) => normalizeArgv(a).argv[0]);
-    // Read-only git still runs commands configured in .git/config, so it needs a trusted repo with a clean config,
-    // must run in the project itself (no cd anywhere in the command), and nothing this session may have planted a
-    // repository-like directory (HEAD, config, objects/, refs/)
     if (heads.includes("git")) {
       if (heads.some((h) => h === "cd" || h === "pushd" || h === "popd")) return false;
       if (!opts.trusted || !gitConfigIsSafe(cwd)) return false;
@@ -1347,13 +1196,10 @@ export function safeAllow(tool: string, input: any, cwd: string, opts: { trusted
     const realCwd = realPath(cwd);
     return writes.every((w) => {
       const r = realPath(w);
-      // Folders another extension vouched for (guard:trust-dir) take plain edits like the project
       const td = trustedDirFor(w, true, opts.trustedDirs);
       if (td) return !isProtectedHardLink(w, opts.protectedPaths ?? protectedRoots(cwd)) && plainInTrustedDir(w, td, opts.trustedDirs);
       if (isHardLinked(w)) return false;
-      // When pi runs in ~ (or above), "the project" would be the whole home directory
       if (isHomeOrAncestor(cwd)) return false;
-      // Symlinks that leave the project (docs/notes.md -> ~/.bashrc) are not plain project edits
       if (!isInsideExact(r, realCwd) || r.toLowerCase() === realCwd.toLowerCase()) return false;
       const lexicalBase = isInsideExact(w, cwd) ? cwd : realCwd;
       return !isRiskyProjectFile(relative(realCwd, r)) && !isRiskyProjectFile(relative(lexicalBase, w));
@@ -1362,8 +1208,6 @@ export function safeAllow(tool: string, input: any, cwd: string, opts: { trusted
   return false;
 }
 
-/** True if every write target stays inside the project and avoids files that tools run later. */
-/** True if every path the call names (read or written) is inside the project. */
 export function pathsStayInProject(tool: string, input: any, cwd: string, parsed?: Parsed): boolean {
   const { reads, writes } = inputPaths(tool, input, cwd, parsed);
   const realCwd = realPath(cwd);
@@ -1384,7 +1228,6 @@ export function writesStayPlain(tool: string, input: any, cwd: string, parsed?: 
     const r = realPath(w);
     const trusted = trustedDirFor(w, true, state);
     if (trusted) return !isProtectedHardLink(w, protectedPaths) && plainInTrustedDir(w, trusted, state);
-    // A hard-linked file may be the same file as something outside the project.
     if (isHardLinked(w)) return false;
     return !isHomeOrAncestor(cwd) && isInsideExact(r, realCwd) && r.toLowerCase() !== realCwd.toLowerCase() && !isRiskyProjectFile(r.slice(realCwd.length + 1));
   });

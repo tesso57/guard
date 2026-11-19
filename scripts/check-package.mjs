@@ -15,7 +15,6 @@ const packed = JSON.parse(npmCli
 const files = new Set(packed[0].files.map(({ path }) => path));
 function sourceFiles(dir) {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
-    // npm excludes these metadata, configuration and editor files from packages.
     if ([".DS_Store", ".npmignore", ".gitignore", ".npmrc", "npm-debug.log", ".git", ".svn", ".hg", "CVS"].includes(entry.name) ||
         entry.name.startsWith("._") || /^\..*\.swp$/.test(entry.name)) return [];
     const path = posix.join(dir, entry.name);

@@ -9,7 +9,6 @@ import { grepExplicitPaths, isReadOnlyArgv, parseShell, rgExplicitPaths, rgLists
 
 export type RegisteredSkill = { path: string; target: string };
 
-/** Only plain reads of standard skill locations or Pi-registered skill files bypass guard. */
 export function isSkillRead(tool: string, input: unknown, cwd: string, registeredSkills: readonly RegisteredSkill[] = []): boolean {
   try {
     if (!input || typeof input !== "object" || utilTypes.isProxy(input)) return false;
@@ -38,7 +37,6 @@ export function isSkillRead(tool: string, input: unknown, cwd: string, registere
       return inside(path) && statSync(path).isDirectory();
     }
     if (tool === "grep" || tool === "find") {
-      // Older Pi versions may not suppress ripgrep's ambient configuration.
       if (tool === "grep" && process.env.RIPGREP_CONFIG_PATH) return false;
       const fields = tool === "grep" ? { pattern: "string", glob: "string", ignoreCase: "boolean", literal: "boolean", context: "number", limit: "number" } : { pattern: "string", limit: "number" };
       for (const [name, type] of Object.entries(fields)) {
@@ -98,7 +96,6 @@ export function isSkillRead(tool: string, input: unknown, cwd: string, registere
       if (sub.argv[0] === "rg") return rgListsFiles(sub.argv) || rgExplicitPaths(sub.argv)?.length === 0;
       return true;
     });
-    // A file operand can skip hard-link inspection only if no pipeline command reads file contents.
     const nonListingSubs = parsed.subs.filter((sub) => !rgListsFiles(sub.argv));
     const nonListingPaths = nonListingSubs.length ? inputPaths("bash", { command: `${value}\0non-listing` }, cwd, { ...parsed, subs: nonListingSubs, subcommands: nonListingSubs.map((sub) => sub.argv) }) : { reads: [], writes: [] };
     const onlyListFileOperands = onlyFileLists && !nonListingPaths.reads.length && !nonListingPaths.writes.length;

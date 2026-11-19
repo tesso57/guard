@@ -19,7 +19,6 @@ test("guard handles project, protected and home writes in real Pi sessions", asy
   process.env.HOME = home;
   process.env.XDG_CONFIG_HOME = join(home, ".config");
   process.env.PI_CODING_AGENT_DIR = join(dir, "agent");
-  // A Pi credential must not silently enable guard's separate Decisions API client.
   process.env.OPENAI_API_KEY = "fake-pi-only-key";
   const networkFetch = globalThis.fetch;
   let unexpectedRequests = 0;

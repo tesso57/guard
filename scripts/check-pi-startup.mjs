@@ -1,4 +1,3 @@
-// Run via npm so the pack command uses the same npm CLI on Windows and Unix.
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -21,7 +20,6 @@ try {
   mkdirSync(agent);
   mkdirSync(cwd);
   writeFileSync(join(agent, "settings.json"), JSON.stringify({ packages: [pkg] }));
-  // Inspect the live registry after Pi has bound the installed extension.
   const probe = join(tmp, "probe.mjs");
   writeFileSync(probe, `
     import { writeFileSync } from "node:fs";

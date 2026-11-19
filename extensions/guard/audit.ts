@@ -48,7 +48,6 @@ export function audit(rec: AuditRecord): boolean {
       }
     }
     try {
-      // Keep one rotated file so the log cannot grow without bound
       const st = lstatSync(FILE);
       if (st.isFile() && st.nlink === 1 && st.size > MAX_BYTES) renameSync(FILE, `${FILE}.1`);
     } catch (e: any) {
@@ -61,7 +60,6 @@ export function audit(rec: AuditRecord): boolean {
       success = true;
     }
   } catch {
-    /* a failing audit log must not stop the judgement */
   } finally {
     if (fd !== undefined) try { closeSync(fd); } catch { success = false; }
     if (locked) try { rmdirSync(`${FILE}.lock`); } catch { success = false; }
@@ -69,7 +67,6 @@ export function audit(rec: AuditRecord): boolean {
   return success;
 }
 
-/** The last n records, reading only the end of the file. */
 export function tail(n: number): AuditRecord[] {
   if (!Number.isSafeInteger(n) || n <= 0) return [];
   const limit = Math.min(n, 1000);
@@ -96,7 +93,7 @@ export function tail(n: number): AuditRecord[] {
         start = i + 1;
       }
     }
-    if (prefix) lines.shift(); // discard the preceding byte and any partial first line
+    if (prefix) lines.shift();
     return lines.flatMap((line) => {
       try {
         const record: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(line));
@@ -106,6 +103,6 @@ export function tail(n: number): AuditRecord[] {
   } catch {
     return [];
   } finally {
-    if (fd !== undefined) try { closeSync(fd); } catch { /* a failing log read returns no records */ }
+    if (fd !== undefined) try { closeSync(fd); } catch {   }
   }
 }

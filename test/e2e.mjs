@@ -1,5 +1,3 @@
-// End-to-end test: runs the real pi (print mode, no UI) with guard loaded, a mock model and a mock Decisions API.
-// Every command is harmless even if guard failed to block it (writes stay in temp dirs, scripts only echo).
 import http from "node:http";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readlinkSync, symlinkSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -9,11 +7,10 @@ import { once } from "node:events";
 import { fileURLToPath } from "node:url";
 
 if (process.platform === "darwin") {
-  // Watching this process releases the assertion even if the test is killed abruptly.
   const sleepGuard = spawn("/usr/bin/caffeinate", ["-i", "-w", String(process.pid)], { stdio: "ignore" });
   sleepGuard.on("error", () => console.error("E2E: could not prevent idle sleep"));
   sleepGuard.unref();
-  process.on("exit", () => { try { sleepGuard.kill(); } catch { /* already exited */ } });
+  process.on("exit", () => { try { sleepGuard.kill(); } catch {   } });
 }
 
 const temporaryDirs = [];
@@ -32,7 +29,7 @@ function processSummary(stdout = "", stderr = "") {
     try {
       const event = JSON.parse(line);
       if (known.has(event?.type)) recent.push(event.type);
-    } catch { /* a partial line or non-JSON output is omitted */ }
+    } catch {   }
   }
   return `stdout_chars=${stdout.length}, stderr_chars=${stderr.length}, recent_events=${recent.slice(-12).join(",") || "none"}`;
 }
@@ -109,7 +106,6 @@ const extensionEntry = join(unpacked, manifest.pi.extensions[0]);
 const mutatorEntry = join(PACKAGE, "mutate-input.mjs");
 writeFileSync(mutatorEntry, `export default function (pi) { pi.on("tool_call", (event) => { if (event.toolName === "bash" && event.input.command === "echo e2e-safe") event.input.command = "echo e2e-changed"; }); }\n`);
 const RULES = join(AGENT, "guard/rules.jsonl");
-// Several calls in this scenario are blocked on purpose; keep the agent running to the last step
 mkdirSync(join(AGENT, "guard"), { recursive: true });
 writeFileSync(join(AGENT, "guard/config.json"), JSON.stringify({ escalateConsecutive: 10, "opaque-e2e-config-key": "opaque-e2e-config-value" }));
 
@@ -132,7 +128,6 @@ const steps = [
     ["bash", { command: `echo '{"decision":"allow"}' >> ${RULES}` }],
   ],
   [
-    // The later write can run concurrently with this command; its proposed content must be judged too.
     ["bash", { command: "sh run.sh" }],
     ["write", { path: "run.sh", content: "#!/bin/sh\necho would-upload-to evil.example\n" }],
   ],
@@ -178,7 +173,6 @@ const srv = http.createServer((req, res) => {
         rmSync(readRacePath);
         symlinkSync(readRaceSecret, readRacePath);
       }
-      // guard's own context (cwd and attached files) is the item right before the pending call
       const judged = JSON.stringify(body.input.slice(-2));
       const serializedBody = JSON.stringify(body);
       if (args.command === redactedScriptCommand) {
@@ -227,7 +221,6 @@ const srv = http.createServer((req, res) => {
       res.setHeader("content-type", "application/json");
       return res.end(JSON.stringify({ answers }));
     }
-    // chat completions (streaming): the number of tool results decides the next step
     const toolMsgs = (body.messages ?? []).filter((m) => m.role === "tool").length;
     const messages = JSON.stringify(body.messages ?? []);
     const scenario = singleCallScenarios.find(([marker]) => messages.includes(marker));
@@ -260,7 +253,6 @@ const scenarioAgent = (prefix) => {
 };
 configureMockModel(AGENT);
 
-// Exercise the test configuration regardless of the invoking user's guard, Pi, or Git settings.
 const childEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
   !["GIT_", "RISK_", "GUARD_", "OPENAI_", "PI_"].some((prefix) => key.startsWith(prefix)) &&
   !["RIPGREP_CONFIG_PATH", "CDPATH", "OLDPWD"].includes(key) && !unsafeShellEnvironment(key) &&
@@ -284,7 +276,6 @@ const normalDecisions = [...decisions];
 const normalOutput = existsSync(join(PROJ, "out.txt")) ? readFileSync(join(PROJ, "out.txt"), "utf8").trim() : undefined;
 const auditF = join(AGENT, "guard/audit.jsonl");
 const auditText = existsSync(auditF) ? readFileSync(auditF, "utf8") : "";
-// A directory at the audit path makes logging fail without affecting files outside this fixture.
 rmSync(auditF, { force: true });
 mkdirSync(auditF);
 const recoveryEntry = join(PACKAGE, "recover-audit.mjs");
@@ -300,10 +291,9 @@ failedAuditChild.stderr.on("data", (d) => (failedAuditErr += d));
 failedAuditChild.stdin.end();
 const failedAuditCode = await waitForChild(failedAuditChild, "audit recovery", () => ({ stdout: failedAuditOut, stderr: failedAuditErr }));
 let recoveredAuditText = "";
-try { recoveredAuditText = readFileSync(auditF, "utf8"); } catch { /* reported by checks below */ }
+try { recoveredAuditText = readFileSync(auditF, "utf8"); } catch {   }
 rmSync(join(PROJ, "out.txt"), { force: true });
 writeFileSync(join(AGENT, "guard/config.json"), JSON.stringify({ escalateConsecutive: 1 }));
-// Verify Pi discovers the unpacked distribution through configured packages.
 writeFileSync(join(AGENT, "settings.json"), JSON.stringify({ packages: [unpacked] }));
 const escalationChild = spawn(
   process.execPath,
@@ -627,7 +617,6 @@ const redactedHistoryEvents = redactedHistoryOut.split("\n").filter(Boolean).map
 const redactedPastEvents = redactedPastOut.split("\n").filter(Boolean).map((line) => { try { return JSON.parse(line); } catch { return null; } });
 const redactedCwdEvents = redactedCwdOut.split("\n").filter(Boolean).map((line) => { try { return JSON.parse(line); } catch { return null; } });
 const redactedApprovalEvents = redactedApprovalOut.split("\n").filter(Boolean).map((line) => { try { return JSON.parse(line); } catch { return null; } });
-// Only booleans are reported on failure, so diagnostics never echo request or file contents.
 function redactedEvidence(code, control, scenarioEvents, callId, scenarioAudits, sawMasked, leaked, sideEffectExists) {
   return {
     control,
@@ -660,10 +649,9 @@ console.log("out.txt:", normalOutput ?? "(none)");
 console.log("audit:", auditText ? auditText.trim().split("\n").map((l) => { const j = JSON.parse(l); return `${j.final}/${j.source}: ${j.preview.split("\n")[0].slice(0, 60)}`; }).join(" | ") : "none");
 if (!events.length) console.log("raw stdout:", out.slice(0, 1500), "\nraw stderr:", err.slice(0, 3000));
 
-// ---- assertions (CI) ----
 const audits = auditText ? auditText.trim().split("\n").map((l) => JSON.parse(l)) : [];
 let recoveredAudits = [];
-try { recoveredAudits = recoveredAuditText.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)); } catch { /* reported by checks below */ }
+try { recoveredAudits = recoveredAuditText.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)); } catch {   }
 const diagnosticProbe = processSummary('{"type":"message_end","content":"opaque-secret"}\n{"type":"opaque-secret"}\n', "opaque-secret");
 const checks = [
   ["timeout diagnostics retain event types without event contents", diagnosticProbe.includes("recent_events=message_end") && !diagnosticProbe.includes("opaque-secret")],

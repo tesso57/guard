@@ -9,11 +9,8 @@ export type DialogSpec = {
   body: string;
   tool: string;
   patterns?: Match[];
-  /** Patterns a remembered deny would use (command words plus flags). */
   denyPatterns?: Match[];
-  /** Offer "allow and remember" (false for high risk, ask rules, or calls without a safe pattern). */
   rememberAllow: boolean;
-  /** Offer a global allow (low-risk categories in trusted projects only). */
   globalAllow: boolean;
   projectName: string;
   timeoutMs: number;
@@ -23,20 +20,17 @@ const ONCE = "Allow (this time only)";
 const DENY = "Deny";
 const BACK = "← Back";
 
-/** Prevent terminal control sequences and bidirectional controls from disguising displayed input. */
 export function displayText(text: string): string {
   return text.replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u061c\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g,
     (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`);
 }
 const inline = (text: string) => displayText(text).replace(/\n/g, "\\n");
 
-/** Two-step approval dialog. Esc, timeout or no selection count as "deny this time". */
 export async function confirmDialog(ctx: ExtensionContext, s: DialogSpec): Promise<Choice> {
   const opts = { timeout: s.timeoutMs, signal: ctx.signal };
   const label = s.patterns?.map((p) => inline(describeMatch(s.tool, p))).join(" / ");
   const denyLabel = s.denyPatterns?.map((p) => inline(describeMatch(s.tool, p))).join(" / ");
   const sessionOpt = label ? `Allow (this session: ${label})` : undefined;
-  // Only a trusted read-only call can become a global allow; otherwise the project is the only scope, so no submenu
   const rememberOpt = s.globalAllow ? "Allow and remember… ▸" : `Allow and remember (this project: ${inline(s.projectName)})`;
   const denyRememberOpt = "Deny and remember… ▸";
   const options = [ONCE];
@@ -55,7 +49,6 @@ export async function confirmDialog(ctx: ExtensionContext, s: DialogSpec): Promi
       const pats = decision === "allow" ? s.patterns : s.denyPatterns;
       const ex = pats?.map((p) => examples(p)).find(Boolean);
       const scopes = [`This project (${inline(s.projectName)})`];
-      // A deny is always on the safe side, so every scope is offered for it
       if (decision === "deny" || s.globalAllow) scopes.push("Global");
       if (decision === "deny") scopes.push("This session");
       scopes.push(BACK);
@@ -72,7 +65,6 @@ export async function confirmDialog(ctx: ExtensionContext, s: DialogSpec): Promi
   }
 }
 
-/** Show both ends when a command or file change is too long for the dialog. */
 export function preview(tool: string, input: any): string {
   const cut = (s: string, n: number) => {
     if (s.length <= n) return s;

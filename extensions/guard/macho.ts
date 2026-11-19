@@ -1,7 +1,6 @@
 import { isUtf8 } from "node:buffer";
 import { posix } from "node:path";
 
-/** Read bounded Mach-O load commands, including each slice of a universal binary. */
 export function machoLoaders(size: number, read: (offset: number, length: number) => Buffer): { loaders: string[]; dyldEnvironment: boolean } | undefined {
   try {
     if (!Number.isSafeInteger(size) || size < 8) return undefined;
