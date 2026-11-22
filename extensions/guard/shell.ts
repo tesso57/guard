@@ -7,6 +7,7 @@ type Sub = {
   reads: string[];
   heredocs: string[];
   globArgs?: number[];
+  literalPipeInput?: true;
 };
 
 export type Parsed = {
@@ -65,6 +66,7 @@ export function parseShell(cmd: string, depth = 0): Parsed {
   let tokEscaped = false;
   let quote: "'" | '"' | null = null;
   let pendingRedirect: "write" | "read" | "data" | null = null;
+  let literalPipeInput = false;
 
   const endTok = () => {
     if (!inTok) return;
@@ -74,6 +76,7 @@ export function parseShell(cmd: string, depth = 0): Parsed {
     }
     else if (tok !== "" || tokQuoted) cur.argv.push(tok);
     if (globbed && tok !== "[" && tok !== "]") {
+      literalPipeInput = false;
       if (!pendingRedirect) (cur.globArgs ??= []).push(cur.argv.length - 1);
       globs.push(tok);
       if (/\[[=.:]/.test(tok)) dyn("character class or equivalence class in a wildcard");
@@ -88,12 +91,15 @@ export function parseShell(cmd: string, depth = 0): Parsed {
     tokQuoted = false;
     tokEscaped = false;
   };
-  const endCmd = () => {
+  const endCmd = (pipesToNext = false) => {
     endTok();
+    if (literalPipeInput) cur.literalPipeInput = true;
     if (cur.argv.length || cur.writes.length || cur.reads.length) subs.push(cur);
+    literalPipeInput = pipesToNext && cur.argv.length > 0;
     cur = { argv: [], assigns: [], writes: [], reads: [], heredocs: [] };
   };
   const dyn = (why: string) => {
+    literalPipeInput = false;
     if (!dynamic.includes(why)) dynamic.push(why);
   };
 
@@ -200,12 +206,13 @@ export function parseShell(cmd: string, depth = 0): Parsed {
     }
     if (c === "&" || c === "|") {
       if (c === "&" && n === ">") {
+        literalPipeInput = false;
         endTok();
         i += cmd[i + 2] === ">" ? 2 : 1;
         pendingRedirect = "write";
         continue;
       }
-      endCmd();
+      endCmd(c === "|" && n !== "|");
       operators.push(n === c ? c + n : c === "|" && n === "&" ? "|&" : c);
       if (n === c || (c === "|" && n === "&")) i++;
       continue;
@@ -216,6 +223,7 @@ export function parseShell(cmd: string, depth = 0): Parsed {
       continue;
     }
     if (c === "<") {
+      literalPipeInput = false;
       const arith = arithDepth[i] > 0;
       if (n === "<" && (arith || /^[A-Za-z_]\w*\[[^\]]*$/.test(tok))) {
         dyn("arithmetic or array subscript");
@@ -297,6 +305,7 @@ export function parseShell(cmd: string, depth = 0): Parsed {
       continue;
     }
     if (c === ">") {
+      literalPipeInput = false;
       if (inTok && /^\d+$/.test(tok) && !tokQuoted) { tok = ""; inTok = false; }
       endTok();
       if (n === ">" || n === "|") i++;
