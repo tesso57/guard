@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
 import { basename, isAbsolute, relative } from "node:path";
 import { types as utilTypes } from "node:util";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { createBashToolDefinition, createReadToolDefinition, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { readAskAnswers, type AskAnswer } from "./ask-answers.ts";
 import { audit, tail, type AuditRecord } from "./audit.ts";
 import { type Config, loadConfig } from "./config.ts";
@@ -11,9 +11,9 @@ import { MAX_FILE_BYTES, readBoundedText } from "./files.ts";
 import { buildRequest, callDecisions, evaluate, MAX_ATTACHED_FILES, type ModelVerdict } from "./judge.ts";
 import { redact } from "./redact.ts";
 import { clearPathCache, createTrustedDirState, isFreelyReadable, listTrustedDirs, trustDir, type TrustedDirState, isHardLinked, isInsideExact, pathLikeTokens, pathVariants, protectedReason, protectedRoots, realPath, recentlyChangedFiles, resolvePath, sensitiveReason } from "./paths.ts";
-import { BUILTIN_TOOLS, dynamicLoaderEnvironment, hardDeny, hasUninspectedToolInput, inputPaths, inspectBuiltinSearchExecutable, inspectExecutablePath, isTrustedSessionNoteRead, pathsStayInProject, piString, safeAllow, searchNeedsJudgement, sensitive, usesGrepOptions, usesRipgrepConfig, writesStayPlain } from "./policy.ts";
+import { BUILTIN_TOOLS, dynamicLoaderEnvironment, hardDeny, hasUninspectedToolInput, inputPaths, inspectBuiltinSearchExecutable, inspectExecutablePath, isTrustedSessionNoteRead, pathsStayInProject, piString, safeAllow, searchNeedsJudgement, sensitive, shellStartupRisk, usesGrepOptions, usesRipgrepConfig, writesStayPlain } from "./policy.ts";
 import { type Decision, deriveDenyPatterns, derivePatterns, describeMatch, globalAllowPatternIsReadOnly, type Match, newId, type Rule, RuleStore, type Scope, supportsAnyInputAllow } from "./rules.ts";
-import { isReadOnlyArgv, normalizeArgv, type Parsed, parseShell, rgDisablesConfig, rgInfoOnly } from "./shell.ts";
+import { isBracePathSearch, isReadOnlyArgv, normalizeArgv, type Parsed, parseShell, rgDisablesConfig, rgInfoOnly } from "./shell.ts";
 import { isSkillRead, type RegisteredSkill } from "./skill-read.ts";
 import { confirmDialog, displayText, preview } from "./ui.ts";
 
@@ -54,6 +54,7 @@ type Assessment = {
   rememberAllow: boolean;
   globalAllow: boolean;
   rules?: Rule[];
+  retryAfterTemplate?: boolean;
 };
 
 function stableHash(v: unknown): string {
@@ -180,6 +181,38 @@ function isPureRead(c: ToolCallLike, cwd: string, trustedDirs: TrustedDirState):
   return p.ok && !p.dynamic.length && !p.writes.length && p.subcommands.every(isReadOnlyArgv) && writesStayPlain("bash", c.arguments, cwd, p, trustedDirs) && inputPaths("bash", c.arguments, cwd, p).writes.length === 0;
 }
 
+const peerToolSchemas = {
+  bash: createBashToolDefinition(process.cwd()).parameters,
+  read: createReadToolDefinition(process.cwd()).parameters,
+};
+
+function isBuiltinTool(pi: ExtensionAPI, name: keyof typeof peerToolSchemas): boolean {
+  try {
+    const info = pi.getAllTools().find(tool => tool.name === name);
+    // SDK base-tool overrides can keep the builtin source and schema,
+    // but Pi's adapter does not preserve the native prompt guidelines.
+    return info?.sourceInfo?.source === "builtin" && info.sourceInfo.path === `builtin:${name}`
+      && info.parameters === peerToolSchemas[name] && info.promptGuidelines !== undefined;
+  } catch { return false; }
+}
+
+function verifiedSearchShell(pi: ExtensionAPI, cwd: string, parsed: Parsed): boolean {
+  const settings = pi.getSettings();
+  return isBuiltinTool(pi, "bash") && !settings.shellCommandPrefix && !settings.shellPath
+    && !shellStartupRisk() && !usesRipgrepConfig(parsed) && !inspectExecutablePath(parsed, cwd, process.platform, true).risk;
+}
+
+function verifiedBraceSearchPeer(call: ToolCallLike, cwd: string, pi: ExtensionAPI): boolean {
+  if (call.name !== "bash") return false;
+  try {
+    toolInputHash(call.name, call.arguments);
+    const command = call.arguments?.command;
+    if (typeof command !== "string" || !command.includes("{")) return false;
+    const parsed = parseShell(command);
+    return isBracePathSearch(command, parsed) && verifiedSearchShell(pi, cwd, parsed);
+  } catch { return false; }
+}
+
 function isRegularFile(p: string): boolean {
   try {
     const st = statSync(p);
@@ -210,6 +243,7 @@ export default function (pi: ExtensionAPI) {
   let opaqueChanges = false;
   const promoted = new Set<string>();
   const blockedOnce = new Set<string>();
+  const deferredReads = new Map<string, number>();
   let consecutiveBlocks = 0;
   let totalBlocks = 0;
   let auditState: "unknown" | "ok" | "failed" = "unknown";
@@ -312,6 +346,36 @@ export default function (pi: ExtensionAPI) {
   function trustedByExtension(tool: string): string | undefined {
     const by = extensionTrust.get(tool);
     return by && !trustProblem(tool) ? by : undefined;
+  }
+
+  function activeArtifactTemplate(): boolean {
+    try { return trustedByExtension("artifact_template") === "artifacts" && pi.getActiveTools().includes("artifact_template"); }
+    catch { return false; }
+  }
+
+  function templateLookupBatch(call: ToolCallLike, peers: ToolCallLike[], cwd: string): boolean {
+    if (!peers.some(peer => peer.name === "artifact_template") || !activeArtifactTemplate()) return false;
+    try {
+      return [call, ...peers].every(item => {
+        const args = item.arguments;
+        toolInputHash(item.name, args);
+        if (!args || typeof args !== "object" || Array.isArray(args)) return false;
+        const keys = Object.keys(args);
+        if (item.name === "artifact_template") {
+          return (args.action === "list" && keys.length === 1 && keys.includes("action")) || (args.action === "get" && keys.length === 2 && keys.includes("name") && keys.includes("action") &&
+            typeof args.name === "string" && /^[a-z0-9][a-z0-9-]{0,63}$/.test(args.name));
+        }
+        if (item.name === "read") return isBuiltinTool(pi, "read") && typeof args.path === "string" && args.path.length > 0
+          && keys.every(key => key === "path" || (["offset", "limit"].includes(key) && (args[key] === null || (Number.isSafeInteger(args[key]) && args[key] > 0))));
+        if (item.name !== "bash" || typeof args.command !== "string"
+          || !keys.every(key => key === "command" || (key === "timeout" && typeof args.timeout === "number"))) return false;
+        const p = parseShell(args.command);
+        if (!isPureRead(item, cwd, trustedDirs)) return false;
+        return !p.globs.length && p.subs[0]?.argv[0] === "rg" && p.subs.every((sub, i) => sub.argv[0] === "rg" ||
+          (sub.argv[0] === "head" && p.operators[i - 1] === "|" && sub.argv.length === 2 && /^-\d+$/.test(sub.argv[1])))
+          && p.operators.every(op => op === "|" || op === ";") && verifiedSearchShell(pi, cwd, p);
+      });
+    } catch { return false; }
   }
 
   const registeredSkillTargets = new Map<string, string>();
@@ -627,7 +691,19 @@ export default function (pi: ExtensionAPI) {
     const treeReason = treeConflict && treeChanger ? explainTree(preview(treeChanger.name, treeChanger.arguments)) : undefined;
     const treeAuditReason = treeConflict ? explainTree("other call arguments withheld") : undefined;
     if (treeReason && !cx.fromSiblings.length) {
-      return { rememberAllow: false, globalAllow: false, action: "confirm", source: "concurrent", reasons: [treeReason], auditReasons: [treeAuditReason!] };
+      // This exception only finishes an ordinary read synchronously. Keep the full peer
+      // conflict whenever a rule, model decision or user confirmation may be needed.
+      if (tool === "read" && typeof input?.path === "string" && cfg.skipModelTools.includes(tool) && !rule
+        && !cx.historyIncomplete && !cx.attachmentsIncomplete && !cx.changedFilesRun && !cx.unreadableFiles.length
+        && !store.related(tool, input, ctx.cwd).length && !sensitive(tool, input, ctx.cwd, roots, undefined, trustedDirs)
+        && isBuiltinTool(pi, "read") && peers.every(peer => peer.name === "read" || verifiedBraceSearchPeer(peer, ctx.cwd, pi))) {
+        const paths = inputPaths(tool, input, ctx.cwd).reads;
+        if (paths.length && paths.every(p => isRegularFile(p) && isFreelyReadable(p, ctx.cwd, trustedDirs, roots))) {
+          return { ...base, action: "allow", source: "skip", reasons: [] };
+        }
+      }
+      return { ...base, action: "confirm", source: "concurrent", reasons: [treeReason], auditReasons: [treeAuditReason!],
+        retryAfterTemplate: templateLookupBatch({ id: callId, name: tool, arguments: input }, peers, ctx.cwd) };
     }
     const sens = sensitive(tool, input, ctx.cwd, roots, parsed, trustedDirs);
     const builtinExecutable = inspectBuiltinSearchExecutable(tool, ctx.cwd);
@@ -826,6 +902,7 @@ export default function (pi: ExtensionAPI) {
     store.load(storeCwd, trusted);
     store.resetSession();
     modelMemo.clear(); siblingsById.clear(); judged.clear(); touched.clear(); promoted.clear(); verdictCache.clear(); blockedOnce.clear();
+    deferredReads.clear();
     opaqueChanges = false;
     consecutiveBlocks = totalBlocks = 0;
     for (const w of [...loaded.warnings, ...store.warnings]) warn(ctx, `guard: ${w}`);
@@ -835,8 +912,13 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("before_agent_start", (event, ctx) => {
+    deferredReads.clear();
     noteRunSession = event.messageType === "custom" && event.message.customType === NOTE_REQUEST ? ctx.sessionManager.getSessionId() : undefined;
     snapshotRegisteredSkills();
+    const prompt = event.systemPromptOptions;
+    if (!cfg.disabled && enabled && prompt?.sections && prompt.forceSystemPrompt === undefined && activeArtifactTemplate()) {
+      prompt.sections.guard_artifact_lookups = "Call artifact_template list or get by itself. Wait for its result before requesting file reads or searches in the next message.";
+    }
   });
   pi.on("message_start", ({ message }) => {
     if (message.role === "user" || (message.role === "custom" && message.customType !== NOTE_REQUEST)) noteRunSession = undefined;
@@ -844,6 +926,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_compact", () => { noteRunSession = undefined; });
 
   pi.on("session_tree", async (_e, ctx) => {
+    deferredReads.clear();
     noteRunSession = undefined;
     stopPreflight();
     stateEpoch++;
@@ -887,6 +970,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("agent_end", async () => {
+    deferredReads.clear();
     noteRunSession = undefined;
     stopPreflight();
     stateEpoch++;
@@ -963,6 +1047,13 @@ export default function (pi: ExtensionAPI) {
     if (judgementAborted) a = { action: "block", source: "error", reasons: ["judgement was aborted"], rememberAllow: false, globalAllow: false };
     else if (inputChanged) a = { action: "block", source: "error", reasons: ["input changed during judgement"], rememberAllow: false, globalAllow: false };
     else if (stateEpoch !== callEpoch) a = { action: "block", source: "error", reasons: ["session changed during judgement"], rememberAllow: false, globalAllow: false };
+    else if (a.retryAfterTemplate && (deferredReads.get(hash) === callEpoch || (deferredReads.size < MAX_BATCH_CALLS && !deferredReads.has(hash)))) {
+      deferredReads.set(hash, callEpoch);
+      const reason = "Wait for the artifact_template result, then retry this call in the next message without the template lookup.";
+      status(ctx, `guard: deferred ${tool} until after the template lookup`);
+      recordAudit(ctx, { session, tool, preview: auditPreview(ctx, tool, input), action: "block", source: "deferred", reasons: [reason], final: "blocked" });
+      return { block: true, reason: `guard: ${reason}` };
+    }
     let retryRulesVersion: number | undefined;
     try {
       store.syncSession(ctx.sessionManager.getBranch() as any[]);

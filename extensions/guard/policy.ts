@@ -172,7 +172,7 @@ export function enclosingRepository(cwd: string): string | undefined {
   }
 }
 
-export function inspectExecutablePath(parsed: Parsed, cwd: string, platform: NodeJS.Platform = process.platform): { risk?: string; fingerprint?: string } {
+export function inspectExecutablePath(parsed: Parsed, cwd: string, platform: NodeJS.Platform = process.platform, verifySearch = false): { risk?: string; fingerprint?: string } {
   if (platform === "win32") {
     const risky = parsed.subs.some((s) => {
       const rawHead = s.argv[0];
@@ -181,6 +181,13 @@ export function inspectExecutablePath(parsed: Parsed, cwd: string, platform: Nod
       return rawHead.includes("/") || rawHead.includes("\\") || (!!head && !BASH_BUILTINS.has(head));
     });
     return risky ? { risk: "cannot verify executable lookup for an external command on Windows" } : {};
+  }
+  if (verifySearch) {
+    const bash = "/bin/bash";
+    try {
+      accessSync(bash, constants.X_OK);
+      if (!immutableSystemExecutable(bash, realPath(bash), statSync(bash))) return { risk: "cannot verify the system Bash executable" };
+    } catch { return { risk: "cannot verify the system Bash executable" }; }
   }
   const pathKey = Object.keys(process.env).find((key) => key.toLowerCase() === "path") ?? "PATH";
   const agentDir = getAgentDir();
@@ -217,12 +224,25 @@ export function inspectExecutablePath(parsed: Parsed, cwd: string, platform: Nod
         }
         const actual = realPath(candidate);
         selected.push([executable, base, candidate, actual, st.dev, st.ino, st.mode, st.nlink, st.size, st.mtimeMs, st.ctimeMs]);
+        if (verifySearch && executable === "head" &&
+          (![realPath("/usr/bin/head"), realPath("/bin/head")].includes(actual) || !immutableSystemExecutable(candidate, actual, st))) risk ??= "the pipeline does not use the system head executable";
         if (st.nlink > 1 && !immutableSystemExecutable(candidate, actual, st)) risk ??= "a command resolves to a hard-linked executable";
         if ([candidate, actual].some((path) => unsafeRoots.some((root) => isInside(path, root)))) risk ??= "a command resolves to a project, temporary or Pi-managed executable";
+        if (verifySearch && executable === "rg") {
+          if (!isAbsolute(entry)) risk ??= "ripgrep resolves through a relative PATH entry";
+          if (!risk) {
+            const inspected = inspectSearchExecutable("grep", cwd, piSdk.VERSION ?? "", candidate);
+            risk = inspected.risk ?? (inspected.available ? undefined : "cannot inspect the shell ripgrep executable");
+            selected.push(inspected.fingerprint);
+          }
+        }
         found = true;
         break;
       }
-      if (!found) selected.push([executable, base, null]);
+      if (!found) {
+        selected.push([executable, base, null]);
+        if (verifySearch) risk ??= executable === "head" ? "cannot locate the system head executable" : "cannot locate ripgrep";
+      }
     }
   }
   return { risk, fingerprint: createHash("sha256").update(JSON.stringify(selected)).digest("hex") };
@@ -233,6 +253,10 @@ export function executablePathRisk(parsed: Parsed, cwd: string, platform: NodeJS
 }
 
 export function inspectBuiltinSearchExecutable(tool: string, cwd: string, piVersion = piSdk.VERSION ?? ""): { risk?: string; fingerprint?: string; available?: boolean } {
+  return inspectSearchExecutable(tool, cwd, piVersion);
+}
+
+function inspectSearchExecutable(tool: string, cwd: string, piVersion: string, shellExecutable?: string): { risk?: string; fingerprint?: string; available?: boolean } {
   if (tool !== "grep" && tool !== "find") return {};
   const loaderEnvironment = dynamicLoaderEnvironment();
   const earlyFingerprint = createHash("sha256").update(JSON.stringify([tool, process.env.PATH, process.env.PI_OFFLINE, piVersion, loaderEnvironment])).digest("hex");
@@ -372,6 +396,10 @@ export function inspectBuiltinSearchExecutable(tool: string, cwd: string, piVers
           const header = executablePrefix(candidate, st, 512);
           const length = header.length;
           if (length >= 2 && header[0] === 35 && header[1] === 33) {
+            if (shellExecutable) {
+              interpreterRisk = "the shell ripgrep executable is a script";
+              return true;
+            }
             const end = header.indexOf(10, 2);
             if (end < 0) throw new Error("interpreter line is incomplete");
             const lineBytes = header.subarray(2, end);
@@ -415,7 +443,8 @@ export function inspectBuiltinSearchExecutable(tool: string, cwd: string, piVers
       else if ([candidate, realPath(candidate)].some((p) => roots.some((root) => isInside(p, root))))
         risk ??= "the built-in search tool resolves to a project, temporary or Pi-managed executable";
     };
-    if (existsSync(local)) {
+    if (shellExecutable) inspectCandidate(shellExecutable, false, true);
+    else if (existsSync(local)) {
       inspectCandidate(local, false, false);
       if (!found) risk = "cannot inspect the Pi-managed search executable";
     }
@@ -1083,10 +1112,15 @@ export function usesGrepOptions(parsed?: Parsed): boolean {
   return parsed.subcommands.some((raw) => ["grep", "egrep", "fgrep"].includes(normalizeArgv(raw, "deny").argv[0]));
 }
 
-export function sensitive(tool: string, input: any, cwd: string, roots: string[], parsed?: Parsed, trustedDirs?: TrustedDirState): string | undefined {
-  if (tool === "bash" && hasDynamicLoaderEnvironment()) return "dynamic loader environment may load external code";
-  if (tool === "bash" && (process.env.BASH_ENV || process.env.ENV || process.env.BASHOPTS || process.env.SHELLOPTS || Object.keys(process.env).some((key) => key.startsWith("BASH_FUNC_") && key.endsWith("%%"))))
+export function shellStartupRisk(): string | undefined {
+  if (hasDynamicLoaderEnvironment()) return "dynamic loader environment may load external code";
+  if (process.env.BASH_ENV || process.env.ENV || process.env.BASHOPTS || process.env.SHELLOPTS || Object.keys(process.env).some((key) => key.startsWith("BASH_FUNC_") && key.endsWith("%%")))
     return "shell startup settings, options or imported functions may run code or alter parsing";
+}
+
+export function sensitive(tool: string, input: any, cwd: string, roots: string[], parsed?: Parsed, trustedDirs?: TrustedDirState): string | undefined {
+  const startup = tool === "bash" ? shellStartupRisk() : undefined;
+  if (startup) return startup;
   if (tool === "bash" && parsed && changesShellStartup(parsed))
     return "the command changes shell startup or tracing settings, or dynamic loader settings";
   if (tool === "bash" && parsed && usesShellNameref(parsed))
