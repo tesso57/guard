@@ -5,7 +5,7 @@ import { accessSync, closeSync, constants, existsSync, fstatSync, openSync, open
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import * as piSdk from "@earendil-works/pi-coding-agent";
-import { grepExplicitPaths, hasGluedPathValue, innerCommands, INTERPRETER_NAMES, isLongOption, isReadOnlyArgv, isShell, nonFlags, normalizeArgv, type Parsed, parseShell, rgDisablesConfig, rgExplicitPaths, rgInfoOnly, rgListsFiles, rgListsTypes, rgSimpleIncludeSuffixes, rgVisibility, unwrapCommandWrappers } from "./shell.ts";
+import { grepExplicitPaths, hasGluedPathValue, innerCommands, INTERPRETER_NAMES, isLongOption, isReadOnlyArgv, isShell, nonFlags, normalizeArgv, type Parsed, parseShell, rgDisablesConfig, rgExplicitPaths, rgInfoOnly, rgListsFiles, rgListsTypes, rgReadsStdin, rgSimpleIncludeSuffixes, rgUsesPatternFile, rgVisibility, unwrapCommandWrappers } from "./shell.ts";
 import { readRegularText } from "./files.ts";
 import { AGENT_DIR } from "./config.ts";
 import { elfPrograms } from "./elf.ts";
@@ -1079,6 +1079,8 @@ function searchExposure(tool: string, input: any, cwd: string, parsed?: Parsed, 
     const gitGrep = a[0] === "git" && a.includes("grep");
     if (!((isGrepFamily(a[0]) && recursiveGrep(args)) || a[0] === "rg" || a[0] === "ag" || a[0] === "ack" || gitGrep)) continue;
     if (rgInfoOnly(a) || rgListsFiles(a) || rgListsTypes(a)) continue;
+    // The pipe supplies the input for this stage. Other stages still get their own checks.
+    if (parsed.ok && s.literalPipeInput && !s.assigns.length && rgReadsStdin(s.argv) && !rgUsesPatternFile(s.argv) && !usesRipgrepConfig(parsed)) continue;
     const explicit = !parsed.dynamic.length && !parsed.globs.length ? s.argv[0] === "rg" ? rgExplicitPaths(s.argv) : isGrepFamily(s.argv[0]) ? grepExplicitPaths(s.argv) : undefined : undefined;
     const given = explicit ? bases.flatMap((b) => explicit.filter((path) => path !== "-").flatMap((path) => pathVariants(b, path.startsWith("-") ? `./${path}` : path))) : bases.flatMap((b) => pathLikeTokens(b, nonFlags(a).slice(1)));
     const roots0 = given.length ? given : bases;

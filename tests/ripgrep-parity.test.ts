@@ -43,6 +43,37 @@ test("ripgrep visibility and guard decisions agree on representative searches", 
       assert.equal(result.stdout.includes("needle"), readsInput);
       assert.equal(rgReadsStdin(["rg", "--no-config", ...args]), readsInput);
     }
+    if (process.platform !== "win32") {
+      const roots = protectedRoots(project);
+      const piped = "printf 'needle from stdin\\n' | rg --no-config -im 18 '^needle'";
+      const result = spawnSync("/bin/bash", ["-c", piped], { cwd: project, encoding: "utf8" });
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.stdout, "needle from stdin\n");
+      for (const command of [
+        piped,
+        "printf needle | rg -e needle",
+        "for url in https://example.invalid; do curl -fsSL \"$url\" | rg -im 18 '^needle' | head -5; done",
+      ]) {
+        clearPathCache();
+        const parsed = parseShell(command);
+        assert.equal(sensitive("bash", { command }, project, roots, parsed), undefined, command);
+        assert.equal(searchNeedsJudgement("bash", { command }, project, parsed), false, command);
+      }
+      for (const command of [
+        "printf needle; rg needle",
+        "printf needle || rg needle",
+        "printf needle | rg needle .",
+        "printf needle | rg needle\nrg needle",
+        "printf needle | rg $options needle",
+        "printf needle | rg --file -",
+        "printf needle | rg needle < .env",
+        "printf needle | rg needle 0<&-",
+        "cat .env | rg needle",
+      ]) {
+        clearPathCache();
+        assert.ok(sensitive("bash", { command }, project, roots, parseShell(command)), command);
+      }
+    }
     const cases = [
       { options: [], expectSafe: false },
       { options: ["-u"], expectSafe: true },
