@@ -696,6 +696,32 @@ export function rgExplicitPaths(a: string[]): string[] | undefined {
   return options.listsFiles || options.patternProvided ? options.operands : options.operands.slice(1);
 }
 
+// Only classifies the effect on a peer read. The search itself still uses the original Parsed.
+export function isBracePathSearch(command: string, parsed: Parsed): boolean {
+  if (!parsed.ok || parsed.dynamic.length !== 1 || parsed.dynamic[0] !== "brace expansion") return false;
+  if (parsed.globs.length || parsed.writes.length || parsed.heredocBodies.length || /[\r\n\0]/.test(command)) return false;
+  // Preserve word boundaries but remove quoted data before checking for shell syntax such as redirections.
+  const syntax = command.replace(/'[^']*'/g, "Q");
+  if (/[^a-zA-Z0-9_.,{}\/;| \t-]/.test(syntax) || !syntax.split(/[;|]/).every(part => /^\s*(?:rg|head)(?:\s|$)/.test(part))) return false;
+  if (parsed.operators.length !== parsed.subs.length - 1 || !parsed.operators.every(op => op === ";" || op === "|")) return false;
+  let found = false;
+  for (const [index, sub] of parsed.subs.entries()) {
+    if (sub.assigns.length || sub.reads.length || sub.writes.length) return false;
+    const argv = sub.argv;
+    if (argv[0] === "head" && index > 0 && parsed.operators[index - 1] === "|" && argv.length === 2 && /^-\d+$/.test(argv[1])) continue;
+    const paths = rgExplicitPaths(argv);
+    if (!paths || !isReadOnlyArgv(argv)) return false;
+    for (const word of argv) {
+      if (!/[{}]/.test(word)) continue;
+      // Every alternative keeps the literal directory prefix and cannot turn into a command option.
+      if (!paths.includes(word) || !/^[a-zA-Z0-9_][a-zA-Z0-9_.\/-]*\//.test(word) || /[^a-zA-Z0-9_.,{}\/-]/.test(word)
+        || word.includes("..") || word.length > 512 || word.split(",").length > 12) return false;
+      found = true;
+    }
+  }
+  return found;
+}
+
 export function rgReadsStdin(a: string[]): boolean {
   if (a[0] !== "rg") return false;
   const options = inspectRgOptions(a);
