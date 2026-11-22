@@ -9,6 +9,7 @@ const MAX_BYTES = 5 * 1024 * 1024;
 export type AuditRecord = {
   ts?: string;
   session?: string;
+  project?: string;
   tool: string;
   preview: string;
   action: "allow" | "confirm" | "block";
