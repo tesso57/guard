@@ -2049,7 +2049,7 @@ let oversizedDiffFixture = "";
   const score = (probs: number[], conf = 0.9) => ({ type: "score", name: "risk", score: probs.reduce((s, p, i) => s + p * i, 0), confidence: conf, probabilities: probs.map((p, i) => ({ value: i, probability: p })) });
   const Pr = (name: string, probability: number) => ({ type: "predicate", name, probability });
   const base = (probs: number[], extra: any[] = []) => [score(probs), Pr("irreversible", 0.05), Pr("exfiltration", 0.01), Pr("runs_untrusted_code", 0.05), Pr("outside_user_intent", 0.05), Pr("addresses_evaluator", 0.01), { type: "choice", name: "category", choice: "build_test", confidence: 0.9 }, ...extra];
-  const ev = (a: any[], o: any = {}) => evaluate(cfg, a as any, { light: false, truncated: false, ...o });
+  const ev = (a: any[], o: any = {}) => evaluate(cfg, a as any, { light: false, truncated: false, currentAuthorizationAsked: true, ...o });
   ok("eval: harmless allow", ev(base([0.9, 0.1, 0, 0, 0])).action === "allow");
   ok("eval: documented weighted score example remains valid", ev(base([0.1, 0.7, 0.2, 0, 0])).action === "allow" && Math.abs(ev(base([0.1, 0.7, 0.2, 0, 0])).risk! - 1.1) < 1e-9);
   const tailV = ev(base([0.55, 0, 0, 0, 0.45]));
@@ -2067,8 +2067,15 @@ let oversizedDiffFixture = "";
   ok("eval: refusal → confirm", ev(base([1, 0, 0, 0, 0]).map((a: any) => (a.name === "exfiltration" ? { type: "refusal", name: "exfiltration" } : a))).action === "confirm");
   ok("eval: truncated → confirm", ev(base([1, 0, 0, 0, 0]), { truncated: true }).action === "confirm");
   ok("eval: redacted → confirm with a distinct reason", ev(base([1, 0, 0, 0, 0]), { redacted: true }).reasons.includes("part of the judgement context was redacted") && ev(base([1, 0, 0, 0, 0]), { redacted: true }).action === "confirm");
-  ok("eval: past approval downgrades soft confirm when requested", ev(base([0, 0, 0.4, 0.5, 0.1], [Pr("covered_by_past_approval", 0.9)]), { expectPastApproval: true }).action === "allow");
-  ok("eval: unsolicited past approval cannot downgrade confirmation", ev(base([0, 0, 0.4, 0.5, 0.1], [Pr("covered_by_past_approval", 0.9)])).action === "confirm");
+  const currentApproval = Pr("authorized_by_current_request", 0.95);
+  ok("eval: a past approval and clear current authorization can resolve a soft confirm", ev(base([0, 0, 0.4, 0.5, 0.1], [Pr("covered_by_past_approval", 0.9), currentApproval]), { expectPastApproval: true }).action === "allow");
+  for (const evidence of [[], [Pr("authorized_by_current_request", 0.6)], [Pr("authorized_by_current_request", 1.2)], [currentApproval, currentApproval]]) {
+    ok("eval: unclear, missing, invalid or duplicate current authorization keeps confirmation",
+      ev(base([0, 0, 0.4, 0.5, 0.1], [Pr("covered_by_past_approval", 0.99), ...evidence]), { expectPastApproval: true }).action === "confirm");
+  }
+  ok("eval: unsolicited past approval cannot downgrade confirmation", ev(base([0, 0, 0.4, 0.5, 0.1], [Pr("covered_by_past_approval", 0.9), currentApproval])).action === "confirm");
+  ok("eval: unsolicited current authorization cannot downgrade confirmation",
+    ev(base([0, 0, 0.4, 0.5, 0.1], [Pr("covered_by_past_approval", 0.9), currentApproval]), { expectPastApproval: true, currentAuthorizationAsked: false }).action === "confirm");
   const lightWithUnsolicitedApproval = [Pr("exfiltration", 0.4), Pr("runs_untrusted_code", 0.01), Pr("outside_user_intent", 0.01), Pr("addresses_evaluator", 0.01), Pr("covered_by_past_approval", 0.99)];
   ok("eval: unsolicited past approval cannot downgrade a light-check confirmation", evaluate(cfg, lightWithUnsolicitedApproval as any, { light: true, truncated: false }).action === "confirm");
   const lightNames = ["exfiltration", "runs_untrusted_code", "outside_user_intent", "addresses_evaluator"];
@@ -2080,10 +2087,10 @@ let oversizedDiffFixture = "";
   }
   const lightBlockWithMissing = [Pr("exfiltration", 0.99), Pr("outside_user_intent", 0.01), Pr("addresses_evaluator", 0.01)];
   ok("eval: missing light-check answer cannot downgrade an exfiltration block", evaluate(cfg, lightBlockWithMissing as any, { light: true, truncated: false }).action === "block");
-  const approvalWithTruncatedContext = base([0.1, 0.2, 0.7, 0, 0], [Pr("covered_by_past_approval", 0.99)]);
+  const approvalWithTruncatedContext = base([0, 0, 0.4, 0.5, 0.1], [Pr("covered_by_past_approval", 0.99), currentApproval]);
   ok("eval: past approval cannot override truncated context", ev(approvalWithTruncatedContext, { expectPastApproval: true, truncated: true }).action === "confirm");
   ok("eval: past approval cannot override redacted input", ev(approvalWithTruncatedContext, { expectPastApproval: true, redacted: true }).action === "confirm");
-  const approvalWithSimilarDenial = base([0.1, 0.2, 0.7, 0, 0], [Pr("covered_by_past_approval", 0.99), Pr("similar_to_past_denial", 0.99)]);
+  const approvalWithSimilarDenial = base([0, 0, 0.4, 0.5, 0.1], [Pr("covered_by_past_approval", 0.99), currentApproval, Pr("similar_to_past_denial", 0.99)]);
   ok("eval: past approval cannot override similar denial", ev(approvalWithSimilarDenial, { expectPastApproval: true, expectPastDenial: true }).action === "confirm");
   const exf = base([0.1, 0.2, 0.7, 0, 0], [Pr("covered_by_past_approval", 0.95)]).map((a: any) => (a.name === "exfiltration" ? Pr("exfiltration", 0.5) : a));
   ok("eval: past approval cannot override exfiltration", ev(exf, { expectPastApproval: true }).action === "confirm");
@@ -2163,7 +2170,7 @@ let oversizedDiffFixture = "";
   const maskedHistory = buildRequest(cfg, { ...baseRequest, history: [{ id: "previous", name: "bash", arguments: { command: `tool --token ${secret}` } }] });
   ok("judge: redacted user intent and tool history each require confirmation", maskedUser.redacted && maskedHistory.redacted && !JSON.stringify(maskedUser.body).includes(secret) && !JSON.stringify(maskedHistory.body).includes(secret));
   const pastWithSpaces = buildRequest(cfg, { ...baseRequest, past: [{ id: "2", decision: "allow", tool: "bash", match: { kind: "argv-exact", argv: ["cp", "two words", "output"] }, scope: "session", createdAt: "2026-01-01" }] });
-  const pastData = (pastWithSpaces.body.input as any[]).flatMap((item) => item.content ?? []).find((part: any) => part.type === "input_json")?.data;
+  const pastData = JSON.parse((pastWithSpaces.body.input as any[]).at(-2).output).pastDecisions;
   ok("judge: past decision preserves quoted argument boundaries", pastData?.[0]?.pattern === "cp 'two words' output");
   const secret2 = "sk-test-zyxwvutsrqponmlkjihgfe";
   const withPaths = buildRequest(cfg, { ...baseRequest, cwd: `/tmp/${secret}`, callId: secret, sessionId: secret, input: { [secret]: "one", [secret2]: "two" }, attachedFiles: { [`/tmp/${secret}`]: "first", [`/tmp/${secret2}`]: "second" } });
@@ -4281,7 +4288,7 @@ if (process.platform !== "win32") {
   }
 }
 
-for (let i = 0; i < 6; i++) await command.handler(`rules add deny session guard-history-limit target-${i}`, ctx);
+for (let i = 0; i < 11; i++) await command.handler(`rules add deny session guard-history-limit target-${i}`, ctx);
 const limitRuleIds = branch.filter((entry) => entry.customType === "guard-rule" && entry.data?.rule?.match?.prefix?.[0] === "guard-history-limit").map((entry) => entry.data.rule.id);
 responder = (body) => ({ answers: answersFor([1, 0, 0, 0, 0])(body) });
 calls = [];
@@ -4301,9 +4308,10 @@ delete process.env.RISK_SKIP_TOOLS;
 await command.handler("reload", ctx);
 await run("bash", { command: "git status" });
 calls = [];
-const omittedDeny = await run("bash", { command: "guard-history-limit target-5" });
+const omittedDeny = await run("bash", { command: "guard-history-limit target-10" });
 ok("int: a directly matching denial blocks even when outside the model context limit", omittedDeny?.block === true && calls.length === 0);
 await run("bash", { command: "git status" });
+for (const id of limitRuleIds.splice(5)) await command.handler(`rules rm ${id}`, ctx);
 await command.handler("rules add allow session guard-history-limit rules-only", ctx);
 const limitAllowId = branch.findLast((entry) => entry.customType === "guard-rule" && entry.data?.rule?.decision === "allow" && entry.data?.rule?.match?.argv?.join(" ") === "guard-history-limit rules-only")?.data?.rule?.id;
 const limitKey = process.env.GUARD_OPENAI_API_KEY;
@@ -4312,7 +4320,7 @@ hasUI = false;
 const limitedRulesOnly = await run("bash", { command: "guard-history-limit rules-only" });
 hasUI = true;
 if (limitKey !== undefined) process.env.GUARD_OPENAI_API_KEY = limitKey;
-ok("int: omitted related decisions prevent a rules-only allow", !!limitAllowId && limitedRulesOnly?.block === true);
+ok("int: six related decisions can fit a full check but still prevent a rules-only allow", !!limitAllowId && limitedRulesOnly?.block === true);
 await command.handler(`rules rm ${limitAllowId}`, ctx);
 for (const id of limitRuleIds) await command.handler(`rules rm ${id}`, ctx);
 await run("bash", { command: "git status" });
