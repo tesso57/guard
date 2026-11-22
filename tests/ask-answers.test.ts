@@ -7,7 +7,7 @@ import { buildRequest } from "../extensions/guard/judge.ts";
 
 const question = "Which format should I use?";
 const answer = "Please use Markdown";
-const content = `質問 #1「${question}」への回答: ${answer}`;
+const content = `Answer to question #1 “${question}”: ${answer}`;
 const state = (data: unknown) => ({ type: "custom" as const, customType: "ask-user-state-v1", data });
 const asked = state({ kind: "question", question: { id: 1, question, options: ["CSV", "Markdown"] } });
 const attempt = { kind: "attempt", id: 1, attemptId: "a1" };
@@ -33,6 +33,14 @@ test("the first matched delivery contributes the human's answer and keeps the as
   assert.ok(!user.includes(question));
   const context = JSON.parse(items.find(item => item.type === "function_call_output")!.output!);
   assert.deepEqual(context.questionsAskedByAssistant, [{ id: 1, question }]);
+});
+
+test("saved Japanese receipts still match the original digest", () => {
+  const legacy = `質問 #1「${question}」への回答: ${answer}`;
+  const digest = createHash("sha256").update(legacy).digest("hex");
+  const legacyAttempt = state({ ...attempt, answerDigest: digest });
+  assert.deepEqual(replay(asked, legacyAttempt, { ...received, content: legacy }), [{ id: 1, question, answer }]);
+  assert.deepEqual(replay(asked, legacyAttempt, received), []);
 });
 
 test("pending, unmatched, old and altered deliveries do not become user intent", () => {

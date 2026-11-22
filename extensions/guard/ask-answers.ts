@@ -44,9 +44,14 @@ export function readAskAnswers() {
     const question = questions.get(attempt.id);
     questions.set(attempt.id, null);
     if (!question || entry.display !== true || typeof entry.content !== "string" || typeof attempt.digest !== "string") return;
-    const prefix = `質問 #${attempt.id}「${question}」への回答: `;
-    if (!entry.content.startsWith(prefix) || createHash("sha256").update(entry.content).digest("hex") !== attempt.digest) return;
-    const answer = entry.content.slice(prefix.length);
+    const content = entry.content;
+    // Saved v2 receipts use the wording in effect when the answer was delivered.
+    const prefix = [
+      `Answer to question #${attempt.id} “${question}”: `,
+      `質問 #${attempt.id}「${question}」への回答: `,
+    ].find(candidate => content.startsWith(candidate));
+    if (!prefix || createHash("sha256").update(content).digest("hex") !== attempt.digest) return;
+    const answer = content.slice(prefix.length);
     if (answer.trim()) return { id: attempt.id, question, answer };
   };
 }
