@@ -874,17 +874,22 @@ function strictlyReadOnly(parsed: Parsed | undefined, writes: string[]): boolean
   return !!parsed && parsed.ok && !parsed.dynamic.length && !writes.length && parsed.subcommands.every(isReadOnlyArgv);
 }
 
-function trustedProjectNote(p: string, cwd: string, roots: string[], state?: TrustedDirState, sessionNoteRead = false): boolean {
+function trustedProjectNote(p: string, cwd: string, roots: string[], state?: TrustedDirState, sessionNote = false, atomicWrite = false): boolean {
   if (!state || isHomeOrAncestor(cwd)) return false;
   const project = resolve(cwd);
   const rel = relative(project, p);
   if (!/^\.pi\/_notes\/[A-Za-z0-9_-]+\/(?:note\.md|factory\/(?:plan|review|learnings)\.md)$/.test(rel)) return false;
-  if (realPath(p) !== join(realPath(project), rel) || isHardLinked(p)) return false;
+  if (realPath(p) !== join(realPath(project), rel) || (!atomicWrite && isHardLinked(p))) return false;
   const projectPi = join(project, ".pi");
   if (protectedReason(p, roots.filter((root) => root !== projectPi))) return false;
-  return state.trustedDirs.some((dir) => !dir.ignored && dir.write && (!sessionNoteRead || (dir.by === "note" && dir.path === dirname(p)))
+  return state.trustedDirs.some((dir) => !dir.ignored && dir.write && (!sessionNote || (dir.by === "note" && dir.path === dirname(p)))
     && trustedDirRelative(p, dir, state) === basename(p)
     && state.trustedDirTargets.get(dir.path) === realPath(dir.path) && realPath(dir.path) === dirname(realPath(p)));
+}
+
+export function atomicNoteWrite(tool: string, p: string, cwd: string, roots: string[], state?: TrustedDirState): boolean {
+  return state?.sessionNote?.path === p && (tool === "edit" || tool === "write")
+    && state.sessionNote.ownsTool(tool) && trustedProjectNote(p, cwd, roots, state, true, true);
 }
 
 export function isTrustedSessionNoteRead(p: unknown, cwd: string, sessionId: string, roots: string[], state: TrustedDirState): boolean {
@@ -912,6 +917,8 @@ export function hardDeny(tool: string, input: any, cwd: string, roots: string[],
   const unlinkOnly = tool === "bash" && !!parsed && parsed.ok && !parsed.dynamic.length && !parsed.writes.length && parsed.subcommands.length > 0 && parsed.subcommands.every((a) => ["rm", "unlink"].includes(normalizeArgv(a, "deny").argv[0]));
   const directNote = ["write", "edit"].includes(tool) && typeof input?.path === "string" ? resolvePath(cwd, input.path) : undefined;
   for (const w of writes) {
+    // This writer replaces the note's directory entry without writing to its old inode.
+    if (w === directNote && atomicNoteWrite(tool, w, cwd, roots, trustedDirs)) continue;
     const r = protectedReason(w, roots);
     if (r && !(directNote && realPath(w) === realPath(directNote) && (trustedProjectNote(directNote, cwd, roots, trustedDirs) || trustedProjectArtifact(directNote, cwd, roots, true, trustedDirs)))) return `writes to a ${r}`;
     if (basename(w).toLowerCase() === "authorized_keys" || basename(realPath(w)).toLowerCase() === "authorized_keys") return "writes to authorized_keys";
@@ -1147,6 +1154,10 @@ export function sensitive(tool: string, input: any, cwd: string, roots: string[]
     if (protectedReason(p, outerRoots) && !(isPiCodePath(p) && !writes.includes(p)) && !(directArtifact && realPath(p) === realPath(directArtifact) && trustedProjectArtifact(directArtifact, cwd, roots, writes.includes(p), trustedDirs))) return "reads guard or pi internal state";
     if (isHardLinked(p)) {
       const writing = writes.includes(p);
+      if (writing && p === directArtifact && atomicNoteWrite(tool, p, cwd, roots, trustedDirs)) {
+        if (tool === "edit" && !trustedDirs?.sessionNote?.readDigest) return "editing a linked note can reveal its existing text";
+        continue;
+      }
       const plainOperation = writing ? ["write", "edit"].includes(tool) : ["read", "grep", "find", "ls"].includes(tool) || projectRead;
       const trusted = plainOperation && !!trustedDirs && !!trustedDirFor(p, writing, trustedDirs);
       const knownProjectRead = projectRead && !writing && isProjectHardlinkSafe(p, cwd);
@@ -1235,6 +1246,7 @@ export function safeAllow(tool: string, input: any, cwd: string, opts: { trusted
     if (!writes.length) return false;
     const realCwd = realPath(cwd);
     return writes.every((w) => {
+      if (atomicNoteWrite(tool, w, cwd, opts.protectedPaths ?? protectedRoots(cwd), opts.trustedDirs)) return true;
       const r = realPath(w);
       const td = trustedDirFor(w, true, opts.trustedDirs);
       if (td) return !isProtectedHardLink(w, opts.protectedPaths ?? protectedRoots(cwd)) && plainInTrustedDir(w, td, opts.trustedDirs);
@@ -1265,6 +1277,7 @@ export function writesStayPlain(tool: string, input: any, cwd: string, parsed?: 
   const { writes } = inputPaths(tool, input, cwd, parsed);
   const realCwd = realPath(cwd);
   return writes.every((w) => {
+    if (atomicNoteWrite(tool, w, cwd, protectedPaths, state)) return true;
     const r = realPath(w);
     const trusted = trustedDirFor(w, true, state);
     if (trusted) return !isProtectedHardLink(w, protectedPaths) && plainInTrustedDir(w, trusted, state);

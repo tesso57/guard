@@ -332,6 +332,7 @@ export function isPiCodePath(p: string): boolean {
 
 export type TrustedDir = { path: string; write: boolean; by: string; ignored?: string };
 export type TrustedDirState = {
+  sessionNote?: { path: string; ownsTool: (tool: string) => boolean; readDigest?: string };
   trustedDirs: TrustedDir[];
   trustedDirTargets: Map<string, string>;
   trustedDirAliases: Map<string, Set<string>>;

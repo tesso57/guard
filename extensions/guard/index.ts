@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
-import { basename, isAbsolute, relative } from "node:path";
+import { basename, isAbsolute, join, relative } from "node:path";
 import { types as utilTypes } from "node:util";
 import { createBashToolDefinition, createReadToolDefinition, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { readAskAnswers, type AskAnswer } from "./ask-answers.ts";
@@ -8,10 +8,11 @@ import { audit, tail, type AuditRecord } from "./audit.ts";
 import { type Config, loadConfig } from "./config.ts";
 import { predictEdits } from "./edits.ts";
 import { MAX_FILE_BYTES, readBoundedText } from "./files.ts";
+import { noteEditSnapshot, registerNoteTools } from "./note-tools.ts";
 import { buildRequest, callDecisions, evaluate, MAX_ATTACHED_FILES, type ModelVerdict } from "./judge.ts";
 import { redact } from "./redact.ts";
 import { clearPathCache, createTrustedDirState, isFreelyReadable, listTrustedDirs, trustDir, type TrustedDirState, isHardLinked, isInsideExact, pathLikeTokens, pathVariants, protectedReason, protectedRoots, realPath, recentlyChangedFiles, resolvePath, sensitiveReason } from "./paths.ts";
-import { BUILTIN_TOOLS, dynamicLoaderEnvironment, hardDeny, hasUninspectedToolInput, inputPaths, inspectBuiltinSearchExecutable, inspectExecutablePath, isTrustedSessionNoteRead, pathsStayInProject, piString, safeAllow, searchNeedsJudgement, sensitive, shellStartupRisk, usesGrepOptions, usesRipgrepConfig, writesStayPlain } from "./policy.ts";
+import { atomicNoteWrite, BUILTIN_TOOLS, dynamicLoaderEnvironment, hardDeny, hasUninspectedToolInput, inputPaths, inspectBuiltinSearchExecutable, inspectExecutablePath, isTrustedSessionNoteRead, pathsStayInProject, piString, safeAllow, searchNeedsJudgement, sensitive, shellStartupRisk, usesGrepOptions, usesRipgrepConfig, writesStayPlain } from "./policy.ts";
 import { type Decision, deriveDenyPatterns, derivePatterns, describeMatch, globalAllowPatternIsReadOnly, type Match, newId, type Rule, RuleStore, type Scope, supportsAnyInputAllow } from "./rules.ts";
 import { isBracePathSearch, isReadOnlyArgv, normalizeArgv, type Parsed, parseShell, rgDisablesConfig, rgInfoOnly } from "./shell.ts";
 import { isSkillRead, type RegisteredSkill } from "./skill-read.ts";
@@ -224,6 +225,21 @@ function isRegularFile(p: string): boolean {
 
 export default function (pi: ExtensionAPI) {
   const trustedDirs = createTrustedDirState();
+  const sessionNotePath = (ctx: ExtensionContext) => {
+    try {
+      const id = ctx.sessionManager.getSessionId();
+      if (typeof id === "string" && /^[A-Za-z0-9_-]+$/.test(id)) return join(ctx.cwd, ".pi", "_notes", id, "note.md");
+    } catch { /* Without a session ID there is no scoped note. */ }
+  };
+  const canSaveNote = (ctx: ExtensionContext, tool: "edit" | "write", path: string) => {
+    if (path !== trustedDirs.sessionNote?.path || path !== sessionNotePath(ctx)) return false;
+    clearPathCache();
+    return atomicNoteWrite(tool, path, ctx.cwd, protectedRoots(ctx.cwd, ctx.sessionManager.getSessionDir()), trustedDirs);
+  };
+  const resetNoteRead = () => {
+    const note = trustedDirs.sessionNote;
+    if (note) trustedDirs.sessionNote = { path: note.path, ownsTool: note.ownsTool };
+  };
   let cfg: Config = loadConfig();
   const store = new RuleStore();
   let enabled = true;
@@ -237,7 +253,34 @@ export default function (pi: ExtensionAPI) {
     preflightController = undefined;
   };
   const siblingsById = new Map<string, BatchContext>();
-  const judged = new Map<string, { hash: string; session: string }>();
+  type NoteCall = {
+    target: NonNullable<TrustedDirState["sessionNote"]>;
+    tool: "read" | "edit" | "write";
+    digest?: string;
+    version?: string;
+  };
+  const judged = new Map<string, { hash: string; session: string; note?: NoteCall }>();
+  const ownsNoteTool = registerNoteTools(pi, (ctx, tool, path, id) => {
+    const note = judged.get(id)?.note;
+    if (!note || note.tool === "read") {
+      if (!cfg.disabled && enabled && canSaveNote(ctx, tool, path)) throw new Error("The session note save is no longer authorized.");
+      return undefined;
+    }
+    const validate = () => {
+      if (note.tool !== tool || note.target.path !== path || trustedDirs.sessionNote !== note.target || !canSaveNote(ctx, tool, path)) {
+        throw new Error("The session note save is no longer authorized.");
+      }
+    };
+    validate();
+    return {
+      digest: note.digest, version: note.version, validate,
+      saved(content) {
+        if (note.digest !== undefined && note.target.readDigest === note.digest) {
+          note.target.readDigest = createHash("sha256").update(content).digest("hex");
+        }
+      },
+    };
+  });
   const verdictCache = new Map<string, { at: number; a: Assessment }>();
   const touched = new Set<string>();
   let opaqueChanges = false;
@@ -890,6 +933,8 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.on("session_start", async (_e, ctx) => {
+    const path = sessionNotePath(ctx);
+    trustedDirs.sessionNote = path ? { path, ownsTool: ownsNoteTool } : undefined;
     noteRunSession = undefined;
     stopPreflight();
     stateEpoch++;
@@ -923,11 +968,15 @@ export default function (pi: ExtensionAPI) {
   pi.on("message_start", ({ message }) => {
     if (message.role === "user" || (message.role === "custom" && message.customType !== NOTE_REQUEST)) noteRunSession = undefined;
   });
-  pi.on("session_compact", () => { noteRunSession = undefined; });
+  pi.on("session_compact", () => {
+    noteRunSession = undefined;
+    resetNoteRead();
+  });
 
   pi.on("session_tree", async (_e, ctx) => {
     deferredReads.clear();
     noteRunSession = undefined;
+    resetNoteRead();
     stopPreflight();
     stateEpoch++;
     modelMemo.clear();
@@ -1029,6 +1078,28 @@ export default function (pi: ExtensionAPI) {
     }
     if (!batch.problem) siblingsById.delete(event.toolCallId);
 
+    const note = trustedDirs.sessionNote;
+    let noteCall: NoteCall | undefined;
+    if (note && typeof input?.path === "string" && resolvePath(ctx.cwd, input.path) === note.path) {
+      if (tool === "read" && (input.offset === undefined || input.offset === 1) && input.limit === undefined) {
+        noteCall = { target: note, tool };
+      }
+      if (tool === "edit" || tool === "write") {
+        let atomic = false;
+        try {
+          atomic = canSaveNote(ctx, tool, note.path);
+        } catch { /* The normal policy still applies if the note grant cannot be checked. */ }
+        if (atomic) {
+          const existing = tool === "edit" ? noteEditSnapshot(note.path) : undefined;
+          if (existing?.linked && note.readDigest === undefined) {
+            const reason = "read the linked session note before editing it";
+            recordAudit(ctx, { session, tool, preview: `${tool} [arguments withheld]`, action: "block", source: "error", reasons: [reason], final: "blocked" });
+            return onBlocked(reason);
+          }
+          noteCall = { target: note, tool, digest: note.readDigest, version: existing?.version };
+        }
+      }
+    }
     status(ctx, `guard: judging ${tool}…`);
     let a: Assessment;
     try {
@@ -1070,7 +1141,7 @@ export default function (pi: ExtensionAPI) {
     const rec = { session, tool, preview: judgementAborted ? `${tool} [arguments withheld: judgement was aborted]` : inputChanged ? `${tool} [arguments withheld: input changed during judgement]` : batch.problem ? `${tool} [arguments withheld: invalid tool batch]` : shellChangedDuringJudgement ? `${tool} [arguments withheld: shell environment changed during judgement]` : contextChangedDuringJudgement ? `${tool} [arguments withheld: judgement context changed]` : policyChangedDuringJudgement ? `${tool} [arguments withheld: filesystem policy changed]` : auditPreview(ctx, tool, input), action: a.action, source: a.source, reasons: a.auditReasons ?? a.reasons, risk, ruleIds: a.rules?.map((r) => r.id) };
 
     const onAllowed = () => {
-      judged.set(event.toolCallId, { hash, session });
+      judged.set(event.toolCallId, { hash, session, note: noteCall });
       consecutiveBlocks = 0;
       try {
         if (changesTrees({ id: "", name: tool, arguments: input })) opaqueChanges = true;
@@ -1283,17 +1354,30 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("tool_result", async (event, ctx) => {
     const previous = judged.get(event.toolCallId);
-    judged.delete(event.toolCallId);
     if (!previous) return;
     let inspectable = true;
-    try { if (previous.hash === toolInputHash(event.toolName, event.input)) return; } catch { inspectable = false; }
+    try {
+      if (previous.hash === toolInputHash(event.toolName, event.input)) {
+        if (previous.note?.tool !== "read" || event.parentToolCallId || event.isError) judged.delete(event.toolCallId);
+        return;
+      }
+    } catch { inspectable = false; }
+    judged.delete(event.toolCallId);
     const auditText = inspectable ? auditPreview(ctx, event.toolName, event.input) : `${event.toolName} [arguments withheld: input could not be inspected]`;
     recordAudit(ctx, { session: previous.session, tool: event.toolName, preview: auditText, action: "allow", source: "drift", reasons: ["input changed after judgement"], event: "drift" });
     warn(ctx, `guard: the input of ${event.toolName} was changed by another extension after guard judged it. Load guard last.`);
   });
 
   pi.on("tool_execution_end", async (event) => {
+    const note = judged.get(event.toolCallId)?.note;
     judged.delete(event.toolCallId);
+    // Wait for the final result after extensions have had a chance to filter the read.
+    if (note?.tool !== "read" || note.target !== trustedDirs.sessionNote || event.toolName !== "read"
+      || event.isError || event.parentToolCallId || event.result?.details?.truncation) return;
+    const content = event.result?.content;
+    if (Array.isArray(content) && content.length === 1 && content[0]?.type === "text" && typeof content[0].text === "string") {
+      note.target.readDigest = createHash("sha256").update(content[0].text).digest("hex");
+    }
   });
 
   pi.registerCommand("guard", {

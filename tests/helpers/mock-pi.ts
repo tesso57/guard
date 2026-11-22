@@ -60,6 +60,10 @@ export function createMockPi(responses: Responses = {}) {
       commands.set(name, command);
     },
     registerTool(tool: Tool) { tools.set(tool.name, tool); },
+    getAllTools() {
+      const sourceInfo = { path: "<inline:mock>", source: "inline", scope: "temporary", origin: "top-level" };
+      return [...tools.values()].map(tool => ({ ...tool, sourceInfo }));
+    },
     on(name: string, handler: EventHandler) {
       const handlers = events.get(name) ?? [];
       const registered: EventHandler = (event, context) => handler(event, context);

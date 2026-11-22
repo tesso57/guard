@@ -217,7 +217,9 @@ The optional `access` field accepts `"read"` or `"write"` and defaults to `"writ
 
 Folder grants belong to the current guard instance and are not inherited by another guard instance. Extensions should emit their trust events on `session_start`.
 
-For notes stored inside the project's protected `.pi` directory, a write grant for the exact parent folder permits the built-in `write` and `edit` tools to update `.pi/_notes/<sessionId>/note.md` and `.pi/_notes/<sessionId>/factory/{plan,review,learnings}.md`. Session IDs may contain letters, digits, `_` and `-`. Other `.pi` files and shell writes remain protected. To avoid bypassing that protection, these particular note paths cannot traverse symlinks or be hard-linked, even with a grant; hard-linked files in other trusted folders retain the behavior described above.
+For project notes, a write grant for the exact parent folder permits Pi's `write` and `edit` tools to update `.pi/_notes/<sessionId>/note.md` and `.pi/_notes/<sessionId>/factory/{plan,review,learnings}.md`. Session IDs may contain letters, digits, `_` and `-`. These note paths cannot traverse symlinks. Other `.pi` files and shell writes remain protected.
+
+When the notes extension grants write access to the current session's `note.md`, Guard uses Pi's standard file tools with atomic replacement for that path. A sync client's hard link keeps the previous contents while the note path points to the updated file. Editing a linked note requires a full read under the usual read policy. If the contents change after that read, the next save requests a fresh read. Factory notes and file tools supplied by other extensions retain their existing hard-link checks.
 
 During a notes extension update, guard can honour a saved session or project `read` approval for that session's exact `note.md` locally. This requires the notes extension's grant for the parent directory and `read` in `skipModelTools`. The shortcut applies to a single read when the only omitted decisions are matching approvals and the tool-call history could be inspected.
 
