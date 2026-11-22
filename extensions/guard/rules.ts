@@ -273,9 +273,12 @@ function updateFile(file: string, scope: "project" | "global", fn: (rules: Rule[
   }
 }
 
+export function projectKey(cwd: string): string {
+  return createHash("sha256").update(cwd).digest("hex").slice(0, 16);
+}
+
 function projectFile(cwd: string): string {
-  const h = createHash("sha256").update(cwd).digest("hex").slice(0, 16);
-  return join(DATA_DIR, "projects", `${basename(cwd).replace(/[^\w.-]/g, "_")}-${h}.jsonl`);
+  return join(DATA_DIR, "projects", `${basename(cwd).replace(/[^\w.-]/g, "_")}-${projectKey(cwd)}.jsonl`);
 }
 
 const live = (r: Rule) => r.decision !== "allow" || !r.expiresAt || Date.parse(r.expiresAt) >= Date.now();

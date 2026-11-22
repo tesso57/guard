@@ -10,10 +10,11 @@ import { predictEdits } from "./edits.ts";
 import { MAX_FILE_BYTES, readBoundedText } from "./files.ts";
 import { noteEditSnapshot, registerNoteTools } from "./note-tools.ts";
 import { buildRequest, callDecisions, evaluate, MAX_ATTACHED_FILES, type ModelVerdict } from "./judge.ts";
+import { projectGuidance } from "./project-guidance.ts";
 import { redact } from "./redact.ts";
 import { clearPathCache, createTrustedDirState, isFreelyReadable, listTrustedDirs, trustDir, type TrustedDirState, isHardLinked, isInsideExact, pathLikeTokens, pathVariants, protectedReason, protectedRoots, realPath, recentlyChangedFiles, resolvePath, sensitiveReason } from "./paths.ts";
 import { atomicNoteWrite, BUILTIN_TOOLS, dynamicLoaderEnvironment, hardDeny, hasUninspectedToolInput, inputPaths, inspectBuiltinSearchExecutable, inspectExecutablePath, isTrustedSessionNoteRead, pathsStayInProject, piString, safeAllow, searchNeedsJudgement, sensitive, shellStartupRisk, usesGrepOptions, usesRipgrepConfig, writesStayPlain } from "./policy.ts";
-import { type Decision, deriveDenyPatterns, derivePatterns, describeMatch, globalAllowPatternIsReadOnly, type Match, newId, type Rule, RuleStore, type Scope, supportsAnyInputAllow } from "./rules.ts";
+import { type Decision, deriveDenyPatterns, derivePatterns, describeMatch, globalAllowPatternIsReadOnly, type Match, newId, projectKey, type Rule, RuleStore, type Scope, supportsAnyInputAllow } from "./rules.ts";
 import { isBracePathSearch, isReadOnlyArgv, normalizeArgv, type Parsed, parseShell, rgDisablesConfig, rgInfoOnly } from "./shell.ts";
 import { isSkillRead, type RegisteredSkill } from "./skill-read.ts";
 import { confirmDialog, displayText, preview } from "./ui.ts";
@@ -296,6 +297,7 @@ export default function (pi: ExtensionAPI) {
   let auditFailureNotified = false;
   let auditRecoveryPending = false;
   let stateEpoch = 0;
+  let priorGuidance: { cwd: string; text: string } | undefined;
   let noteRunSession: string | undefined;
 
   const append = (type: string, data: unknown) => pi.appendEntry(type, data);
@@ -948,6 +950,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.on("session_start", async (_e, ctx) => {
+    priorGuidance = undefined;
     const path = sessionNotePath(ctx);
     trustedDirs.sessionNote = path ? { path, ownsTool: ownsNoteTool } : undefined;
     noteRunSession = undefined;
@@ -976,7 +979,12 @@ export default function (pi: ExtensionAPI) {
     noteRunSession = event.messageType === "custom" && event.message.customType === NOTE_REQUEST ? ctx.sessionManager.getSessionId() : undefined;
     snapshotRegisteredSkills();
     const prompt = event.systemPromptOptions;
-    if (!cfg.disabled && enabled && prompt?.sections && prompt.forceSystemPrompt === undefined && activeArtifactTemplate()) {
+    if (cfg.disabled || !enabled || !prompt?.sections || prompt.forceSystemPrompt !== undefined) return;
+    if (priorGuidance?.cwd !== ctx.cwd) {
+      priorGuidance = { cwd: ctx.cwd, text: projectGuidance(ctx.cwd, ctx.sessionManager.getSessionDir()) };
+    }
+    if (priorGuidance.text) prompt.sections.guard_project_guidance = priorGuidance.text;
+    if (activeArtifactTemplate()) {
       prompt.sections.guard_artifact_lookups = "Call artifact_template list or get by itself. Wait for its result before requesting file reads or searches in the next message.";
     }
   });
@@ -1357,7 +1365,7 @@ export default function (pi: ExtensionAPI) {
     if (saved.length) {
       try { ctx.ui.notify(displayText(`guard: saved ${choice.scope} ${choice.decision} rule: ${saved.map((r) => `${describeMatch(r.tool, r.match)} [${r.id}]`).join(", ")} (undo: /guard rules rm <id>)`), "info"); } catch {   }
     }
-    recordAudit(ctx, { ...rec, ...(retryOverride ? { event: "override" as const } : {}), final: choice.decision === "allow" ? "run" : "blocked", choice: `${choice.decision}:${choice.scope}`, ruleIds: [...(rec.ruleIds ?? []), ...saved.map((r) => r.id)] });
+    recordAudit(ctx, { ...rec, project: projectKey(ctx.cwd), ...(retryOverride ? { event: "override" as const } : {}), final: choice.decision === "allow" ? "run" : "blocked", choice: `${choice.decision}:${choice.scope}`, ruleIds: [...(rec.ruleIds ?? []), ...saved.map((r) => r.id)] });
 
     if (choice.decision === "allow") {
       onAllowed();
