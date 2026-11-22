@@ -30,6 +30,9 @@ const MAX_BLOCKED_RETRIES = 500;
 const MAX_STATE_RECHECKS = 3;
 const MAX_BATCH_CALLS = 128;
 const MAX_PREFLIGHT_CALLS = 8;
+const MAX_SHORTCUT_RELATED_DECISIONS = 5;
+const MAX_MODEL_RELATED_DECISIONS = 10;
+const MAX_RELATED_DECISION_CHECKS = 20;
 
 type ToolCallLike = { id: string; name: string; arguments: any };
 type BatchContext = { earlier: ToolCallLike[]; peers: ToolCallLike[]; historyBoundary?: number; problem?: string };
@@ -463,6 +466,7 @@ export default function (pi: ExtensionAPI) {
 
   function context(ctx: ExtensionContext, callId: string, tool: string, parsed: Parsed | undefined, siblings: ToolCallLike[], peers: ToolCallLike[], historyBoundary?: number) {
     const users: ({ content: unknown } | AskAnswer)[] = [];
+    let latestUserMessage: { content: unknown } | undefined;
     const readAnswer = readAskAnswers();
     const calls: ToolCallLike[] = [];
     const siblingIds = new Set(siblings.map((s) => s.id));
@@ -487,7 +491,10 @@ export default function (pi: ExtensionAPI) {
       }
       if (e.type !== "message") continue;
       const m = e.message;
-      if (m?.role === "user") pushBounded(users, { content: m.content }, cfg.contextUserMessages);
+      if (m?.role === "user" && cfg.contextUserMessages) {
+        latestUserMessage = { content: m.content };
+        pushBounded(users, latestUserMessage, cfg.contextUserMessages);
+      }
       if (m?.role === "assistant" && Array.isArray(m.content)) {
         const current = entryIndex < boundary ? -1 : m.content.findIndex((c: any) => c?.type === "toolCall" && c.id === callId);
         const end = current < 0 ? m.content.length : current;
@@ -498,6 +505,8 @@ export default function (pi: ExtensionAPI) {
         if (current >= 0) break;
       }
     }
+    // A run of answers to individual questions can fill the recent-message window.
+    if (latestUserMessage && !users.includes(latestUserMessage)) users.unshift(latestUserMessage);
     for (const s of siblings) if (!seenSiblings.has(s.id)) addCall(s, true);
 
     const roots = protectedRoots(ctx.cwd, ctx.sessionManager.getSessionDir());
@@ -656,9 +665,9 @@ export default function (pi: ExtensionAPI) {
     const config = cfg;
     const key = stableHash([callId, tool, input, light, ctx.cwd, cx.attachedFiles, cx.userMessages, cx.history, cx.historyIncomplete, cx.attachmentsIncomplete, past, config, judgementStateKey]);
     const run = async () => {
-      const { body, truncated, redacted } = buildRequest(config, { tool, input, cwd: ctx.cwd, callId, past, light, ...cx, sessionId: ctx.sessionManager.getSessionId() });
+      const { body, truncated, redacted, currentAuthorizationAsked } = buildRequest(config, { tool, input, cwd: ctx.cwd, callId, past, light, ...cx, sessionId: ctx.sessionManager.getSessionId() });
       return evaluate(config, await callDecisions(config, body, signal), {
-        light, truncated, redacted,
+        light, truncated, redacted, currentAuthorizationAsked,
         expectPastDenial: !light && past.some((r) => r.decision === "deny"),
         expectPastApproval: !light && past.some((r) => r.decision === "allow"),
       });
@@ -761,9 +770,15 @@ export default function (pi: ExtensionAPI) {
     }
 
     const allRelated = store.related(tool, input, ctx.cwd, parsed);
-    const related = allRelated.slice(0, 5);
-    const past = related.filter((rule) => !privatePastRule(ctx, rule));
-    const historyIncomplete = cx.historyIncomplete || past.length !== related.length || allRelated.length > related.length;
+    const past: Rule[] = [];
+    for (const related of allRelated.slice(0, MAX_RELATED_DECISION_CHECKS)) {
+      if (!privatePastRule(ctx, related)) past.push(related);
+      if (past.length >= MAX_MODEL_RELATED_DECISIONS) break;
+    }
+    const relatedOmitted = past.length !== allRelated.length;
+    const modelHistoryIncomplete = cx.historyIncomplete || relatedOmitted;
+    // A larger window improves the full check without expanding the cases that can skip it.
+    const historyIncomplete = modelHistoryIncomplete || allRelated.length > MAX_SHORTCUT_RELATED_DECISIONS;
     const ruleVersion = store.version;
     const sessionChanged = (): Assessment => ({ ...base, action: "block", source: "error", reasons: ["session changed during judgement"] });
     const shellEnvironment = parsed ? shellEnvironmentHash(parsed) : undefined;
@@ -842,7 +857,7 @@ export default function (pi: ExtensionAPI) {
       if (exists && (reads.length ? reads : [ctx.cwd]).every((p) => isFreelyReadable(p, ctx.cwd, trustedDirs, roots))) return { ...base, action: "allow", source: "skip", reasons: [] };
     }
 
-    const judgeContext = historyIncomplete === cx.historyIncomplete ? cx : { ...cx, historyIncomplete };
+    const judgeContext = modelHistoryIncomplete === cx.historyIncomplete ? cx : { ...cx, historyIncomplete: modelHistoryIncomplete };
     const cacheKey = stableHash([tool, input, ctx.cwd, judgeContext.attachedFiles, judgeContext.userMessages, judgeContext.history, judgeContext.historyIncomplete, judgeContext.attachmentsIncomplete, store.version, past, cfg, judgementStateKey]);
     const cached = verdictCache.get(cacheKey);
     if (cached && Date.now() - cached.at < cfg.verdictCacheMs && !siblingRun && !uncertainSearch && !(opaqueChanges && cx.changedFilesRun)) return { ...cached.a, source: "cache" };
@@ -855,7 +870,7 @@ export default function (pi: ExtensionAPI) {
       if (stateChanged()) return recheck();
       if (contextChanged()) return changedContext();
       if (policyChanged()) return changedPolicy();
-      if (allRelated.length > related.length || past.length !== related.length) v.reasons.push("some related decisions were omitted from judgement");
+      if (relatedOmitted) v.reasons.push("some related decisions were omitted from judgement");
       const t = cfg.thresholds;
       const rememberAllow =
         !!patterns && v.action !== "block" && (v.pHigh ?? 1) < t.confirmPHigh && (v.exfiltration ?? 1) < t.confirmExfil &&

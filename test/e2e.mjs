@@ -195,11 +195,13 @@ const srv = http.createServer((req, res) => {
         leakedHistory ||= serializedBody.includes(fakeHistorySecret);
       }
       if (args.command === redactedPastCommand) {
-        sawMaskedPast ||= body.input.some((item) => item.role === "user" && Array.isArray(item.content) && item.content.some((part) => part.type === "input_json" && Array.isArray(part.data) && part.data.some((rule) => typeof rule.pattern === "string" && rule.pattern.includes("[REDACTED sk-…]"))));
+        const context = JSON.parse(body.input.at(-2).output);
+        sawMaskedPast ||= context.pastDecisions?.some((rule) => typeof rule.pattern === "string" && rule.pattern.includes("[REDACTED sk-…]"));
         leakedPast ||= serializedBody.includes(fakePastSecret);
       }
       if (args.command === redactedApprovalCommand) {
-        sawMaskedApproval ||= body.input.some((item) => item.role === "user" && Array.isArray(item.content) && item.content.some((part) => part.type === "input_json" && Array.isArray(part.data) && part.data.some((rule) => rule.decision === "allow" && typeof rule.pattern === "string" && rule.pattern.includes("[REDACTED sk-…]"))));
+        const context = JSON.parse(body.input.at(-2).output);
+        sawMaskedApproval ||= context.pastDecisions?.some((rule) => rule.decision === "allow" && typeof rule.pattern === "string" && rule.pattern.includes("[REDACTED sk-…]"));
         leakedApproval ||= serializedBody.includes(fakePastSecret);
         sawApprovalQuestion ||= body.questions.some((question) => question.name === "covered_by_past_approval");
       }
